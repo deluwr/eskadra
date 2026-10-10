@@ -11,7 +11,7 @@
 #   ESKADRA_TLS=ip|domain|self   сертификат панели без вопроса (ip/domain — Let's Encrypt; это согласие с его условиями)
 #   ESKADRA_DOMAIN=panel.example  домен для ESKADRA_TLS=domain
 #   ESKADRA_XUI=keep|remove      что делать с найденным 3x-ui без вопроса
-set -euo pipefail
+set -Eeuo pipefail
 
 REPO="${ESKADRA_REPO:-deluwr/eskadra}"
 ESK_VERSION="${ESKADRA_VERSION:-latest}"
@@ -25,6 +25,8 @@ c_ok=$'\e[32m'; c_warn=$'\e[33m'; c_err=$'\e[31m'; c_b=$'\e[1m'; c_0=$'\e[0m'
 say()  { printf '%s\n' "${c_b}==>${c_0} $*"; }
 warn() { printf '%s\n' "${c_warn}!${c_0} $*" >&2; }
 die()  { printf '%s\n' "${c_err}✗ $*${c_0}" >&2; exit 1; }
+
+trap 'die "ошибка в строке $LINENO: $BASH_COMMAND"' ERR   # без этого set -e обрывает установку молча
 
 [ "$(id -u)" -eq 0 ] || die "запустите под root (sudo -i)"
 # данные ОС читаем в подоболочке: os-release определяет свои VERSION, NAME, ID и затёр бы переменные установщика
@@ -128,7 +130,8 @@ free_port() {  # случайный свободный порт, не извес
   die "не нашёл свободный порт"
 }
 
-rand_path() { tr -dc 'a-z0-9' < /dev/urandom | head -c 12; }
+# не «tr < /dev/urandom | head»: head закрывает канал, tr получает SIGPIPE, и pipefail молча роняет установку
+rand_path() { local s=""; while [ ${#s} -lt 12 ]; do s+="$(head -c 256 /dev/urandom | tr -dc 'a-z0-9')"; done; echo "${s:0:12}"; }
 
 FRESH=0
 [ -f "$ENVF" ] || FRESH=1

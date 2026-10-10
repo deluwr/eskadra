@@ -131,7 +131,9 @@ cmd_port() {
 cmd_path() {
   local new="${1:-}"
   [ -n "$new" ] || new="$(prompt "Новый путь (Enter — случайный):")"
-  [ -n "$new" ] || new="$(tr -dc 'a-z0-9' < /dev/urandom | head -c 12)"
+  if [ -z "$new" ]; then  # не «tr < /dev/urandom | head»: SIGPIPE + pipefail роняют скрипт молча
+    while [ ${#new} -lt 12 ]; do new+="$(head -c 256 /dev/urandom | tr -dc 'a-z0-9')"; done; new="${new:0:12}"
+  fi
   [[ "$new" =~ ^[A-Za-z0-9_-]+$ ]] || die "путь: латиница, цифры, - и _"
   setenv FLEET_BASE_PATH "/$new/"; restart; cmd_url
 }
