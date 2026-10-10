@@ -375,13 +375,58 @@ cmd_update() {
   ESKADRA_REPO="$repo" ESKADRA_VERSION="${1:-latest}" bash <(curl -fsSL "https://raw.githubusercontent.com/$repo/main/scripts/install.sh")
 }
 
-cmd_uninstall() {
-  yes_no "Удалить Эскадру? Данные в $DATA сохранятся." || exit 0
-  systemctl disable --now eskadra eskadra-certbot.timer 2>/dev/null || true
-  rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-certbot.* /usr/local/bin/eskadra
-  rm -rf "$PREFIX"
+fw_close() {  # закрыть в ufw / firewalld все порты Эскадры (панель, подписки, ACME)
+  local n port
+  if ufw_on; then
+    # номера правил с комментарием eskadra, с конца — чтобы номера не сдвигались
+    for n in $(ufw status numbered | grep -i 'eskadra' | sed -nE 's/^\[ *([0-9]+)\].*/\1/p' | sort -rn); do
+      ufw --force delete "$n" >/dev/null || true
+    done
+  fi
+  if firewalld_on; then
+    for port in "$(getenv FLEET_PORT)" "$(sub_port 2>/dev/null || true)"; do
+      [ -n "$port" ] && firewall-cmd -q --permanent --remove-port="$port/tcp" 2>/dev/null || true
+    done
+    firewall-cmd -q --reload || true
+  fi
+}
+
+cmd_uninstall() {  # cmd_uninstall [--purge]
+  local purge="${1:-}" unit
+  if [ -z "$purge" ]; then
+    printf '\n  %sУдаление Эскадры%s\n' "$c_b" "$c_0"
+    printf '   1) Удалить программу, сохранить данные и настройки (%s, %s) — можно поставить заново и продолжить\n' "$DATA" "$ETC"
+    printf '   2) Удалить полностью: база, ключи узлов, бэкапы, настройки, сертификат, порты в firewall, пользователь eskadra\n'
+    printf '   0) Отмена\n'
+    case "$(prompt "  Выберите [0]:" 0)" in 1) purge=keep ;; 2) purge=--purge ;; *) return 0 ;; esac
+  fi
+  if [ "$purge" = --purge ]; then
+    warn "Будут удалены база панели, ключи SSH к узлам и локальные бэкапы. Узлы продолжат работать, но управлять ими будет нечем:"
+    warn "на узлах останутся пользователь fleet, nodekit и правила firewall — их снимают на самих узлах."
+    [ "$(prompt "  Для подтверждения введите УДАЛИТЬ:")" = "УДАЛИТЬ" ] || { ok "отменено"; return 0; }
+    fw_close
+  else
+    yes_no "  Удалить программу? Данные в $DATA и настройки в $ETC сохранятся." || return 0
+  fi
+  # по одному юниту: «disable --now a b» падает целиком, если одного юнита нет, и панель оставалась запущенной
+  for unit in eskadra.service eskadra-certbot.timer eskadra-certbot.service; do
+    systemctl disable --now "$unit" >/dev/null 2>&1 || systemctl stop "$unit" >/dev/null 2>&1 || true
+  done
+  pkill -u eskadra >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-certbot.*
   systemctl daemon-reload
-  ok "удалено. Данные и настройки: $DATA, $ETC, /etc/letsencrypt/live/eskadra (удалите вручную, если не нужны)"
+  if [ "$purge" = --purge ]; then
+    [ -x "$CERTBOT" ] && "$CERTBOT" delete --cert-name eskadra --non-interactive >/dev/null 2>&1 || true
+    rm -rf /etc/letsencrypt/live/eskadra /etc/letsencrypt/archive/eskadra /etc/letsencrypt/renewal/eskadra.conf
+    rm -rf "$PREFIX" "$DATA" "$ETC" /var/log/eskadra-install.log
+    userdel eskadra >/dev/null 2>&1 || true
+    rm -f /usr/local/bin/eskadra
+    ok "Эскадра удалена полностью. Поставить заново: bash <(curl -fsSL https://raw.githubusercontent.com/deluwr/eskadra/main/scripts/install.sh)"
+  else
+    rm -rf "$PREFIX"; rm -f /usr/local/bin/eskadra
+    ok "программа удалена. Данные: $DATA, настройки: $ETC — повторная установка подхватит их. Полностью: eskadra uninstall --purge"
+  fi
+  exit 0   # самого скрипта и панели больше нет — в меню возвращаться некуда
 }
 
 usage() {
@@ -397,7 +442,8 @@ usage() {
   conflicts               3x-ui / xray / sing-box на этом сервере: дополнить или удалить
   reset-password [логин]  новый пароль администратора
   disable-2fa <логин>     отключить 2FA
-  admins | backup | update [версия] | uninstall
+  admins | backup | update [версия]
+  uninstall [--purge]     удалить программу (данные сохраняются) или полностью
 EOF
 }
 
@@ -467,7 +513,7 @@ case "${1:-menu}" in
   admins) cli admins ;;
   backup) cli backup ;;
   update) cmd_update "${2:-}" ;;
-  uninstall) cmd_uninstall ;;
+  uninstall) cmd_uninstall "${2:-}" ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;
 esac

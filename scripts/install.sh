@@ -29,6 +29,10 @@ die()  { printf '%s\n' "${c_err}✗ $*${c_0}" >&2; exit 1; }
 trap 'die "ошибка в строке $LINENO: $BASH_COMMAND"' ERR   # без этого set -e обрывает установку молча
 
 [ "$(id -u)" -eq 0 ] || die "запустите под root (sudo -i)"
+# весь вывод дублируется в лог: если SSH оборвётся, видно, где остановилась установка
+LOG=/var/log/eskadra-install.log
+exec > >(tee -a "$LOG") 2>&1
+printf '\n── %s ──\n' "$(date '+%F %T')" >> "$LOG"
 # данные ОС читаем в подоболочке: os-release определяет свои VERSION, NAME, ID и затёр бы переменные установщика
 OS_ID="$( [ -r /etc/os-release ] && . /etc/os-release; echo "${ID:-}" )"
 OS_NAME="$( [ -r /etc/os-release ] && . /etc/os-release; echo "${PRETTY_NAME:-неизвестная ОС}" )"
@@ -135,6 +139,7 @@ rand_path() { local s=""; while [ ${#s} -lt 12 ]; do s+="$(head -c 256 /dev/uran
 
 FRESH=0
 [ -f "$ENVF" ] || FRESH=1
+SETUP_MARK="$ETC/.setup-done"   # появляется, когда первичная настройка прошла до конца (иначе повторный запуск её продолжит)
 
 install_node
 install_app
@@ -199,20 +204,27 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 
-if [ "$FRESH" = 1 ]; then
-  cli() { runuser -u eskadra -- env $(grep -v '^#' "$ENVF" | xargs) "$PREFIX/node/bin/node" "$PREFIX/app/server/dist/cli.js" "$@"; }
+cli() { runuser -u eskadra -- env $(grep -v '^#' "$ENVF" | xargs) "$PREFIX/node/bin/node" "$PREFIX/app/server/dist/cli.js" "$@"; }
+envget() { grep -E "^$1=" "$ENVF" | tail -1 | cut -d= -f2- || true; }
+# установки до появления отметки: если владелец уже создан, настройка давно пройдена
+if [ "$FRESH" = 0 ] && [ ! -f "$SETUP_MARK" ] && [[ "$(cli status 2>/dev/null || true)" =~ \"admins\":[1-9] ]]; then
+  date -u +%FT%TZ > "$SETUP_MARK"
+fi
+if [ ! -f "$SETUP_MARK" ]; then
   [ -n "$IP" ] && cli executor "$IP" >/dev/null
-  SUBPORT="$(cli sub-port random "$IP")"
-  # порты панели и подписок — в том firewall хоста, который включён (ufw в Debian/Ubuntu, firewalld в RHEL/Fedora/openSUSE)
-  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    ufw allow "$PORT/tcp" comment 'eskadra panel' >/dev/null
-    ufw allow "$SUBPORT/tcp" comment 'eskadra subscriptions' >/dev/null
-    say "ufw: открыты порты $PORT и $SUBPORT"
-  fi
-  if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
-    firewall-cmd -q --permanent --add-port="$PORT/tcp" --add-port="$SUBPORT/tcp" && firewall-cmd -q --reload
-    say "firewalld: открыты порты $PORT и $SUBPORT"
-  fi
+fi
+PORT="$(envget FLEET_PORT)"
+SUBPORT="$(cli sub-port "" "$( [ -f "$SETUP_MARK" ] || echo "$IP")")"   # существующий порт подписок сохраняется
+# Порты панели и подписок — в том firewall хоста, который включён (ufw в Debian/Ubuntu, firewalld в RHEL/Fedora/openSUSE).
+# Проверяется при каждом запуске: если прошлая установка оборвалась, порты всё равно откроются.
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow "$PORT/tcp" comment 'eskadra panel' >/dev/null
+  ufw allow "$SUBPORT/tcp" comment 'eskadra subscriptions' >/dev/null
+  say "ufw: открыты порты $PORT и $SUBPORT"
+fi
+if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd -q --permanent --add-port="$PORT/tcp" --add-port="$SUBPORT/tcp" && firewall-cmd -q --reload
+  say "firewalld: открыты порты $PORT и $SUBPORT"
 fi
 
 systemctl enable --now eskadra >/dev/null 2>&1 || true
@@ -220,7 +232,8 @@ systemctl restart eskadra
 sleep 2
 systemctl is-active --quiet eskadra || { journalctl -u eskadra -n 30 --no-pager; die "панель не запустилась"; }
 
-if [ "$FRESH" = 1 ]; then
+if [ ! -f "$SETUP_MARK" ]; then
+  [ "$FRESH" = 1 ] || say "Прошлая установка не дошла до конца — продолжаю первичную настройку"
   # Уже установленные ядра: дополнить или удалить (порты панели и подписок с ними не пересекаются в любом случае)
   say "Сторонние VPN-ядра на этом сервере"
   /usr/local/bin/eskadra conflicts || warn "проверку ядер можно повторить: eskadra conflicts"
@@ -242,6 +255,7 @@ if [ "$FRESH" = 1 ]; then
     domain) /usr/local/bin/eskadra cert letsencrypt domain "${ESKADRA_DOMAIN:-}" || warn "остался самоподписанный сертификат; повторить: eskadra cert letsencrypt domain" ;;
     *) warn "самоподписанный сертификат: браузер предупредит, сверьте отпечаток. Let's Encrypt: eskadra cert letsencrypt" ;;
   esac
+  date -u +%FT%TZ > "$SETUP_MARK"
 fi
 
 printf '\n%s\n' "${c_ok}${c_b}Эскадра установлена.${c_0}"

@@ -23,7 +23,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/deluwr/eskadra/main/scripts/
 - если включён ufw — открывает в нём только эти два порта;
 - печатает одноразовую ссылку создания владельца.
 
-Повторный запуск той же команды обновляет панель, сохраняя данные (`/var/lib/eskadra`) и настройки (`/etc/eskadra`).
+Повторный запуск той же команды обновляет панель, сохраняя данные (`/var/lib/eskadra`) и настройки (`/etc/eskadra`). Если установка оборвалась (например, отвалился SSH), повторный запуск продолжит первичную настройку с места обрыва; весь вывод пишется в `/var/log/eskadra-install.log`.
 
 Без вопросов: `ESKADRA_TLS=ip|domain|self`, `ESKADRA_DOMAIN=…`, `ESKADRA_XUI=keep|remove` (выбор Let's Encrypt означает согласие с его условиями).
 
@@ -65,7 +65,7 @@ eskadra
 | `eskadra cert letsencrypt [ip / domain <домен>]` | выпустить сертификат Let's Encrypt |
 | `eskadra conflicts` | 3x-ui / xray / sing-box на этом сервере: дополнить или удалить |
 | `eskadra update [версия]` | обновить |
-| `eskadra uninstall` | удалить (данные сохраняются) |
+| `eskadra uninstall [--purge]` | удалить программу (данные сохраняются) или полностью — с базой, ключами, сертификатом и портами в firewall |
 
 ## Подключение нод
 
