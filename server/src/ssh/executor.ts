@@ -10,6 +10,16 @@ export interface SshTarget {
   privateKey: string;
   /** Закреплённый вручную fingerprint (SHA256:...). Без него подключение запрещено (TOFU выключен, §5.3). */
   hostKeyFp: string | null;
+  /** Подготовка пути до узла перед подключением (поднять служебный туннель, §5.8). */
+  prepare?: () => Promise<void>;
+  /** Описание пути для сообщений об ошибках, если подключение идёт не напрямую. */
+  via?: string;
+}
+
+/** Ошибка соединения через туннель — с подсказкой, что проверить. */
+function viaError(t: { via?: string }, e: Error): Error {
+  if (!t.via || e instanceof HostKeyError || (e as Error & { level?: string }).level === 'client-authentication') return e;
+  return new Error(`SSH через ${t.via}: ${e.message}. Проверьте, что bootstrap-сниппет выполнен на узле (служба fleet-mgmt работает) и порт туннеля открыт в firewall хостера`);
 }
 
 export interface ExecResult {
@@ -32,15 +42,16 @@ export function fingerprintOf(key: Buffer): { fp: string; algo: string } {
 }
 
 /** Получить host key без аутентификации — для ручной сверки при добавлении сервера (шаг 2 runbook). */
-export function fetchHostKey(host: string, port: number, timeoutMs = 10000): Promise<{ fp: string; algo: string }> {
-  return new Promise((resolve, reject) => {
+export async function fetchHostKey(host: string, port: number, timeoutMs = 10000, path: { prepare?: () => Promise<void>; via?: string } = {}): Promise<{ fp: string; algo: string }> {
+  await path.prepare?.();
+  return new Promise<{ fp: string; algo: string }>((resolve, reject) => {
     const c = new Client();
     let got: { fp: string; algo: string } | null = null;
     const done = () => {
       c.end();
       if (got) resolve(got);
     };
-    c.on('error', (e) => (got ? done() : reject(e)));
+    c.on('error', (e) => (got ? done() : reject(viaError(path, e))));
     c.on('ready', done);
     c.connect({
       host,
@@ -83,13 +94,14 @@ export class SshSession {
   }
 }
 
-function connect(t: SshTarget, timeoutMs: number): Promise<Client> {
-  return new Promise((resolve, reject) => {
+async function connect(t: SshTarget, timeoutMs: number): Promise<Client> {
+  await t.prepare?.();
+  return new Promise<Client>((resolve, reject) => {
     if (!t.hostKeyFp) return reject(new HostKeyError('host key is not pinned yet'));
     const c = new Client();
     let mismatch: string | null = null;
     c.on('ready', () => resolve(c));
-    c.on('error', (e) => reject(mismatch ? new HostKeyError(mismatch) : e));
+    c.on('error', (e) => reject(mismatch ? new HostKeyError(mismatch) : viaError(t, e)));
     c.connect({
       host: t.host,
       port: t.port,

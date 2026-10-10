@@ -138,6 +138,7 @@ export class Ops {
     const ssh = json<number[]>(s.ssh_ports, []);
     if (ssh.includes(port)) return `порт ${port} — это SSH`;
     if ([10085, 51820].includes(port)) return `порт ${port} зарезервирован`;
+    if (s.mgmt_port === port && proto === 'tcp') return `порт ${port} — служебный туннель управления`;
     const g = this.ctx.db.prepare('SELECT port_range FROM groups WHERE name = ?').get(s.group_name) as { port_range: string } | undefined;
     if (g && !inRange(port, g.port_range)) return `порт ${port} вне разрешённого диапазона группы (${g.port_range})`;
     const raw = this.ctx.db.prepare('SELECT raw FROM preflight_reports WHERE server_id = ? ORDER BY id DESC LIMIT 1').get(s.id) as { raw: string } | undefined;

@@ -17,6 +17,14 @@ export interface ServerRow {
   fail_since: string | null; cores: string; fw_plan: string | null; fw_plan_hash: string | null; fw_pending_until: string | null;
   admin_ips: string; kit_version: string | null; config_dirty: number; arch: string | null;
   core_mode: 'auto' | 'own' | 'xui'; xui_user: string | null; xui_pass_sealed: string | null; external_cores: string;
+  /** Канал управления (§5.8): SSH напрямую или внутри служебного туннеля VLESS-REALITY. */
+  mgmt_mode: 'direct' | 'tunnel'; mgmt_port: number | null; mgmt_uuid: string | null; mgmt_key_sealed: string | null;
+  mgmt_pub: string | null; mgmt_sid: string | null; mgmt_sni: string | null; mgmt_local_port: number | null;
+}
+
+/** С каких адресов узел может видеть панель: executor.ips, а для туннеля — ещё и сам узел (127.0.0.1). */
+export function expectedPanelIps(s: ServerRow, executorIps: string[]): string[] {
+  return s.mgmt_mode === 'tunnel' ? ['127.0.0.1', '::1', ...executorIps] : executorIps;
 }
 
 export interface ExternalCore { name: string; active: string; version: string }
@@ -65,6 +73,9 @@ export class HttpError extends Error {
 
 /** Общий контекст: база, шифрование секретов, доступ к узлам. */
 export class Ctx {
+  /** Клиент служебных туннелей на главном сервере (задаётся в main; в тестах — нет). */
+  mgmt: { ensure(): Promise<void>; status(): { running: boolean; version: string | null; error: string | null } } | null = null;
+
   constructor(readonly db: Db, readonly sealer: Sealer) {}
 
   server(id: string): ServerRow {
@@ -88,12 +99,16 @@ export class Ctx {
   executorIps = () => getSetting<string[]>(this.db, 'executor.ips', []);
 
   target(r: ServerRow): SshTarget {
+    const base = { username: r.ssh_user, privateKey: this.sealer.open(r.key_priv_sealed).toString('utf8'), hostKeyFp: r.host_key_fp };
+    if (r.mgmt_mode !== 'tunnel') return { ...base, host: r.host, port: r.ssh_port };
+    // через туннель: локальный порт Xray-клиента на главном сервере; host key узла сверяется как обычно
+    if (!r.mgmt_local_port) throw new HttpError(409, 'у узла нет данных служебного туннеля — переключите канал заново');
     return {
-      host: r.host,
-      port: r.ssh_port,
-      username: r.ssh_user,
-      privateKey: this.sealer.open(r.key_priv_sealed).toString('utf8'),
-      hostKeyFp: r.host_key_fp,
+      ...base, host: '127.0.0.1', port: r.mgmt_local_port, via: `туннель до ${r.host}:${r.mgmt_port}`,
+      prepare: async () => {
+        if (!this.mgmt) throw new Error('клиент служебных туннелей не запущен');
+        await this.mgmt.ensure();
+      },
     };
   }
 

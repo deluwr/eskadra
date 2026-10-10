@@ -18,6 +18,16 @@ export interface Profile {
   targetName: string;
 }
 
+/**
+ * Локальные и частные адреса: пользовательский трафик туда не выпускается. Иначе VPN-пользователь мог бы
+ * открыть через своё подключение API ядра (127.0.0.1:10085), SSH узла «с самого узла» (from=127.0.0.1, §5.8)
+ * или сервисы внутренней сети хостера.
+ */
+export const PRIVATE_NETS = [
+  '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16',
+  '::1/128', '::/128', 'fc00::/7', 'fe80::/10',
+];
+
 export class Vpn {
   constructor(private readonly ctx: Ctx) {}
 
@@ -128,7 +138,12 @@ export class Vpn {
       { tag: 'api', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } },
     ];
     const outbounds: object[] = [{ tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' }];
-    const rules: object[] = [{ type: 'field', inboundTag: ['api'], outboundTag: 'api' }, { type: 'field', protocol: ['bittorrent'], outboundTag: 'block' }];
+    const rules: object[] = [
+      { type: 'field', inboundTag: ['api'], outboundTag: 'api' },
+      // раньше правил пользователей; домены резолвятся для этой проверки (domainStrategy IPOnDemand)
+      { type: 'field', ip: PRIVATE_NETS, outboundTag: 'block' },
+      { type: 'field', protocol: ['bittorrent'], outboundTag: 'block' },
+    ];
     const balancers: object[] = [];
 
     for (const ib of ibs) {
@@ -176,7 +191,7 @@ export class Vpn {
         settings: { clients, decryption: 'none' },
         streamSettings: {
           network: 'tcp', security: 'reality',
-          realitySettings: { show: false, target: `${sni[0] ?? 'www.microsoft.com'}:443`, serverNames: sni, privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : '', shortIds: [ib.short_id ?? ''] },
+          realitySettings: { show: false, target: `${sni[0] ?? 'www.apple.com'}:443`, serverNames: sni, privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : '', shortIds: [ib.short_id ?? ''] },
         },
         sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'] },
       });
@@ -188,7 +203,7 @@ export class Vpn {
       policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true } }, system: { statsInboundUplink: false } },
       inbounds,
       outbounds,
-      routing: { domainStrategy: 'AsIs', rules, balancers },
+      routing: { domainStrategy: 'IPOnDemand', rules, balancers },
     };
   }
 
@@ -219,7 +234,7 @@ export class Vpn {
       streamSettings: JSON.stringify({
         network: 'tcp', security: 'reality', externalProxy: [],
         realitySettings: {
-          show: false, xver: 0, dest: `${sni[0] ?? 'www.microsoft.com'}:443`, serverNames: sni,
+          show: false, xver: 0, dest: `${sni[0] ?? 'www.apple.com'}:443`, serverNames: sni,
           privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : '', minClient: '', maxClient: '', maxTimediff: 0,
           shortIds: [ib.short_id ?? ''], settings: { publicKey: ib.public_key ?? '', fingerprint: t.fingerprint, serverName: '', spiderX: '/' },
         },
@@ -250,6 +265,8 @@ export class Vpn {
         };
       }),
       outbounds: [{ type: 'direct', tag: 'direct' }],
+      // домен сначала резолвится, затем локальные и частные адреса отклоняются (sing-box ≥ 1.11)
+      route: { rules: [{ action: 'resolve' }, { ip_cidr: PRIVATE_NETS, action: 'reject' }] },
     };
   }
 

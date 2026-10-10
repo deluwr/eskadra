@@ -107,7 +107,12 @@ function Onboarding({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
         <p className="small">Выполните на сервере под <b>root</b>. Сниппет только <b>добавляет</b> пользователя <code>fleet</code> с ключом панели и временный sudo — существующие ключи, пароли, порты и firewall не трогает.</p>
         <div className="flex"><a className="btn" href={`api/v1/servers/${s.id}/bootstrap.sh`} download>Скачать сниппет</a><span className="k">и запустить со своей машины (спросит root-пароль сервера):</span></div>
         <CopyBlock text={cmd} />
-        <details><summary className="k" style={{ cursor: 'pointer' }}>Показать сниппет целиком</summary><CopyBlock text={d.snippet} /></details>
+        {s.mgmt_mode === 'tunnel' && (
+          <div className="alert info">Канал — <b>служебный туннель</b>: сниппет ещё поставит на узле Xray <code>fleet-mgmt</code> (порт <code>{s.mgmt.port}/tcp</code>). Если у хостера есть свой firewall — откройте в нём этот порт. Если SSH с вашей машины до узла не проходит, выполните сниппет в консоли хостера.</div>
+        )}
+        {d.snippet
+          ? <details><summary className="k" style={{ cursor: 'pointer' }}>Показать сниппет целиком</summary><CopyBlock text={d.snippet} /></details>
+          : <p className="k">Сниппет туннеля содержит ключ узла и доступен только администратору.</p>}
       </Step>
       <Step n={2} title="Сверка host key" done={pinned} cur={!pinned}><HostKeyStep d={d} onChange={onChange} /></Step>
       <Step n={3} title="Вход по ключу и sudo" done={connected} cur={pinned && !connected} off={!pinned}><CheckStep d={d} onChange={onChange} /></Step>
@@ -371,6 +376,7 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         <Switch label="Терминал" on={s.ssh_mode === 'shell'} disabled={busy || s.sudo_mode !== 'restricted'} onChange={(v) => void run(async () => { await api.post(`/api/v1/servers/${s.id}/ssh-mode`, { mode: v ? 'shell' : 'strict' }); onChange(); })} />
       </div>
       {s.ssh_mode === 'shell' && <Terminal id={s.id} />}
+      <MgmtRow d={d} onChange={onChange} />
       <div className="row">
         <div className="row-text"><b>Прямой доступ пользователей</b><span className="k">Профиль «{s.name} · напрямую» попадает в подписки. Узел виден снаружи.</span></div>
         <Switch label="Прямой доступ" on={!!s.direct_access} disabled={busy} onChange={(v) => void patch({ directAccess: v })} />
@@ -388,6 +394,39 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
       </div>
       <div style={{ padding: '0 20px 14px' }}><ErrorBox error={error} /></div>
     </section>
+  );
+}
+
+/** Канал управления (§5.8): напрямую или через служебный туннель. Смена требует повторного сниппета на узле. */
+function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
+  const s = d.server;
+  const { busy, error, run } = useAsync();
+  const [ask, setAsk] = useState<'direct' | 'tunnel' | null>(null);
+  const st = s.mgmt.client;
+  return (
+    <div className="row stack" style={{ alignItems: 'stretch' }}>
+      <div className="flex" style={{ justifyContent: 'space-between' }}>
+        <div className="row-text">
+          <b>Канал управления</b>
+          <span className="k">
+            {s.mgmt_mode === 'tunnel'
+              ? <>SSH панели идёт внутри VLESS-REALITY: порт узла <code>{s.mgmt.port}/tcp</code>, маскировка под <code>{s.mgmt.sni}</code>. {st ? (st.running ? `Клиент туннелей работает (Xray ${st.version ?? '?'}).` : st.error ? `Клиент туннелей: ${st.error}` : 'Клиент туннелей запустится при первом подключении.') : ''}</>
+              : 'SSH напрямую с адреса главного сервера. Если главный сервер в РФ и SSH режется — переключите на туннель.'}
+          </span>
+        </div>
+        <Seg value={s.mgmt_mode} label="Канал управления" options={[['direct', 'напрямую'], ['tunnel', 'туннель']]} onChange={(v) => setAsk(v === s.mgmt_mode ? null : v)} />
+      </div>
+      {ask && (
+        <div className="alert warn stack">
+          <span>Панель сразу начнёт подключаться {ask === 'tunnel' ? 'через туннель' : 'напрямую'}. Пока вы не выполните обновлённый bootstrap-сниппет на узле (шаг 1 онбординга, он только добавляет доступ), управление узлом будет недоступно. VPN пользователей это не затрагивает.</span>
+          <div className="flex">
+            <button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { mgmtMode: ask }); setAsk(null); onChange(); })}>Переключить</button>
+            <button className="btn ghost" onClick={() => setAsk(null)}>Отмена</button>
+          </div>
+        </div>
+      )}
+      <ErrorBox error={error} />
+    </div>
   );
 }
 

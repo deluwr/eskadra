@@ -3,10 +3,11 @@ import { isIP } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import ssh2 from 'ssh2';
-import { Ctx, coreMode, guard, HttpError, type ServerRow } from '../ctx.js';
+import { Ctx, coreMode, expectedPanelIps, guard, HttpError, type Role, type ServerRow } from '../ctx.js';
 import { randomToken, sha256hex } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { bootstrapSnippet } from '../bootstrap.js';
+import { credsFields, credsOf, newTunnel, xrayPin } from '../mgmt.js';
 import { fetchHostKey, mask, withNodeLock, withSession } from '../ssh/executor.js';
 import { parseSections, summarize } from '../preflight.js';
 import { buildInstallScript, kitVersion, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from '../nodekit.js';
@@ -18,9 +19,10 @@ const sshUtils = ssh2.utils;
 const ROLES = ['entry', 'relay', 'exit', 'control'] as const;
 
 export function publicView(ctx: Ctx, r: ServerRow) {
-  const { key_priv_sealed: _secret, fw_plan: _plan, xui_pass_sealed: _xp, ...rest } = r;
+  const { key_priv_sealed: _secret, fw_plan: _plan, xui_pass_sealed: _xp, mgmt_key_sealed: _mk, mgmt_uuid: _mu, ...rest } = r;
   return {
     ...rest,
+    mgmt: { mode: r.mgmt_mode, port: r.mgmt_port, sni: r.mgmt_sni, localPort: r.mgmt_local_port, client: r.mgmt_mode === 'tunnel' ? ctx.mgmt?.status() ?? null : null },
     external_cores: json(r.external_cores, []),
     coreModeEffective: coreMode(r),
     xuiConfigured: !!r.xui_user && !!r.xui_pass_sealed,
@@ -30,7 +32,7 @@ export function publicView(ctx: Ctx, r: ServerRow) {
     cores: json<Record<string, { version: string }>>(r.cores, {}),
     checklist: json<Record<string, boolean>>(r.checklist, {}),
     stage: stageOf(r),
-    executorOk: !r.seen_from_ip || ctx.executorIps().includes(r.seen_from_ip),
+    executorOk: !r.seen_from_ip || expectedPanelIps(r, ctx.executorIps()).includes(r.seen_from_ip),
   };
 }
 
@@ -49,6 +51,8 @@ const createBody = z.object({
   sshPort: z.coerce.number().int().min(1).max(65535).default(22),
   role: z.enum(ROLES).default('entry'),
   group: z.string().trim().min(1).max(32).default('default'),
+  /** Канал управления (§5.8): напрямую по SSH или через служебный туннель VLESS-REALITY. */
+  mgmtMode: z.enum(['direct', 'tunnel']).default('direct'),
 });
 
 const patchBody = z.object({
@@ -58,7 +62,10 @@ const patchBody = z.object({
   directAccess: z.boolean().optional(),
   peerSsh: z.enum(['off', 'emergency']).optional(),
   protectionTarget: z.enum(['P1', 'P2', 'P3']).optional(),
+  mgmtMode: z.enum(['direct', 'tunnel']).optional(),
 });
+
+const RANK: Record<Role, number> = { operator: 1, admin: 2, owner: 3 };
 
 export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   const { db } = ctx;
@@ -76,6 +83,20 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     );
   }
 
+  /** Сниппет под канал узла. В режиме туннеля в нём ключ REALITY узла — поэтому только для admin и выше. */
+  async function snippetFor(r: ServerRow, role?: Role): Promise<string | null> {
+    if (r.mgmt_mode !== 'tunnel') return bootstrapSnippet({ panelIps: ctx.executorIps(), pubkey: r.key_pub });
+    if (role && RANK[role] < RANK.admin) return null;
+    const creds = credsOf(ctx, r);
+    if (!creds) throw new HttpError(409, 'у узла нет данных служебного туннеля — переключите канал заново');
+    const xray = await xrayPin(ctx).catch((e: Error) => {
+      throw new HttpError(502, `не удалось получить релиз Xray с GitHub для туннеля: ${e.message}`);
+    });
+    return bootstrapSnippet({ panelIps: ctx.executorIps(), pubkey: r.key_pub, mgmt: { creds, sshPort: r.ssh_port, xray } });
+  }
+
+  const tunnelFields = () => credsFields(ctx, newTunnel(ctx.servers().map((x) => x.mgmt_local_port ?? 0)));
+
   const requireKit = (r: ServerRow) => {
     if (r.sudo_mode !== 'restricted') throw new HttpError(409, 'сначала установите nodekit (шаг 5)');
   };
@@ -85,7 +106,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   app.post('/api/v1/servers', { preHandler: guard(ctx, 'admin') }, async (req) => {
     const body = createBody.parse(req.body);
     const ips = ctx.executorIps();
-    if (!ips.length) throw new HttpError(400, 'Сначала задайте адрес исполнителя в настройках (executor.ips)');
+    // для туннеля адрес исполнителя не обязателен: узел пускает панель по ключу туннеля (§5.8)
+    if (!ips.length && body.mgmtMode === 'direct') throw new HttpError(400, 'Сначала задайте адрес исполнителя в настройках (executor.ips)');
     if (db.prepare('SELECT 1 FROM servers WHERE host = ? AND ssh_port = ?').get(body.host, body.sshPort))
       throw new HttpError(409, 'сервер с таким адресом и портом уже есть');
     db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(body.group);
@@ -97,8 +119,10 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(id, body.name, body.host, body.sshPort, body.role, body.group, target, body.role === 'exit' ? 0 : 1, keys.public.trim(), ctx.seal(keys.private));
-    audit(db, who(req), 'server.create', id, { host: body.host, port: body.sshPort, role: body.role });
-    return { server: publicView(ctx, ctx.server(id)), snippet: bootstrapSnippet({ panelIps: ips, pubkey: keys.public.trim() }) };
+    if (body.mgmtMode === 'tunnel') ctx.updateServer(id, { mgmt_mode: 'tunnel', ...tunnelFields() });
+    audit(db, who(req), 'server.create', id, { host: body.host, port: body.sshPort, role: body.role, mgmt: body.mgmtMode });
+    const r = ctx.server(id);
+    return { server: publicView(ctx, r), snippet: await snippetFor(r) };
   });
 
   app.get<{ Params: { id: string } }>('/api/v1/servers/:id', async (req) => {
@@ -112,7 +136,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     ).all(r.id);
     return {
       server: publicView(ctx, r),
-      snippet: bootstrapSnippet({ panelIps: ctx.executorIps(), pubkey: r.key_pub }),
+      snippet: await snippetFor(r, req.admin?.role),
       preflight: pre ? { id: pre.id, created_at: pre.created_at, ...JSON.parse(pre.summary) } : null,
       jobs,
       inbounds,
@@ -125,8 +149,10 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get<{ Params: { id: string } }>('/api/v1/servers/:id/bootstrap.sh', async (req, reply) => {
     const r = ctx.server(req.params.id);
     reply.header('Content-Type', 'text/x-shellscript; charset=utf-8');
+    const snip = await snippetFor(r, req.admin?.role);
+    if (snip === null) throw new HttpError(403, 'сниппет туннеля содержит ключ узла — нужна роль admin');
     reply.header('Content-Disposition', `attachment; filename="bootstrap-${r.id}.sh"`);
-    return bootstrapSnippet({ panelIps: ctx.executorIps(), pubkey: r.key_pub });
+    return snip;
   });
 
   app.get<{ Params: { id: string; jobId: string } }>('/api/v1/servers/:id/jobs/:jobId', async (req) =>
@@ -136,6 +162,11 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     const r = ctx.server(req.params.id);
     const b = patchBody.parse(req.body);
     if (b.group) db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(b.group);
+    if (b.mgmtMode && b.mgmtMode !== r.mgmt_mode) {
+      if (b.mgmtMode === 'direct' && !ctx.executorIps().length) throw new HttpError(400, 'для прямого канала задайте адрес исполнителя (executor.ips)');
+      // ключи туннеля сохраняются при переключениях: повторный сниппет не меняет конфиг узла
+      ctx.updateServer(r.id, { mgmt_mode: b.mgmtMode, ...(b.mgmtMode === 'tunnel' && !credsOf(ctx, r) ? tunnelFields() : {}) });
+    }
     ctx.updateServer(r.id, {
       ...(b.name ? { name: b.name } : {}),
       ...(b.role ? { role: b.role } : {}),
@@ -152,7 +183,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/host-key/fetch', { preHandler: guard(ctx, 'admin') }, async (req) => {
     const r = ctx.server(req.params.id);
-    const hk = await fetchHostKey(r.host, r.ssh_port);
+    const t = ctx.target(r);
+    const hk = await fetchHostKey(t.host, t.port, 10_000, t);
     ctx.updateServer(r.id, { host_key_pending_fp: hk.fp, host_key_algo: hk.algo });
     return { fingerprint: hk.fp, algo: hk.algo, pinned: r.host_key_fp };
   });
@@ -203,7 +235,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       const base = await rootScript(r, 'baseline');
       if (pre.code !== 0) throw new Error(`preflight exit ${pre.code}: ${pre.stderr}`);
       job.log(`baseline: ${base.code === 0 ? base.stdout.trim() : 'FAILED ' + base.stderr.trim()}`);
-      const summary = summarize(pre.stdout, ctx.executorIps());
+      const summary = summarize(pre.stdout, expectedPanelIps(r, ctx.executorIps()));
       const kernel = (parseSections(pre.stdout).get('kernel') ?? '').split('\n');
       const arch = /aarch64|arm64/.test(kernel[1] ?? '') ? 'arm64' : 'amd64';
       db.prepare('INSERT INTO preflight_reports (server_id, summary, raw) VALUES (?, ?, ?)').run(
@@ -450,7 +482,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return {
       panel_ssh: !!r.last_seen_at && !r.fail_since && r.sudo_mode === 'restricted',
       mesh: !peerFail,
-      executor: !!r.seen_from_ip && ctx.executorIps().includes(r.seen_from_ip),
+      executor: !!r.seen_from_ip && expectedPanelIps(r, ctx.executorIps()).includes(r.seen_from_ip),
     };
   }
 

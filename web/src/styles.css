@@ -169,3 +169,10 @@ pre.code { margin: 0; background: var(--code); color: var(--code-text); border-r
 .login { width: min(400px, 100%); display: flex; flex-direction: column; gap: 14px; padding: 26px; }
 .center { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
 .empty { text-align: center; color: var(--muted); padding: 40px 20px; }
+
+/* выбор из двух-трёх вариантов карточками (канал управления узлом) */
+.choice { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.choice label { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); cursor: pointer; }
+.choice label:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.choice input { margin-top: 3px; accent-color: var(--accent); }
+.choice b { display: block; font-weight: 600; }

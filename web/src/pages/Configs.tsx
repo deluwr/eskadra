@@ -7,7 +7,7 @@ interface Draft {
   ech: boolean; nodeIds: string[]; entryId: string; entryPort: string;
 }
 
-const empty: Draft = { id: null, name: '', protocol: 'vless-reality', port: '8443', sni: 'www.microsoft.com', fingerprint: 'chrome', ech: false, nodeIds: [], entryId: '', entryPort: '9443' };
+const empty: Draft = { id: null, name: '', protocol: 'vless-reality', port: '8443', sni: 'www.apple.com', fingerprint: 'chrome', ech: false, nodeIds: [], entryId: '', entryPort: '9443' };
 
 const toDraft = (t: Template): Draft => ({
   id: t.id, name: t.name, protocol: t.protocol, port: String(t.port), sni: t.sni.join('\n'), fingerprint: t.fingerprint, ech: t.ech,

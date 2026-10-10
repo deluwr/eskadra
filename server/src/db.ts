@@ -235,6 +235,16 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE sessions ADD COLUMN console INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  ALTER TABLE servers ADD COLUMN mgmt_mode TEXT NOT NULL DEFAULT 'direct';
+  ALTER TABLE servers ADD COLUMN mgmt_port INTEGER;
+  ALTER TABLE servers ADD COLUMN mgmt_uuid TEXT;
+  ALTER TABLE servers ADD COLUMN mgmt_key_sealed TEXT;
+  ALTER TABLE servers ADD COLUMN mgmt_pub TEXT;
+  ALTER TABLE servers ADD COLUMN mgmt_sid TEXT;
+  ALTER TABLE servers ADD COLUMN mgmt_sni TEXT;
+  ALTER TABLE servers ADD COLUMN mgmt_local_port INTEGER;
+  `,
 ];
 
 export type Db = DatabaseSync;

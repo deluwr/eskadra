@@ -51,7 +51,7 @@ cmd_port() {     # fleetctl port-open tcp 8443 | port-close udp 8443
   [[ "$proto" =~ ^(tcp|udp)$ && "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] \
     || die "usage: fleetctl port-open|port-close tcp|udp PORT"
   if [ "$op" = port-open ]; then
-    case ",$(ssh_ports),$(cat "$ETC/reserved-ports" 2>/dev/null || true)," in
+    case ",$(ssh_ports),$(paste -sd, "$ETC/reserved-ports" 2>/dev/null || true)," in
       *",$port,"*) die "port $port is protected/reserved" ;;
     esac
     st_add "svc-$proto" "$port"; nft_el add "svc_$proto" "$port"

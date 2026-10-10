@@ -1,5 +1,5 @@
 import { isIP } from 'node:net';
-import type { Ctx, ServerRow } from './ctx.js';
+import { expectedPanelIps, type Ctx, type ServerRow } from './ctx.js';
 import { json, Vpn } from './vpn.js';
 
 export interface PlanResult {
@@ -30,8 +30,11 @@ export function renderPlan(ctx: Ctx, s: ServerRow, level: 'P2' | 'P3'): PlanResu
   const sshPorts = json<number[]>(s.ssh_ports, []);
   if (!sshPorts.length) lint.push('неизвестны SSH-порты узла — запустите preflight');
   const panel = ctx.executorIps();
-  if (!panel.length) lint.push('пустой executor.ips — панель отрежет сама себя');
-  if (s.seen_from_ip && !panel.includes(s.seen_from_ip))
+  const tunnel = s.mgmt_mode === 'tunnel';
+  // через туннель SSH панели приходит через lo: пустой executor.ips панель не отрежет (§5.8)
+  if (!panel.length && !tunnel) lint.push('пустой executor.ips — панель отрежет сама себя');
+  if (tunnel && !s.mgmt_port) lint.push('у узла нет порта служебного туннеля — переключите канал заново');
+  if (s.seen_from_ip && !expectedPanelIps(s, panel).includes(s.seen_from_ip))
     lint.push(`узел видит панель с ${s.seen_from_ip}, этого адреса нет в executor.ips`);
   const admin = json<string[]>(s.admin_ips, []);
 
@@ -44,6 +47,7 @@ export function renderPlan(ctx: Ctx, s: ServerRow, level: 'P2' | 'P3'): PlanResu
   const svcTcp = [...new Set(ibs.filter((i) => i.proto === 'tcp').map((i) => i.port))];
   const svcUdp = [...new Set(ibs.filter((i) => i.proto === 'udp').map((i) => i.port))];
   for (const p of [...svcTcp, ...svcUdp]) if (sshPorts.includes(p)) lint.push(`сервисный порт ${p} совпадает с SSH`);
+  if (s.mgmt_port && svcTcp.includes(s.mgmt_port)) lint.push(`сервисный порт ${s.mgmt_port} совпадает с портом служебного туннеля`);
 
   // Пользовательские IP с оставшимся TTL — только если уровень требует whitelist
   const useUsers = level === 'P3' && (stealth === 'S3' || stealth === 'S4');
@@ -86,6 +90,8 @@ export function renderPlan(ctx: Ctx, s: ServerRow, level: 'P2' | 'P3'): PlanResu
     '    ct state invalid drop',
     '    iif "lo" accept',
   );
+  // служебный туннель открыт всем (protected set, §7.3): без ключа REALITY он отвечает как обычный сайт
+  if (tunnel && s.mgmt_port) lines.push(`    tcp dport ${s.mgmt_port} accept`);
   if (level === 'P2') {
     lines.push(`    tcp dport ${sshList} accept`);
   } else {

@@ -56,7 +56,7 @@ export function ServersPage() {
 }
 
 function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => void; onCancel: () => void }) {
-  const [f, setF] = useState({ name: '', host: '', sshPort: '22', role: 'entry', group: 'default' });
+  const [f, setF] = useState({ name: '', host: '', sshPort: '22', role: 'entry', group: 'default', mgmtMode: 'direct' });
   const { busy, error, run } = useAsync();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const submit = (e: FormEvent) => {
@@ -80,6 +80,19 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
         </label>
         <label className="fld">Группа<input className="inp" value={f.group} onChange={set('group')} placeholder="default" /></label>
       </div>
+      <fieldset className="stack" style={{ border: 0, padding: 0, margin: 0 }}>
+        <legend className="k" style={{ marginBottom: 6 }}>Канал управления</legend>
+        <div className="choice">
+          <label>
+            <input type="radio" name="mgmt" value="direct" checked={f.mgmtMode === 'direct'} onChange={set('mgmtMode')} />
+            <span><b>Напрямую по SSH</b><span className="k">Главный сервер вне РФ или SSH до узла проходит стабильно.</span></span>
+          </label>
+          <label>
+            <input type="radio" name="mgmt" value="tunnel" checked={f.mgmtMode === 'tunnel'} onChange={set('mgmtMode')} />
+            <span><b>Через служебный туннель</b><span className="k">Главный сервер в РФ: SSH идёт внутри VLESS-REALITY, ТСПУ видит обычный HTTPS. Сниппет поставит на узле служебный Xray.</span></span>
+          </label>
+        </div>
+      </fieldset>
       <ErrorBox error={error} />
       <div className="flex">
         <button className="btn pri" disabled={busy}>Создать ключ и сниппет</button>

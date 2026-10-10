@@ -19,6 +19,7 @@ import { Bot } from './bot.js';
 import { Backups } from './backup.js';
 import { SubService } from './subsvc.js';
 import { Workers } from './workers.js';
+import { Mgmt } from './mgmt.js';
 
 fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 const db = openDb(config.dataDir);
@@ -44,6 +45,12 @@ app.setErrorHandler((err, _req, reply) => {
   if (code >= 500) app.log.error(err);
   return reply.code(code).send({ error: e.message });
 });
+
+// клиент служебных туннелей (§5.8): поднимается при первом SSH к туннельному узлу
+const mgmt = new Mgmt(ctx, config.dataDir, app.log);
+ctx.mgmt = mgmt;
+for (const sig of ['SIGTERM', 'SIGINT'] as const) process.once(sig, () => { mgmt.stop(); process.exit(0); });
+process.once('exit', () => mgmt.stop());
 
 const bot = new Bot(ctx, app.log);
 const backups = new Backups(ctx, bot);
