@@ -66,7 +66,7 @@ pkg_install() {
   done
   [ ${#need[@]} -gt 0 ] || return 0
   case "$PM" in
-    apt)    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+    apt)    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
             apt-get -o DPkg::Lock::Timeout=600 update -qq && apt-get -o DPkg::Lock::Timeout=600 install -y -qq "${need[@]}" >/dev/null ;;
     dnf)    dnf install -y -q "${need[@]}" >/dev/null ;;
     yum)    yum install -y -q "${need[@]}" >/dev/null ;;
@@ -244,7 +244,9 @@ if [ ! -f "$SETUP_MARK" ]; then
   if [ -z "$TLS_MODE" ]; then
     if [ -r /dev/tty ]; then
       printf '   1) Let'"'"'s Encrypt на IP %s (без домена, продлевается сам) — рекомендуется\n   2) Let'"'"'s Encrypt на домен\n   3) Пока самоподписанный (можно выпустить позже: eskadra cert letsencrypt)\n' "$IP"
+      while read -r -t 0.05 _ < /dev/tty 2>/dev/null; do :; done   # не принимать за ответ то, что набрано заранее
       read -r -p "  Выберите [1]: " a < /dev/tty || true
+      a="${a//[$'\r' ]/}"
       case "${a:-1}" in 2) TLS_MODE=domain ;; 3) TLS_MODE=self ;; *) TLS_MODE=ip ;; esac
     else
       TLS_MODE=self   # без терминала не соглашаемся с условиями Let's Encrypt за пользователя

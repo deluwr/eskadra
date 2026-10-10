@@ -22,8 +22,13 @@ warn() { printf '%s\n' "${c_warn}!${c_0} $*"; }
 
 # Ввод работает и при запуске из «bash <(curl …)»; без терминала берётся значение по умолчанию.
 prompt() {  # prompt "вопрос" [по умолчанию]
-  local a=""
-  if [ -r /dev/tty ]; then read -r -p "$1 " a < /dev/tty || true; fi
+  local a="" _
+  if [ -r /dev/tty ]; then
+    # набранное до вопроса (лишний Enter, CR+LF из Windows-терминала) не должно стать ответом
+    while read -r -t 0.05 _ < /dev/tty 2>/dev/null; do :; done
+    read -r -p "$1 " a < /dev/tty || true
+  fi
+  a="${a//$'\r'/}"; a="${a#"${a%%[![:space:]]*}"}"; a="${a%"${a##*[![:space:]]}"}"
   printf '%s' "${a:-${2:-}}"
 }
 yes_no() { [[ "$(prompt "$1 [y/N]:" n)" =~ ^(y|Y|д|Д|yes|да)$ ]]; }
@@ -61,7 +66,7 @@ pm() {
 }
 pkg_add() {  # pkg_add <пакет> — установить пакетным менеджером системы
   case "$(pm)" in
-    apt) DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -qq "$@" >/dev/null ;;
+    apt) DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 apt-get -o DPkg::Lock::Timeout=600 install -y -qq "$@" >/dev/null 2>&1 ;;
     dnf) dnf install -y -q "$@" >/dev/null ;;
     yum) yum install -y -q "$@" >/dev/null ;;
     zypper) zypper --non-interactive --quiet install "$@" >/dev/null ;;
