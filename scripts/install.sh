@@ -56,6 +56,15 @@ elif command -v pacman  >/dev/null; then PM=pacman
 else die "не найден поддерживаемый менеджер пакетов (apt, dnf, yum, zypper, pacman)"; fi
 case "$OS_ID" in ubuntu|debian) ;; *) warn "$OS_NAME: не входит в тест-матрицу (Ubuntu/Debian), ставлю через $PM" ;; esac
 
+apt_wait() {  # на свежем VPS apt часто занят автообновлением: ждём с сообщением, а не молча
+  local n=0
+  command -v fuser >/dev/null || return 0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    [ "$n" = 0 ] && echo "  apt занят (обычно автообновление системы после запуска VPS) — жду, до 10 минут…"
+    n=$((n + 1)); [ "$n" -ge 120 ] && break; sleep 5
+  done
+}
+
 # pkg_install <команда:пакет-apt:пакет-rpm:пакет-pacman> … — ставит только то, чего нет
 pkg_install() {
   local need=() spec cmd deb rpm arch
@@ -66,7 +75,7 @@ pkg_install() {
   done
   [ ${#need[@]} -gt 0 ] || return 0
   case "$PM" in
-    apt)    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+    apt)    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1; apt_wait
             apt-get -o DPkg::Lock::Timeout=600 update -qq && apt-get -o DPkg::Lock::Timeout=600 install -y -qq "${need[@]}" >/dev/null ;;
     dnf)    dnf install -y -q "${need[@]}" >/dev/null ;;
     yum)    yum install -y -q "${need[@]}" >/dev/null ;;
@@ -241,7 +250,7 @@ if ! cert_ok; then
   say "Сертификат панели (Let's Encrypt)"
   TLS_MODE="${ESKADRA_TLS:-}"
   if [ -z "$TLS_MODE" ]; then
-    [ -r /dev/tty ] || die "нет терминала для вопросов: задайте ESKADRA_TLS=ip или ESKADRA_TLS=domain ESKADRA_DOMAIN=…"
+    { : < /dev/tty; } 2>/dev/null || die "нет терминала для вопросов: задайте ESKADRA_TLS=ip или ESKADRA_TLS=domain ESKADRA_DOMAIN=…"
     printf '   1) На IP %s — без домена, сертификат на 6 дней, продлевается сам (рекомендуется)\n   2) На домен — нужна A-запись домена на %s\n' "$IP" "$IP"
     while read -r -t 0.05 _ < /dev/tty 2>/dev/null; do :; done   # не принимать за ответ то, что набрано заранее
     read -r -p "  Выберите [1]: " a < /dev/tty || true

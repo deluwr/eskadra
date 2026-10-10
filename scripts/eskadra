@@ -24,9 +24,10 @@ warn() { printf '%s\n' "${c_warn}!${c_0} $*"; }
 [ -f "$ENVF" ] || die "Эскадра не установлена ($ENVF нет)"
 
 # Ввод работает и при запуске из «bash <(curl …)»; без терминала берётся значение по умолчанию.
+has_tty() { { : < /dev/tty; } 2>/dev/null; }   # [ -r /dev/tty ] истинно и без терминала (ssh без -t, cron)
 prompt() {  # prompt "вопрос" [по умолчанию]
   local a="" _
-  if [ -r /dev/tty ]; then
+  if has_tty; then
     # набранное до вопроса (лишний Enter, CR+LF из Windows-терминала) не должно стать ответом
     while read -r -t 0.05 _ < /dev/tty 2>/dev/null; do :; done
     read -r -p "$1 " a < /dev/tty || true
@@ -35,6 +36,16 @@ prompt() {  # prompt "вопрос" [по умолчанию]
   printf '%s' "${a:-${2:-}}"
 }
 yes_no() { [[ "$(prompt "$1 [y/N]:" n)" =~ ^(y|Y|д|Д|yes|да)$ ]]; }
+yes_no_strict() {  # ответ обязателен: пустой ввод (случайный Enter) не считается «нет», вопрос повторяется
+  local a
+  has_tty || return 1
+  while true; do
+    a="$(prompt "$1 [y/n]:")"
+    [[ "$a" =~ ^(y|Y|д|Д|yes|да)$ ]] && return 0
+    [[ "$a" =~ ^(n|N|н|Н|no|нет)$ ]] && return 1
+    echo "  ответьте y или n"
+  done
+}
 
 getenv() { grep -E "^$1=" "$ENVF" | tail -1 | cut -d= -f2- || true; }
 setenv() { if grep -qE "^$1=" "$ENVF"; then sed -i "s|^$1=.*|$1=$2|" "$ENVF"; else echo "$1=$2" >> "$ENVF"; fi; }
@@ -67,6 +78,14 @@ pm() {
   elif command -v yum >/dev/null; then echo yum; elif command -v zypper >/dev/null; then echo zypper
   elif command -v pacman >/dev/null; then echo pacman; else echo none; fi
 }
+apt_wait() {  # на свежем VPS apt часто занят автообновлением: ждём с сообщением, а не молча
+  local n=0
+  command -v fuser >/dev/null || return 0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    [ "$n" = 0 ] && echo "  apt занят (обычно автообновление системы после запуска VPS) — жду, до 10 минут…"
+    n=$((n + 1)); [ "$n" -ge 120 ] && break; sleep 5
+  done
+}
 APT_UPDATED=0
 pkg_add() {  # pkg_add <пакет>… — установить пакетным менеджером системы (вывод — только при ошибке)
   local out rc=0
@@ -74,6 +93,7 @@ pkg_add() {  # pkg_add <пакет>… — установить пакетным
     apt)
       export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
       # на свежем VPS списки пакетов пустые или устаревшие — без update apt не найдёт python3-venv
+      apt_wait
       if [ "$APT_UPDATED" = 0 ]; then apt-get -o DPkg::Lock::Timeout=600 update -qq >/dev/null 2>&1 || true; APT_UPDATED=1; fi
       out="$(apt-get -o DPkg::Lock::Timeout=600 install -y -qq "$@" 2>&1)" || rc=$?
       [ "$rc" = 0 ] || printf '%s\n' "$out" | grep -E '^(E:|W:)' | head -5 >&2
@@ -314,7 +334,9 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
     pid="${holder#* }"; unit="$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ')"
     warn "порт 80 занят: ${holder% *}${unit:+ ($unit)}"
     [ -n "$unit" ] && [[ "$unit" == *.service ]] || die "не удалось определить сервис на порту 80 — освободите порт и повторите"
-    yes_no "  Останавливать $unit на ~30 с при выпуске и каждом продлении?" || die "без порта 80 сертификат Let's Encrypt не выпустить"
+    if [ "${ESKADRA_STOP_80:-}" = 1 ]; then ok "$unit будет останавливаться на время выпуска (ESKADRA_STOP_80=1)"
+    else yes_no_strict "  Останавливать $unit на ~30 с при выпуске и каждом продлении?"       || die "без порта 80 сертификат Let's Encrypt не выпустить (без терминала: ESKADRA_STOP_80=1 разрешает останавливать $unit)"
+    fi
   fi
   printf '  Выпуск означает согласие с условиями Let'"'"'s Encrypt: https://letsencrypt.org/repository/\n'
   [[ "$(prompt "  Согласны? [Y/n]:" y)" =~ ^(n|N|н|Н)$ ]] && die "отменено"
@@ -323,12 +345,13 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
   ensure_certbot
   write_hooks "$unit"
   "$CERTBOT" "${LE_ARGS[@]}" delete --cert-name eskadra --non-interactive >/dev/null 2>&1 || true
-  args=("${LE_ARGS[@]}" certonly --standalone --non-interactive --agree-tos --cert-name eskadra --key-type ecdsa
+  args=("${LE_ARGS[@]}" certonly -q --standalone --non-interactive --agree-tos --cert-name eskadra --key-type ecdsa
         --pre-hook "$ETC/hooks/pre.sh" --post-hook "$ETC/hooks/post.sh" --deploy-hook "/usr/local/bin/eskadra cert-deploy")
   if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
   if [ "$kind" = ip ]; then args+=(--preferred-profile shortlived --ip-address "$ip"); else args+=(-d "$domain"); fi
+  [ "${ESKADRA_LE_STAGING:-}" = 1 ] && args+=(--test-cert)   # для проверок: тестовый CA, без лимитов боевого
   echo "  выпускаю сертификат…"
-  "$CERTBOT" "${args[@]}" || die "Let's Encrypt не выдал сертификат (см. вывод выше)"
+  "$CERTBOT" "${args[@]}" || die "Let's Encrypt не выдал сертификат (см. вывод выше). Частая причина — порт 80 закрыт снаружи: проверьте firewall в панели хостера (порт 80/tcp должен быть открыт для всех)."
   if [ "$kind" = ip ]; then
     # 6-дневный сертификат: продлевать за 3 дня до окончания (таймер проверяет дважды в сутки)
     local rc="$LE/renewal/eskadra.conf"
@@ -465,7 +488,7 @@ cmd_uninstall() {  # cmd_uninstall [--purge]
   if [ "$purge" = --purge ]; then
     legacy_le_drop
     rm -rf /etc/letsencrypt/live/eskadra /etc/letsencrypt/archive/eskadra /etc/letsencrypt/renewal/eskadra.conf
-    rm -rf "$PREFIX" "$DATA" "$ETC" /var/log/eskadra-install.log
+    rm -rf "$PREFIX" "$DATA" "$ETC" /var/log/eskadra-install.log /var/log/eskadra-letsencrypt
     userdel eskadra >/dev/null 2>&1 || true
     rm -f /usr/local/bin/eskadra
     ok "Эскадра удалена полностью. Поставить заново: bash <(curl -fsSL https://raw.githubusercontent.com/deluwr/eskadra/main/scripts/install.sh)"
