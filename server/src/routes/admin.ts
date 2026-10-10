@@ -37,7 +37,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
       attention.push({ level: 'warn', title: 'Overlay не настроен', detail: 'Управление держится на from= с адресом исполнителя. Сменится адрес — узлы перестанут пускать панель (§7.10).' });
     for (const s of servers) {
       if (s.fail_since) attention.push({ level: 'fail', title: `${s.name}: нет связи`, detail: `с ${s.fail_since}`, serverId: s.id });
-      if (s.ufw_active) attention.push({ level: 'warn', title: `${s.name}: включён ufw`, detail: 'Перед P2/P3 его нужно выключить.', serverId: s.id });
+      if (s.ufw_active) attention.push({ level: 'warn', title: `${s.name}: включён firewall хоста (ufw/firewalld)`, detail: 'Перед P2/P3 его нужно выключить.', serverId: s.id });
       if (s.fw_mode === 'pending') attention.push({ level: 'warn', title: `${s.name}: firewall ждёт подтверждения`, detail: `до ${s.fw_pending_until}`, serverId: s.id });
       if (s.role !== 'control' && s.sudo_mode === 'restricted' && !s.checklist_passed_at)
         attention.push({ level: 'info', title: `${s.name} ждёт ручного чек-листа`, detail: 'После него станет доступен план firewall.', serverId: s.id });

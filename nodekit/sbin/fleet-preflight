@@ -12,12 +12,17 @@ sec sshd_t;          install -d /run/sshd 2>/dev/null; sshd -T 2>&1 | grep -Ei '
 sec ssh_socket;      systemctl show ssh.socket -p Listen -p ActiveState 2>&1; echo "ssh.service=$(systemctl is-active ssh.service 2>&1)"
 sec listen;          ss -ltnupH 2>&1
 sec ufw;             if command -v ufw >/dev/null; then ufw status verbose 2>&1; else echo "not installed"; fi
+sec firewalld;       if command -v firewall-cmd >/dev/null; then firewall-cmd --state 2>&1; else echo "not installed"; fi
 sec nft;             if command -v nft >/dev/null; then nft list ruleset 2>&1 | head -300; else echo "not installed"; fi
 sec iptables;        if command -v iptables-save >/dev/null; then iptables-save 2>&1 | head -300; else echo "not installed"; fi
 sec docker;          if command -v docker >/dev/null; then echo present; else echo none; fi
-sec dpkg_audit;      dpkg --audit 2>&1
-sec dpkg_lock;       if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then echo busy; else echo free; fi
-sec unattended;      systemctl is-active unattended-upgrades 2>&1
+sec pkgmgr;          for m in apt-get dnf yum zypper pacman; do command -v $m >/dev/null && { echo "$m"; break; }; done
+sec dpkg_audit;      if command -v dpkg >/dev/null; then dpkg --audit 2>&1; fi
+sec dpkg_lock;       if [ -e /var/lib/dpkg/lock-frontend ] && fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then echo busy; elif [ -e /var/lib/rpm/.rpm.lock ] && fuser /var/lib/rpm/.rpm.lock >/dev/null 2>&1; then echo busy; else echo free; fi
+sec unattended;      systemctl is-active unattended-upgrades dnf-automatic.timer 2>&1 | head -2
+sec init;            if [ -d /run/systemd/system ]; then echo systemd; else echo other; fi
+sec selinux;         if command -v getenforce >/dev/null; then getenforce 2>&1; else echo none; fi
+sec ssh_unit;        if systemctl cat ssh.service >/dev/null 2>&1; then echo ssh; else echo sshd; fi
 sec disk;            df -P / 2>&1 | tail -1
 sec mem;             free -m 2>&1 | awk '/^Mem:/{print $2" "$7}'
 sec time;            timedatectl show -p NTPSynchronized -p Timezone 2>&1

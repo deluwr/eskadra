@@ -258,7 +258,7 @@ export class Ops {
         if (proto === 'tcp') {
           const ok = await tcpProbe(s.host, port);
           log(`внешняя проба ${s.host}:${port}/tcp — ${ok ? 'ок' : 'НЕТ ОТВЕТА'}`);
-          if (!ok) throw new Error(`порт ${port} не отвечает снаружи (firewall провайдера или ufw?)`);
+          if (!ok) throw new Error(`порт ${port} не отвечает снаружи (firewall провайдера, ufw или firewalld?)`);
         }
         this.ctx.db.prepare(`UPDATE inbounds SET state = 'active', applied_at = datetime('now') WHERE id = ?`).run(ib!.id);
       } catch (e) {

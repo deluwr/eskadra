@@ -50,8 +50,19 @@ export function buildInstallScript(): string {
     'install -d -m 755 /usr/local/lib/fleet /etc/fleet /etc/fleet/state',
     'install -d -m 700 /var/lib/fleet /var/lib/fleet/staging /var/lib/fleet/fw',
     'export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a',
-    'need=""; for p in python3:python3-minimal nft:nftables curl:curl openssl:openssl; do command -v "${p%%:*}" >/dev/null || need="$need ${p#*:}"; done',
-    '[ -z "$need" ] || apt-get -o DPkg::Lock::Timeout=600 install -y $need >/dev/null',
+    // любой Linux с systemd: пакеты — менеджером системы (apt/dnf/yum/zypper/pacman)
+    'need=""; for p in python3:python3:python nft:nftables:nftables curl:curl:curl openssl:openssl:openssl; do',
+    '  IFS=: read -r c gen arch <<< "$p"; command -v "$c" >/dev/null && continue',
+    '  if command -v pacman >/dev/null; then need="$need $arch"; else need="$need $gen"; fi',
+    'done',
+    'if [ -n "$need" ]; then',
+    '  if command -v apt-get >/dev/null; then apt-get -o DPkg::Lock::Timeout=600 update -qq && apt-get -o DPkg::Lock::Timeout=600 install -y -qq $need >/dev/null',
+    '  elif command -v dnf >/dev/null; then dnf install -y -q $need >/dev/null',
+    '  elif command -v yum >/dev/null; then yum install -y -q $need >/dev/null',
+    '  elif command -v zypper >/dev/null; then zypper --non-interactive --quiet install $need >/dev/null',
+    '  elif command -v pacman >/dev/null; then pacman -Sy --noconfirm --needed $need >/dev/null',
+    '  else echo "нет пакетного менеджера, установите вручную:$need" >&2; exit 1; fi',
+    'fi',
   ];
   for (const f of FILES) {
     if (f.dest.startsWith('/etc/sudoers.d/')) continue; // sudoers сужается отдельным шагом с проверкой

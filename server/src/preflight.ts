@@ -68,10 +68,22 @@ export function summarize(raw: string, executorIps: string[]): PreflightSummary 
 
   const osr = kv(s.get('os') ?? '');
   const os = osr.ID ? { id: osr.ID, version: osr.VERSION_ID ?? '', pretty: osr.PRETTY_NAME ?? osr.ID } : null;
+  const init = (s.get('init') ?? 'systemd').trim();
+  // секций pkgmgr/init нет в выводе старого nodekit — тогда это «неизвестно», а не ошибка
+  const pmSection = s.get('pkgmgr');
+  const pm = (pmSection ?? '').trim();
+  const pmLabel = pm ? ` · ${pm}` : '';
+  const family = `${osr.ID ?? ''} ${osr.ID_LIKE ?? ''}`;
   if (!os) add('os', 'ОС', 'fail', 'не удалось прочитать /etc/os-release');
-  else if (os.id === 'ubuntu' && ['22.04', '24.04'].includes(os.version)) add('os', 'ОС', 'ok', os.pretty);
-  else if (os.id === 'ubuntu') add('os', 'ОС', 'warn', `${os.pretty}: не входит в тест-матрицу (22.04/24.04), авто-операции заблокированы`);
-  else add('os', 'ОС', 'fail', `${os.pretty}: поддерживается только Ubuntu`);
+  else if (init !== 'systemd') add('os', 'ОС', 'fail', `${os.pretty}: нужен systemd (таймеры отката firewall и ядра работают через него)`);
+  else if (pmSection !== undefined && !pm) add('os', 'ОС', 'fail', `${os.pretty}: не найден пакетный менеджер (apt, dnf, yum, zypper, pacman)`);
+  else if ((os.id === 'ubuntu' && Number(os.version) >= 20.04) || (os.id === 'debian' && Number(os.version) >= 11))
+    add('os', 'ОС', 'ok', `${os.pretty}${pmLabel}`);
+  else if (/rhel|fedora|centos|rocky|almalinux|suse|arch|debian|ubuntu/.test(family))
+    add('os', 'ОС', 'info', `${os.pretty}${pmLabel}: поддерживается, но не входит в тест-матрицу (Ubuntu 20.04+, Debian 11+)`);
+  else add('os', 'ОС', 'warn', `${os.pretty}${pmLabel}: неизвестный дистрибутив — должно работать на любом Linux с systemd, но не проверялось`);
+  const selinux = (s.get('selinux') ?? 'none').trim();
+  if (selinux === 'Enforcing') add('selinux', 'SELinux', 'info', 'Enforcing: Эскадра работает в его рамках; при проблемах см. журнал audit');
 
   const whoami = s.get('whoami') ?? '';
   add('sudo', 'Привилегии', /uid=0\(/.test(whoami) ? 'ok' : 'fail', /uid=0\(/.test(whoami) ? 'sudo работает' : `sudo не дал root: ${whoami}`);
@@ -92,10 +104,13 @@ export function summarize(raw: string, executorIps: string[]): PreflightSummary 
       known ? `сервер видит панель с ${clientIp}` : `сервер видит панель с ${clientIp}, его нет в executor.ips`);
   }
 
+  // ufw (Debian/Ubuntu) и firewalld (RHEL/Fedora/openSUSE) одинаково перебивают разрешения нашей таблицы nftables
   const ufw = s.get('ufw') ?? '';
-  const ufwActive = /^Status: active/m.test(ufw);
-  add('ufw', 'ufw', ufwActive ? 'warn' : 'ok',
-    ufwActive ? 'ufw активен: перед P2/P3 его нужно выключить по подтверждению (§5.5)' : ufw.includes('not installed') ? 'не установлен' : 'неактивен');
+  const fwd = (s.get('firewalld') ?? '').trim();
+  const active = [/^Status: active/m.test(ufw) && 'ufw', fwd === 'running' && 'firewalld'].filter(Boolean) as string[];
+  const ufwActive = active.length > 0;
+  add('ufw', 'Firewall хоста', ufwActive ? 'warn' : 'ok',
+    ufwActive ? `${active.join(' и ')} активен: перед P2/P3 его нужно выключить по подтверждению (§5.5)` : 'ufw и firewalld неактивны');
 
   const nft = s.get('nft') ?? '';
   const nftTables = [...nft.matchAll(/^table (\S+ \S+)/gm)].map((m) => m[1]);
@@ -114,8 +129,8 @@ export function summarize(raw: string, executorIps: string[]): PreflightSummary 
 
   const audit = (s.get('dpkg_audit') ?? '').trim();
   const lock = (s.get('dpkg_lock') ?? '').trim();
-  add('apt', 'apt/dpkg', audit || lock === 'busy' ? 'warn' : 'ok',
-    [audit && 'dpkg --audit сообщает о проблемах', lock === 'busy' && 'dpkg lock занят'].filter(Boolean).join('; ') || 'в порядке');
+  add('apt', 'Пакеты', audit || lock === 'busy' ? 'warn' : 'ok',
+    [audit && 'dpkg --audit сообщает о проблемах', lock === 'busy' && 'менеджер пакетов занят'].filter(Boolean).join('; ') || `${pm || '?'}: в порядке`);
 
   const disk = (s.get('disk') ?? '').trim().split(/\s+/);
   const usePct = Number((disk[4] ?? '').replace('%', ''));

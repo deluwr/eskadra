@@ -250,7 +250,7 @@ function ProtectTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
               <span key={t} className={`pst ${i < fwStage ? 'done' : i === fwStage ? 'cur' : ''}`}><b>{i < fwStage ? '✓' : i + 1}</b>{t}</span>
             ))}
           </div>
-          {s.ufw_active ? <div className="alert warn">На узле включён ufw: он перебивает разрешения nftables. Выключите его на вкладке «Хост».</div> : null}
+          {s.ufw_active ? <div className="alert warn">На узле включён firewall хоста (ufw/firewalld): он перебивает разрешения nftables. Выключите его на вкладке «Хост».</div> : null}
           <div className="split">
             <div className="wide"><Checklist d={d} onChange={onChange} /></div>
             <div className="narrow stack">
@@ -463,8 +463,8 @@ function HostTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
     <div className="stack" style={{ gap: 16 }}>
       {s.ufw_active ? (
         <div className="card pad flex" style={{ justifyContent: 'space-between', background: 'var(--warn-bg)', borderColor: 'transparent' }}>
-          <div className="row-text"><b style={{ color: 'var(--warn)' }}>ufw включён</b><span className="small">Активный ufw перебивает разрешения nftables. Для P2/P3 его выключают; правила сохранятся в baseline.</span></div>
-          <button className="btn" disabled={busy} onClick={() => { if (confirm('Выключить ufw на узле? Его правила будут сохранены в baseline.')) void run(async () => { await api.post(`/api/v1/servers/${s.id}/ufw-disable`); onChange(); }); }}>Выключить ufw…</button>
+          <div className="row-text"><b style={{ color: 'var(--warn)' }}>Firewall хоста включён (ufw/firewalld)</b><span className="small">Активный ufw или firewalld перебивает разрешения nftables. Для P2/P3 его выключают; правила сохранятся в baseline.</span></div>
+          <button className="btn" disabled={busy} onClick={() => { if (confirm('Выключить firewall хоста (ufw/firewalld) на узле? Его правила будут сохранены в baseline.')) void run(async () => { await api.post(`/api/v1/servers/${s.id}/ufw-disable`); onChange(); }); }}>Выключить firewall хоста…</button>
         </div>
       ) : null}
       <section className="card pad stack">

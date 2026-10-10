@@ -1,15 +1,32 @@
 #!/usr/bin/env bash
-# /usr/local/sbin/fleet-sshd-harden apply|confirm|rollback — контроль C3 «SSH только по ключам» под таймером отката (§7.6).
+# /usr/local/sbin/fleet-sshd-harden apply|confirm|rollback|status — контроль C3 «SSH только по ключам» под таймером отката (§7.6).
 set -euo pipefail
 F=/etc/ssh/sshd_config.d/00-fleet-hardening.conf
-reload() { install -d /run/sshd; sshd -t && systemctl try-reload-or-restart ssh; }
+
+ssh_unit() { if systemctl cat ssh.service >/dev/null 2>&1; then echo ssh; else echo sshd; fi; }   # Debian/Ubuntu: ssh, RHEL/Fedora/Arch: sshd
+reload() { install -d /run/sshd; sshd -t && systemctl try-reload-or-restart "$(ssh_unit)"; }
+
+ensure_include() {  # если sshd_config не подключает sshd_config.d (так бывает в части дистрибутивов), наш файл не прочитается
+  install -d -m 755 /etc/ssh/sshd_config.d
+  grep -Eqi '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config && return 0
+  cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.fleet-bak
+  sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
+  install -d /run/sshd
+  sshd -t || { mv /etc/ssh/sshd_config.fleet-bak /etc/ssh/sshd_config; echo "не удалось подключить sshd_config.d" >&2; return 1; }
+}
+
 case "${1:-}" in
   apply)
+    ensure_include
     systemctl stop fleet-ssh-rollback.timer 2>/dev/null || true
     systemd-run --unit=fleet-ssh-rollback --on-active=180s --collect /usr/local/sbin/fleet-sshd-harden rollback >/dev/null
-    printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' > "$F.new"
+    printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nChallengeResponseAuthentication no\nPermitRootLogin prohibit-password\n' > "$F.new"
     mv "$F.new" "$F"
     if ! reload; then rm -f "$F"; reload || true; echo "sshd config invalid, reverted" >&2; exit 1; fi
+    # действительно ли sshd взял настройку (а не перебил её чей-то файл, прочитанный раньше)
+    if ! sshd -T 2>/dev/null | grep -qi '^passwordauthentication no'; then
+      rm -f "$F"; reload || true; echo "sshd не применил PasswordAuthentication no — проверьте другие файлы в sshd_config.d" >&2; exit 1
+    fi
     echo "PENDING: key-only SSH active, confirm within 180s" ;;
   confirm)
     [ -f "$F" ] || { echo "nothing to confirm: rolled back" >&2; exit 1; }

@@ -30,7 +30,7 @@ def main() -> int:
         os.chmod(tmp, mode)
         os.chown(tmp, 0, 0)
         if dest.startswith("/etc/sudoers.d/"):
-            if subprocess.run(["visudo", "-cf", tmp], capture_output=True).returncode != 0:
+            if subprocess.run(["visudo", "-cf", tmp], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:
                 os.unlink(tmp)
                 print("sudoers invalid", file=sys.stderr)
                 return 1

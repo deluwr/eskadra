@@ -179,14 +179,21 @@ cmd_ssh_mode() {  # strict: ключ панели только через fleet-
   logger -t fleet "ssh-mode $1" 2>/dev/null || true
 }
 
-cmd_ufw_disable() {  # выключить ufw, сохранив его правила (решение §24.1, §5.5)
-  command -v ufw >/dev/null || { echo "ufw not installed"; return 0; }
-  local d; d="$STATE/baseline/ufw-$(date -u +%Y%m%dT%H%M%SZ)"; install -d -m 700 "$d"
-  ufw status verbose > "$d/status.txt" 2>&1 || true
-  cp -a /etc/ufw "$d/etc-ufw" 2>/dev/null || true
-  ufw --force disable
-  logger -t fleet "ufw disabled, saved to $d" 2>/dev/null || true
-  echo "ufw disabled; rules saved to $d"
+cmd_ufw_disable() {  # выключить firewall хоста (ufw или firewalld), сохранив правила (решение §24.1, §5.5)
+  local d did=0; d="$STATE/baseline/hostfw-$(date -u +%Y%m%dT%H%M%SZ)"; install -d -m 700 "$d"
+  if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    ufw status verbose > "$d/ufw-status.txt" 2>&1 || true
+    cp -a /etc/ufw "$d/etc-ufw" 2>/dev/null || true
+    ufw --force disable; did=1
+  fi
+  if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --list-all-zones > "$d/firewalld-zones.txt" 2>&1 || true
+    cp -a /etc/firewalld "$d/etc-firewalld" 2>/dev/null || true
+    systemctl disable --now firewalld; did=1
+  fi
+  [ "$did" = 1 ] || { echo "host firewall (ufw/firewalld) is not active"; return 0; }
+  logger -t fleet "host firewall disabled, saved to $d" 2>/dev/null || true
+  echo "host firewall disabled; rules saved to $d"
 }
 
 cmd_peer_check() {  # проверка связи с соседней нодой: TCP-порт или icmp
@@ -200,14 +207,30 @@ cmd_peer_check() {  # проверка связи с соседней нодой
   fi
 }
 
+ssh_unit() { if systemctl cat ssh.service >/dev/null 2>&1; then echo ssh; else echo sshd; fi; }   # Debian/Ubuntu: ssh, RHEL/Fedora/Arch: sshd
+
+sshd_include() {  # подключить sshd_config.d, если основной конфиг его не читает
+  install -d -m 755 /etc/ssh/sshd_config.d
+  grep -Eqi '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config && return 0
+  cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.fleet-bak
+  sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
+  install -d /run/sshd
+  sshd -t || { mv /etc/ssh/sshd_config.fleet-bak /etc/ssh/sshd_config; die "cannot enable sshd_config.d"; }
+}
+
 cmd_fleetadmin_setup() {  # консольный break-glass пользователь (§7.10.2); пароль приходит через stdin
-  local pw; IFS= read -r pw || true
+  local pw grp; IFS= read -r pw || true
   [ "${#pw}" -ge 12 ] || die "password too short"
   id fleetadmin >/dev/null 2>&1 || useradd --create-home --shell /bin/bash fleetadmin
-  usermod -aG sudo fleetadmin
+  if getent group sudo >/dev/null; then grp=sudo; else grp=wheel; fi   # Debian/Ubuntu: sudo, RHEL/Fedora/Arch: wheel
+  usermod -aG "$grp" fleetadmin
   printf 'fleetadmin:%s\n' "$pw" | chpasswd
+  # группе wheel в части дистрибутивов sudo не выдан — даём явно и проверяем
+  printf 'fleetadmin ALL=(ALL) ALL\n' > /etc/sudoers.d/91-fleetadmin; chmod 440 /etc/sudoers.d/91-fleetadmin
+  visudo -cf /etc/sudoers.d/91-fleetadmin >/dev/null || { rm -f /etc/sudoers.d/91-fleetadmin; die "sudoers invalid"; }
+  sshd_include
   printf 'DenyUsers fleetadmin\n' > /etc/ssh/sshd_config.d/00-fleet-console-only.conf
-  install -d /run/sshd; sshd -t && systemctl try-reload-or-restart ssh
+  install -d /run/sshd; sshd -t && systemctl try-reload-or-restart "$(ssh_unit)"
   echo "fleetadmin ready (console only)"
 }
 

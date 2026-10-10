@@ -160,3 +160,17 @@ test('version comparison for core updates', async () => {
   assert.equal(cmpVersion('v1.11.15', '1.12.0-alpha.1'), -1);
   assert.equal(cmpVersion('26.1.0', '25.12.31'), 1);
 });
+
+test('preflight accepts other distros with systemd, rejects without', async () => {
+  const { summarize } = await import('./preflight.js');
+  const mk = (osr: string, extra = '') => `\n### os\n${osr}\n### whoami\nuid=0(root)\n### sshd_t\nport 22\n### pkgmgr\ndnf\n### init\nsystemd\n${extra}`;
+  const os = (raw: string) => summarize(raw, []).checks.find((c) => c.id === 'os')!;
+  assert.equal(os(mk('ID=rocky\nID_LIKE="rhel centos fedora"\nVERSION_ID="9.4"\nPRETTY_NAME="Rocky Linux 9.4"')).status, 'info');
+  assert.equal(os(mk('ID=debian\nVERSION_ID="12"\nPRETTY_NAME="Debian 12"')).status, 'ok');
+  assert.equal(os(mk('ID=ubuntu\nVERSION_ID="20.04"\nPRETTY_NAME="Ubuntu 20.04"')).status, 'ok');
+  assert.equal(os(mk('ID=gentoo\nPRETTY_NAME="Gentoo"')).status, 'warn');
+  assert.equal(os(mk('ID=alpine\nPRETTY_NAME="Alpine"').replace('### init\nsystemd', '### init\nother')).status, 'fail');
+  const s = summarize(mk('ID=fedora\nPRETTY_NAME="Fedora 41"', '### firewalld\nrunning\n'), []);
+  assert.equal(s.ufwActive, true, 'firewalld считается firewall хоста, как ufw');
+  assert.match(s.checks.find((c) => c.id === 'ufw')!.detail, /firewalld/);
+});

@@ -38,7 +38,7 @@ def version():
     for b in ("/usr/local/x-ui/x-ui",):
         if os.path.exists(b):
             try:
-                return subprocess.run([b, "-v"], capture_output=True, text=True, timeout=10).stdout.strip()
+                return subprocess.run([b, "-v"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10).stdout.strip()
             except Exception:
                 return "?"
     return None
@@ -88,7 +88,7 @@ def main():
         xv = None
         if bins:
             try:
-                m = re.search(r"Xray\s+v?(\d+\.\d+\.\d+)", subprocess.run([bins[0], "version"], capture_output=True, text=True, timeout=10).stdout)
+                m = re.search(r"Xray\s+v?(\d+\.\d+\.\d+)", subprocess.run([bins[0], "version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10).stdout)
                 xv = m.group(1) if m else None
             except Exception:
                 pass
@@ -98,7 +98,7 @@ def main():
         bins = sorted(glob.glob("/usr/local/x-ui/bin/xray-linux-*"))
         if not bins:
             raise SystemExit("в 3x-ui не найден бинарник Xray")
-        out = subprocess.run([bins[0], "x25519"], capture_output=True, text=True, timeout=10).stdout
+        out = subprocess.run([bins[0], "x25519"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10).stdout
         priv = re.search(r"^(?:Private key|PrivateKey):\s*(\S+)", out, re.M)
         pub = re.search(r"^(?:Public key|Password|PublicKey):\s*(\S+)", out, re.M)
         if not priv or not pub:
@@ -107,7 +107,7 @@ def main():
         return
     if action == "listening":
         port = int(req["port"])
-        out = subprocess.run(["ss", "-ltnupH"], capture_output=True, text=True).stdout
+        out = subprocess.run(["ss", "-ltnupH"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True).stdout
         print("yes" if re.search(rf":{port}\s", out) else "no")
         return
 

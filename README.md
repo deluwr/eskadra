@@ -6,7 +6,7 @@
 
 ## Установка главного сервера
 
-На чистом Ubuntu 22.04 / 24.04 (или Debian) под root:
+На любом Linux с systemd под root:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/deluwr/eskadra/main/scripts/install.sh)
@@ -28,6 +28,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/deluwr/eskadra/main/scripts/
 Без вопросов: `ESKADRA_TLS=ip|domain|self`, `ESKADRA_DOMAIN=…`, `ESKADRA_XUI=keep|remove` (выбор Let's Encrypt означает согласие с его условиями).
 
 **Let's Encrypt.** certbot ≥ 5.4 ставится в отдельное окружение (`/opt/eskadra/certbot`), выпуск — по HTTP-01: порт 80 открывается в ufw только на время выпуска и продления; если его занимает другой сервис, установщик спросит, можно ли останавливать его на ~30 с. Продление — таймер `eskadra-certbot.timer` дважды в сутки, новый сертификат панель подхватывает без перезапуска. С сертификатом Let's Encrypt подписки тоже отдаются по HTTPS.
+
+## Поддерживаемые системы
+
+Главный сервер и узлы — любой Linux с **systemd** и **glibc ≥ 2.28**, на amd64 или arm64:
+
+| Семейство | Пакетный менеджер | Статус |
+|---|---|---|
+| Ubuntu 20.04+, Debian 11+ | apt | проверено (Ubuntu 22.04 / 24.04) |
+| RHEL 8+, Rocky, AlmaLinux, CentOS Stream, Fedora | dnf / yum | поддерживается |
+| openSUSE Leap / Tumbleweed | zypper | поддерживается |
+| Arch Linux | pacman | поддерживается |
+| Alpine (musl, OpenRC) | — | не поддерживается: нет systemd, Node.js собирается под glibc |
+
+Что учитывается: имена пакетов в разных дистрибутивах, firewall хоста — ufw или firewalld, сервис SSH — `ssh` или `sshd`, подключение `sshd_config.d` и `sudoers.d` там, где они выключены, группа администраторов `sudo` или `wheel`, SELinux, Python 3.6 на RHEL 8 (для certbot доустанавливается Python ≥ 3.9).
 
 ## Управление в терминале
 

@@ -49,7 +49,7 @@ export function PortsPage() {
         <div className="card-head"><div className="row-text"><h2>Порты узлов</h2><span className="k">Сервисные порты открываются при выкате конфигурации, защищённые не трогаются никогда</span></div></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
           <table>
-            <thead><tr><th>Узел</th><th>Сервисные TCP</th><th>Сервисные UDP</th><th>Защищённые</th><th>Firewall</th><th>ufw</th></tr></thead>
+            <thead><tr><th>Узел</th><th>Сервисные TCP</th><th>Сервисные UDP</th><th>Защищённые</th><th>Firewall</th><th>ufw/firewalld</th></tr></thead>
             <tbody>{d.servers.map((s) => {
               const ib = d.inbounds.filter((i) => i.server_id === s.id);
               const show = (proto: string) => ib.filter((i) => i.proto === proto).map((i) => <Tag key={`${i.port}${i.template}`} kind={i.state === 'active' ? 'ok' : i.state === 'error' ? 'fail' : 'warn'}>{i.port} · {i.template}</Tag>);

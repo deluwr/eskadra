@@ -119,7 +119,7 @@ export function renderPlan(ctx: Ctx, s: ServerRow, level: 'P2' | 'P3'): PlanResu
 
   if (!svcTcp.length && !svcUdp.length) warnings.push('на узле нет сервисных портов: открыты будут только SSH и связь с нодами');
   if (useUsers && !u4.length && !u6.length) warnings.push('белый список пользователей пуст: до knock никто из пользователей не подключится');
-  if (s.ufw_active) lint.push('на узле активен ufw — выключите его перед применением (он перебивает разрешения nftables)');
+  if (s.ufw_active) lint.push('на узле активен firewall хоста (ufw/firewalld) — выключите его перед применением (он перебивает разрешения nftables)');
 
   const body = lines.join('\n') + '\n';
   const text = body.replace('__POLICY__', 'drop').replace('__TAIL__\n', '');
