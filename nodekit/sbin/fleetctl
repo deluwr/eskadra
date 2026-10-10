@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleetctl — запускать под root (sudo) в консоли хостера.
+# Команды короткие, только ASCII. Пути переопределяются переменными для тестов.
+set -euo pipefail
+ETC="${FLEET_ETC:-/etc/fleet}"
+STATE="${FLEET_STATE:-/var/lib/fleet}"
+AK="${FLEET_AK:-/home/fleet/.ssh/authorized_keys}"
+IPS="$ETC/panel-ips"                      # постоянный список IP исполнителя, по одному в строке
+ST="$ETC/state"                           # порты и ноды флота (§7.12): svc-tcp, svc-udp, fleet-ips
+
+die() { echo "$*" >&2; exit 1; }
+valid_ip() { python3 -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1])' "$1" 2>/dev/null; }
+valid_net() { python3 -c 'import ipaddress,sys; ipaddress.ip_network(sys.argv[1])' "$1" 2>/dev/null; }
+fam() { if [[ "$2" == *:* ]]; then echo "${1}6"; else echo "${1}4"; fi; }   # fam panel 1.2.3.4 -> panel4
+ssh_ports() {    # объединение: sshd -T и порты ssh.socket (при socket activation sshd -T их не видит)
+  mkdir -p /run/sshd
+  { sshd -T 2>/dev/null | awk '$1=="port"{print $2}'
+    systemctl show ssh.socket -p Listen 2>/dev/null | { grep -oE ':[0-9]+ \(Stream\)' || true; } | tr -dc '0-9\n'
+  } | sort -un | paste -sd, -
+}
+
+render_ak() {   # переписывает command= и from= у ключей панели (строки с комментарием fleet-panel/)
+  [ -f "$AK" ] || return 0
+  local from="" cmd=""
+  if [ ! -f "$ETC/ssh-open" ] && [ -s "$IPS" ]; then from="from=\"$(paste -sd, "$IPS")\","; fi
+  if [ -f "$ETC/ssh-strict" ]; then cmd='command="/usr/local/sbin/fleet-gate",'; fi
+  sed -i -E "\|fleet-panel/|s|^(command=\"[^\"]*\",)?(from=\"[^\"]*\",)?restrict|${cmd}${from}restrict|" "$AK"
+  chown fleet:fleet "$AK" 2>/dev/null || true
+  chmod 600 "$AK"
+}
+
+nft_el() {       # nft_el add|delete <set> <element>; молча пропускает, если таблицы/набора нет
+  if nft list set inet fleet "$2" >/dev/null 2>&1; then nft "$1" element inet fleet "$2" "{ $3 }" 2>/dev/null || true; fi
+}
+st_add() { mkdir -p "$ST"; touch "$ST/$1"; grep -qxF "$2" "$ST/$1" || echo "$2" >> "$ST/$1"; }
+st_del() { if [ -f "$ST/$1" ]; then grep -vxF "$2" "$ST/$1" > "$ST/$1.new" || true; mv "$ST/$1.new" "$ST/$1"; fi; }
+
+cmd_allow() {    # fleetctl allow 203.0.113.99   |   fleetctl allow 203 0 113 99
+  local ip
+  if [ $# -eq 4 ]; then ip="$1.$2.$3.$4"; else ip="${1:?usage: fleetctl allow IP}"; fi
+  valid_ip "$ip" || die "bad IP: $ip"
+  mkdir -p "$ETC"; touch "$IPS"
+  grep -qxF "$ip" "$IPS" || echo "$ip" >> "$IPS"
+  nft_el add "$(fam panel "$ip")" "$ip"; render_ak
+  logger -t fleet "ALLOW $ip (local console)" 2>/dev/null || true
+  echo "OK: $ip allowed (firewall + ssh from=). Check: fleetctl status"
+}
+
+cmd_port() {     # fleetctl port-open tcp 8443 | port-close udp 8443
+  local op="$1" proto="${2:-}" port="${3:-}"
+  [[ "$proto" =~ ^(tcp|udp)$ && "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] \
+    || die "usage: fleetctl port-open|port-close tcp|udp PORT"
+  if [ "$op" = port-open ]; then
+    case ",$(ssh_ports),$(cat "$ETC/reserved-ports" 2>/dev/null || true)," in
+      *",$port,"*) die "port $port is protected/reserved" ;;
+    esac
+    st_add "svc-$proto" "$port"; nft_el add "svc_$proto" "$port"
+  else
+    st_del "svc-$proto" "$port"; nft_el delete "svc_$proto" "$port"
+  fi
+  logger -t fleet "$op $proto/$port" 2>/dev/null || true
+  echo "OK: $op $proto/$port"
+}
+
+cmd_ipset() {    # peer-add|peer-del IP (ноды флота, §7.12) | admin-add|admin-del IP (админские адреса из панели)
+  local op="$1" ip="${2:-}" base file
+  valid_ip "$ip" || die "bad IP: $ip"
+  case "$op" in peer-*) base=fleet; file=fleet-ips ;; *) base=admin; file=admin-ips ;; esac
+  if [[ "$op" == *-add ]]; then st_add "$file" "$ip"; nft_el add "$(fam "$base" "$ip")" "$ip"
+  else st_del "$file" "$ip"; nft_el delete "$(fam "$base" "$ip")" "$ip"; fi
+  echo "OK: $op $ip"
+}
+
+cmd_user() {     # fleetctl user-add 198.51.100.7 12h | user-add 2001:db8:1:2::/64 12h | user-del IP
+  local op="$1" net="${2:-}" ttl="${3:-}"
+  valid_net "$net" || die "bad IP/prefix: $net"
+  if [ "$op" = user-add ]; then
+    [[ "$ttl" =~ ^[0-9]{1,4}[smhd]$ ]] || die "bad ttl: $ttl"
+    nft_el add "$(fam users "$net")" "$net timeout $ttl"
+  else
+    nft_el delete "$(fam users "$net")" "$net"
+  fi
+  echo "OK: $op $net"
+}
+
+cmd_open() {     # аварийно снять блокировки
+  systemctl stop fleet-fw-rollback.timer 2>/dev/null || true
+  nft delete table inet fleet 2>/dev/null || true
+  systemctl disable --now fleet-fw.service 2>/dev/null || true
+  mkdir -p "$ETC"; touch "$ETC/ssh-open"; render_ak
+  logger -t fleet "EMERGENCY OPEN (local console)" 2>/dev/null || true
+  echo "OPEN: nft table removed, from= lifted (ssh key-only)."
+}
+
+relax_rule() {   # SSH для любых источников (только ключ, лимит частоты); остальные блокировки сохраняются
+  local ports; ports="$(ssh_ports)"; [ -n "$ports" ] || die "no ssh ports found"
+  mkdir -p "$ETC"; touch "$ETC/ssh-open" "$ETC/relaxed"; render_ak
+  if nft list table inet fleet >/dev/null 2>&1 && ! nft -a list chain inet fleet input | grep -q fleet-relax; then
+    nft insert rule inet fleet input tcp dport "{ $ports }" ct state new limit rate 20/minute accept comment '"fleet-relax"'
+  fi
+}
+
+arm_unrelax() {  # автовозврат через N секунд; после перезагрузки таймер заново ставит sync
+  systemctl stop fleet-unrelax.timer 2>/dev/null || true
+  systemd-run --unit=fleet-unrelax --on-active="${1}s" --collect /usr/local/sbin/fleetctl unrelax >/dev/null
+}
+
+cmd_relax() {    # fleetctl relax [30m|2h] — со сроком возвращается сам, без срока — до unrelax
+  local dur="${1:-}" n secs=0
+  if [ -n "$dur" ]; then
+    [[ "$dur" =~ ^([0-9]{1,3})([mh])$ ]] || die "usage: fleetctl relax [30m|2h]"
+    n="${BASH_REMATCH[1]}"; if [ "${BASH_REMATCH[2]}" = m ]; then secs=$((n * 60)); else secs=$((n * 3600)); fi
+    [ "$secs" -gt 0 ] || die "duration must be > 0"
+  fi
+  relax_rule
+  if [ "$secs" -gt 0 ]; then
+    echo $(( $(date +%s) + secs )) > "$ETC/relaxed"; arm_unrelax "$secs"
+  else
+    : > "$ETC/relaxed"; systemctl stop fleet-unrelax.timer 2>/dev/null || true
+  fi
+  logger -t fleet "RELAX ssh ${dur:-until unrelax}" 2>/dev/null || true
+  echo "RELAXED: ssh open to any source (key-only, 20 new/min) ${dur:+for $dur}"
+}
+
+cmd_unrelax() {
+  local h
+  systemctl stop fleet-unrelax.timer 2>/dev/null || true
+  for h in $(nft -a list chain inet fleet input 2>/dev/null | awk '/fleet-relax/{print $NF}'); do
+    nft delete rule inet fleet input handle "$h"
+  done
+  rm -f "$ETC/relaxed" "$ETC/ssh-open"; render_ak
+  echo "UNRELAXED."
+}
+
+load() {         # load <file> <set|ipbase>: вернуть элементы из файла в набор
+  local x
+  [ -s "$1" ] || return 0
+  while read -r x; do
+    [ -n "$x" ] || continue
+    case "$2" in svc_*) nft_el add "$2" "$x" ;; *) nft_el add "$(fam "$2" "$x")" "$x" ;; esac
+  done < "$1"
+}
+
+cmd_sync() {     # вызывается юнитом после загрузки правил, после apply/rollback и после restore
+  local exp now
+  load "$IPS" panel
+  load "$ST/admin-ips" admin
+  load "$ST/fleet-ips" fleet
+  load "$ST/svc-tcp" svc_tcp
+  load "$ST/svc-udp" svc_udp
+  render_ak
+  if [ -f "$ETC/relaxed" ]; then                 # временный relax переживает перезагрузку, но не дольше срока
+    exp="$(cat "$ETC/relaxed")"; now="$(date +%s)"
+    if [[ "$exp" =~ ^[0-9]+$ ]] && [ "$exp" -le "$now" ]; then cmd_unrelax >/dev/null
+    else relax_rule; if [[ "$exp" =~ ^[0-9]+$ ]]; then arm_unrelax $((exp - now)); fi; fi
+  fi
+}
+
+cmd_restore() {  # вернуть последний подтверждённый набор под таймером отката
+  [ -s "$ETC/fleet-fw.nft" ] || die "no confirmed ruleset"
+  rm -f "$ETC/ssh-open" "$ETC/relaxed"
+  systemctl enable fleet-fw.service >/dev/null 2>&1 || true
+  render_ak
+  /usr/local/sbin/fleet-fw-apply "$ETC/fleet-fw.nft" 180      # внутри вызывает fleetctl sync
+  echo "Restored under 180s rollback timer. Check access, then: fleetctl confirm"
+}
+
+cmd_ssh_mode() {  # strict: ключ панели только через fleet-gate; shell: без forced command и с широким sudo (терминал)
+  local sh=/etc/sudoers.d/91-fleet-shell
+  case "${1:-}" in
+    strict)
+      rm -f "$sh"; mkdir -p "$ETC"; touch "$ETC/ssh-strict"; render_ak; echo "SSH MODE: strict" ;;
+    shell)
+      echo 'fleet ALL=(root) NOPASSWD:ALL' > "$sh.new"; chmod 440 "$sh.new"
+      visudo -cf "$sh.new" >/dev/null || { rm -f "$sh.new"; die "sudoers invalid"; }
+      mv "$sh.new" "$sh"; rm -f "$ETC/ssh-strict"; render_ak; echo "SSH MODE: shell" ;;
+    *) die "usage: fleetctl ssh-mode strict|shell" ;;
+  esac
+  logger -t fleet "ssh-mode $1" 2>/dev/null || true
+}
+
+cmd_ufw_disable() {  # выключить ufw, сохранив его правила (решение §24.1, §5.5)
+  command -v ufw >/dev/null || { echo "ufw not installed"; return 0; }
+  local d; d="$STATE/baseline/ufw-$(date -u +%Y%m%dT%H%M%SZ)"; install -d -m 700 "$d"
+  ufw status verbose > "$d/status.txt" 2>&1 || true
+  cp -a /etc/ufw "$d/etc-ufw" 2>/dev/null || true
+  ufw --force disable
+  logger -t fleet "ufw disabled, saved to $d" 2>/dev/null || true
+  echo "ufw disabled; rules saved to $d"
+}
+
+cmd_peer_check() {  # проверка связи с соседней нодой: TCP-порт или icmp
+  local ip="${1:-}" port="${2:-}"
+  valid_ip "$ip" || die "bad IP"
+  if [ "$port" = icmp ]; then
+    if ping -c1 -W2 "$ip" >/dev/null 2>&1; then echo ok; else echo fail; fi
+  else
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || die "bad port"
+    if timeout 4 bash -c "exec 3<>/dev/tcp/$ip/$port" 2>/dev/null; then echo ok; else echo fail; fi
+  fi
+}
+
+cmd_fleetadmin_setup() {  # консольный break-glass пользователь (§7.10.2); пароль приходит через stdin
+  local pw; IFS= read -r pw || true
+  [ "${#pw}" -ge 12 ] || die "password too short"
+  id fleetadmin >/dev/null 2>&1 || useradd --create-home --shell /bin/bash fleetadmin
+  usermod -aG sudo fleetadmin
+  printf 'fleetadmin:%s\n' "$pw" | chpasswd
+  printf 'DenyUsers fleetadmin\n' > /etc/ssh/sshd_config.d/00-fleet-console-only.conf
+  install -d /run/sshd; sshd -t && systemctl try-reload-or-restart ssh
+  echo "fleetadmin ready (console only)"
+}
+
+cmd_status() {
+  echo "panel ips : $(paste -sd' ' "$IPS" 2>/dev/null || echo none)"
+  echo "ssh ports : $(ssh_ports)"
+  echo "svc ports : tcp $(paste -sd, "$ST/svc-tcp" 2>/dev/null || echo -)  udp $(paste -sd, "$ST/svc-udp" 2>/dev/null || echo -)"
+  echo "fleet     : $(cat "$ST/fleet-ips" 2>/dev/null | wc -l) nodes"
+  echo "admin ips : $(paste -sd' ' "$ST/admin-ips" 2>/dev/null || echo none)"
+  local rel=no; if [ -f "$ETC/relaxed" ]; then rel=yes; [ -s "$ETC/relaxed" ] && rel="until $(date -d "@$(cat "$ETC/relaxed")" '+%F %T')"; fi
+  echo "ssh-open  : $([ -f "$ETC/ssh-open" ] && echo yes || echo no)   relaxed: $rel"
+  echo "nft table : $(nft list table inet fleet >/dev/null 2>&1 && echo present || echo absent)"
+  echo "last ping : $(stat -c %y "$STATE/last-checkin" 2>/dev/null || echo never)"
+}
+
+[ "$(id -u)" -eq 0 ] || die "run with sudo"
+case "${1:-status}" in
+  allow)   shift; cmd_allow "$@" ;;
+  open)    cmd_open ;;
+  relax)   cmd_relax "${2:-}" ;;
+  unrelax) cmd_unrelax ;;
+  sync)    cmd_sync ;;
+  restore) cmd_restore ;;
+  confirm) exec /usr/local/sbin/fleet-fw-confirm ;;
+  status)  cmd_status ;;
+  port-open|port-close) cmd_port "$@" ;;
+  peer-add|peer-del|admin-add|admin-del) cmd_ipset "$@" ;;
+  user-add|user-del)    cmd_user "$@" ;;
+  ssh-mode)    cmd_ssh_mode "${2:-}" ;;
+  ufw-disable) cmd_ufw_disable ;;
+  peer-check)  cmd_peer_check "${2:-}" "${3:-}" ;;
+  fleetadmin-setup) cmd_fleetadmin_setup ;;
+  *) echo "usage: fleetctl allow IP | open | relax [30m] | unrelax | restore | confirm | status"; exit 2 ;;
+esac

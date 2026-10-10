@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-preflight [ssh_connection] — read-only снимок узла для preflight (§6, шаг 2).
+# Ничего не меняет. Вывод — секции «### имя», разбирает панель.
+set -u
+sec() { printf '\n### %s\n' "$1"; }
+
+sec os;              cat /etc/os-release 2>&1
+sec kernel;          uname -r; uname -m
+sec whoami;          id
+sec ssh_connection;  echo "${1:-}"
+sec sshd_t;          install -d /run/sshd 2>/dev/null; sshd -T 2>&1 | grep -Ei '^(port|listenaddress|passwordauthentication|kbdinteractiveauthentication|permitrootlogin|pubkeyauthentication|usepam|allowusers|denyusers) '
+sec ssh_socket;      systemctl show ssh.socket -p Listen -p ActiveState 2>&1; echo "ssh.service=$(systemctl is-active ssh.service 2>&1)"
+sec listen;          ss -ltnupH 2>&1
+sec ufw;             if command -v ufw >/dev/null; then ufw status verbose 2>&1; else echo "not installed"; fi
+sec nft;             if command -v nft >/dev/null; then nft list ruleset 2>&1 | head -300; else echo "not installed"; fi
+sec iptables;        if command -v iptables-save >/dev/null; then iptables-save 2>&1 | head -300; else echo "not installed"; fi
+sec docker;          if command -v docker >/dev/null; then echo present; else echo none; fi
+sec dpkg_audit;      dpkg --audit 2>&1
+sec dpkg_lock;       if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then echo busy; else echo free; fi
+sec unattended;      systemctl is-active unattended-upgrades 2>&1
+sec disk;            df -P / 2>&1 | tail -1
+sec mem;             free -m 2>&1 | awk '/^Mem:/{print $2" "$7}'
+sec time;            timedatectl show -p NTPSynchronized -p Timezone 2>&1
+sec ipv4;            ip -4 -o addr show scope global 2>&1
+sec ipv6;            ip -6 -o addr show scope global 2>&1; echo "route: $(ip -6 route show default 2>&1 | head -1)"
+sec python3;         command -v python3 || echo missing
+sec authorized_keys; for f in /home/fleet/.ssh/authorized_keys /root/.ssh/authorized_keys; do [ -f "$f" ] && sha256sum "$f"; done
+sec nodekit;         cat /usr/local/lib/fleet/VERSION 2>/dev/null || echo none; ls /etc/sudoers.d/ 2>&1 | grep fleet || true
+sec virt;            systemd-detect-virt 2>&1
+# Уже установленные ядра и панели: Эскадра их не дублирует (§ решение: переиспользовать Xray 3x-ui)
+sec cores
+if [ -d /usr/local/x-ui ] || systemctl cat x-ui.service >/dev/null 2>&1; then
+  echo "name=3x-ui active=$(systemctl is-active x-ui 2>/dev/null) version=$(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1 | tr -d ' ')"
+fi
+for u in xray sing-box v2ray hysteria-server marzban-node amnezia-xray; do
+  if systemctl cat "$u.service" >/dev/null 2>&1; then echo "name=$u active=$(systemctl is-active "$u" 2>/dev/null) version="; fi
+done
+for b in /usr/local/bin/eskadra-xray /usr/local/bin/eskadra-sing-box; do
+  [ -e "$b" ] && echo "name=eskadra-$(basename "$b" | sed 's/eskadra-//') active=$(systemctl is-active "$(basename "$b").service" 2>/dev/null) version=$(cat /usr/local/lib/eskadra/$(basename "$b" | sed 's/eskadra-//')/current 2>/dev/null)"
+done
+if command -v docker >/dev/null; then docker ps --format 'name=docker:{{.Image}} active=active version=' 2>/dev/null | grep -Ei 'xray|sing-box|marzban|hiddify|amnezia|3x-ui|x-ui' || true; fi
+exit 0

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-fw-apply <plan.nft> [timeout_sec] — применение плана с таймером отката (§7.4, E.3).
+set -euo pipefail
+PLAN="$1"; TIMEOUT="${2:-120}"
+[[ "$TIMEOUT" =~ ^[0-9]{2,3}$ ]] || { echo "bad timeout" >&2; exit 2; }
+STATE=/var/lib/fleet/fw
+install -d -m 700 "$STATE"
+exec 9>"$STATE/lock"; flock -w 30 9                          # apply / confirm / rollback не пересекаются
+
+nft -c -f "$PLAN"                                            # 1. синтаксис, без применения
+nft list table inet fleet > "$STATE/previous.nft" 2>/dev/null || : > "$STATE/previous.nft"   # 2. снимок прошлого состояния
+cp "$PLAN" "$STATE/pending.nft"                              # 3. маркер Pending; именно этот файл персистирует confirm
+
+systemctl stop fleet-fw-rollback.timer 2>/dev/null || true   # 4. таймер отката СТАВИТСЯ ДО применения
+systemd-run --unit=fleet-fw-rollback --on-active="${TIMEOUT}s" --collect \
+  /usr/local/sbin/fleet-fw-rollback >/dev/null
+
+nft -f "$PLAN"                                               # 5. атомарное применение (одна транзакция)
+/usr/local/sbin/fleetctl sync                                # 6. вернуть в наборы адреса исполнителя, порты, ноды
+logger -t fleet "firewall applied, rollback in ${TIMEOUT}s unless confirmed"
+echo "PENDING: confirm within ${TIMEOUT}s"

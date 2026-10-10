@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-release/
+data/
+.claude/
+__pycache__/
+*.log
+*.tsbuildinfo

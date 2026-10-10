@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# eskadra — терминальное управление панелью «Эскадра» на главном сервере.
+#   eskadra            интерактивное меню
+#   eskadra <команда>  то же без меню (eskadra help — список)
+set -euo pipefail
+
+PREFIX=/opt/eskadra
+ETC=/etc/eskadra
+ENVF="$ETC/eskadra.env"
+NODE="$PREFIX/node/bin/node"
+CLI="$PREFIX/app/server/dist/cli.js"
+
+c_ok=$'\e[32m'; c_warn=$'\e[33m'; c_err=$'\e[31m'; c_b=$'\e[1m'; c_dim=$'\e[2m'; c_acc=$'\e[38;5;179m'; c_0=$'\e[0m'
+die() { printf '%s\n' "${c_err}✗ $*${c_0}" >&2; exit 1; }
+ok()  { printf '%s\n' "${c_ok}✓${c_0} $*"; }
+
+[ "$(id -u)" -eq 0 ] || die "запустите под root: sudo eskadra"
+[ -f "$ENVF" ] || die "Эскадра не установлена ($ENVF нет)"
+
+getenv() { grep -E "^$1=" "$ENVF" | tail -1 | cut -d= -f2-; }
+setenv() {  # setenv KEY VALUE — правка env-файла на месте
+  if grep -qE "^$1=" "$ENVF"; then sed -i "s|^$1=.*|$1=$2|" "$ENVF"; else echo "$1=$2" >> "$ENVF"; fi
+}
+cli() { runuser -u eskadra -- env $(grep -v '^#' "$ENVF" | xargs) "$NODE" "$CLI" "$@"; }
+
+public_ip() {
+  local ip; ip="$(cli executor 2>/dev/null | cut -d, -f1)"
+  [ -n "$ip" ] || ip="$(curl -4fsS --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+  echo "$ip"
+}
+
+ufw_on() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; }
+ufw_swap() {  # ufw_swap OLD NEW COMMENT
+  ufw_on || return 0
+  [ -n "$1" ] && ufw delete allow "$1/tcp" >/dev/null 2>&1 || true
+  ufw allow "$2/tcp" comment "$3" >/dev/null && ok "ufw: порт $2 открыт${1:+, $1 закрыт}"
+}
+
+restart() { systemctl restart eskadra; sleep 2; systemctl is-active --quiet eskadra && ok "панель перезапущена" || { journalctl -u eskadra -n 20 --no-pager; die "панель не запустилась"; }; }
+
+cmd_url() {
+  local ip port base url fp st
+  ip="$(public_ip)"; port="$(getenv FLEET_PORT)"; base="$(getenv FLEET_BASE_PATH)"
+  url="https://${ip}:${port}${base}"
+  fp="$(openssl x509 -in "$(getenv FLEET_TLS_CERT)" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)"
+  st="$(cli status)"
+  if [[ "$st" == *'"admins":0'* ]]; then
+    local token; token="$(cli setup-token)"
+    printf '\n  %sСоздание владельца (ссылка одноразовая):%s\n  %s%s#/setup?token=%s%s\n' "$c_b" "$c_0" "$c_acc" "$url" "$token" "$c_0"
+  else
+    printf '\n  %sПанель:%s %s%s%s\n' "$c_b" "$c_0" "$c_acc" "$url" "$c_0"
+  fi
+  printf '  %sОтпечаток сертификата (SHA-256):%s\n  %s\n' "$c_dim" "$c_0" "$fp"
+  printf '  %sБраузер предупредит о самоподписанном сертификате — сверьте отпечаток.%s\n' "$c_dim" "$c_0"
+}
+
+cmd_status() {
+  local st active
+  active="$(systemctl is-active eskadra 2>/dev/null || true)"
+  st="$(cli status 2>/dev/null || echo '{}')"
+  printf '\n  %sЭскадра%s  %s\n' "$c_b" "$c_0" "$( [ "$active" = active ] && echo "${c_ok}● работает${c_0}" || echo "${c_err}● $active${c_0}")"
+  printf '  порт панели %s · путь %s · порт подписок %s\n' "$(getenv FLEET_PORT)" "$(getenv FLEET_BASE_PATH)" "$(sed -n 's/.*"subPort":\([0-9]*\).*/\1/p' <<<"$st")"
+  printf '  администраторов %s · серверов %s (без связи %s) · пользователей %s\n' \
+    "$(sed -n 's/.*"admins":\([0-9]*\).*/\1/p' <<<"$st")" "$(sed -n 's/.*"servers":\([0-9]*\).*/\1/p' <<<"$st")" \
+    "$(sed -n 's/.*"offline":\([0-9]*\).*/\1/p' <<<"$st")" "$(sed -n 's/.*"users":\([0-9]*\).*/\1/p' <<<"$st")"
+  printf '  версия %s\n' "$(cat "$PREFIX/app/VERSION" 2>/dev/null || echo '?')"
+}
+
+rand_port() {
+  local p
+  for _ in $(seq 1 50); do
+    p=$(( (RANDOM << 15 | RANDOM) % 50000 + 10000 ))
+    case "$p" in 10085|51820|2053|2096|54321) continue ;; esac
+    ss -ltnH "sport = :$p" 2>/dev/null | grep -q . || { echo "$p"; return; }
+  done
+  die "не нашёл свободный порт"
+}
+
+cmd_port() {
+  local old new="${1:-}"
+  old="$(getenv FLEET_PORT)"
+  [ -n "$new" ] || read -rp "Новый порт панели (Enter — случайный): " new
+  [ -z "$new" ] || [ "$new" = random ] && new="$(rand_port)"
+  [[ "$new" =~ ^[0-9]+$ ]] && [ "$new" -ge 1024 ] && [ "$new" -le 65535 ] || die "порт 1024–65535"
+  ss -ltnH "sport = :$new" | grep -q . && die "порт $new занят"
+  setenv FLEET_PORT "$new"; ufw_swap "$old" "$new" "eskadra panel"; restart; cmd_url
+}
+
+cmd_path() {
+  local new="${1:-}"
+  [ -n "$new" ] || new="$(tr -dc 'a-z0-9' < /dev/urandom | head -c 12)"
+  [[ "$new" =~ ^[A-Za-z0-9_-]+$ ]] || die "путь: латиница, цифры, - и _"
+  setenv FLEET_BASE_PATH "/$new/"; restart; cmd_url
+}
+
+cmd_sub_port() {
+  local st old new="${1:-}"
+  st="$(cli status)"; old="$(sed -n 's/.*"subPort":\([0-9]*\).*/\1/p' <<<"$st")"
+  [ -n "$new" ] || read -rp "Новый порт подписок (Enter — случайный): " new
+  [ -z "$new" ] && new=random
+  new="$(cli sub-port "$new")"
+  ufw_swap "$old" "$new" "eskadra subscriptions"; restart
+  ok "порт подписок: $new. Старые ссылки подписок перестанут работать — пользователям нужно обновить ссылку."
+}
+
+cmd_reset_password() {
+  local r; r="$(cli reset-password "${1:-}")"
+  printf '\n  Логин: %s%s%s\n  Новый пароль: %s%s%s\n  %sПароль показан один раз. Все сессии этого администратора завершены.%s\n' \
+    "$c_b" "${r%% *}" "$c_0" "$c_acc" "${r#* }" "$c_0" "$c_dim" "$c_0"
+}
+
+cmd_cert() {
+  case "${1:-show}" in
+    show) openssl x509 -in "$(getenv FLEET_TLS_CERT)" -noout -subject -enddate -fingerprint -sha256 ;;
+    set)
+      [ -f "${2:-}" ] && [ -f "${3:-}" ] || die "eskadra cert set <fullchain.pem> <privkey.pem>"
+      install -o eskadra -g eskadra -m 600 "$2" /var/lib/eskadra/tls/cert.pem
+      install -o eskadra -g eskadra -m 600 "$3" /var/lib/eskadra/tls/key.pem
+      restart ;;
+    selfsigned)
+      local ip; ip="$(public_ip)"
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 -subj "/CN=$ip" \
+        -addext "subjectAltName=IP:$ip" -keyout /var/lib/eskadra/tls/key.pem -out /var/lib/eskadra/tls/cert.pem >/dev/null 2>&1
+      chown eskadra:eskadra /var/lib/eskadra/tls/*.pem; chmod 600 /var/lib/eskadra/tls/key.pem; restart; cmd_url ;;
+    *) die "eskadra cert show | set <cert> <key> | selfsigned" ;;
+  esac
+}
+
+cmd_update() {
+  local repo; repo="$(cat "$PREFIX/app/REPO" 2>/dev/null || true)"
+  [ -n "$repo" ] || die "неизвестен репозиторий релизов"
+  ESKADRA_REPO="$repo" ESKADRA_VERSION="${1:-latest}" bash <(curl -fsSL "https://raw.githubusercontent.com/$repo/main/scripts/install.sh")
+}
+
+cmd_uninstall() {
+  read -rp "Удалить Эскадру? Данные в /var/lib/eskadra сохранятся (y/N): " a
+  [ "$a" = y ] || exit 0
+  systemctl disable --now eskadra 2>/dev/null || true
+  rm -f /etc/systemd/system/eskadra.service /usr/local/bin/eskadra
+  rm -rf "$PREFIX"
+  systemctl daemon-reload
+  ok "удалено. Данные и настройки: /var/lib/eskadra, $ETC (удалите вручную, если не нужны)"
+}
+
+usage() {
+  cat <<EOF
+Команды:
+  status                 состояние панели
+  url                    адрес входа (или одноразовая ссылка создания владельца)
+  start | stop | restart | logs
+  port [N|random]        сменить порт панели (ufw обновится)
+  path [имя]             сменить секретный путь панели (без имени — случайный)
+  sub-port [N|random]    сменить порт подписок
+  reset-password [логин] новый пароль администратора (по умолчанию owner)
+  disable-2fa <логин>    отключить 2FA (если потерян аутентификатор)
+  admins                 список администраторов
+  backup                 сделать бэкап сейчас
+  cert [show|set|selfsigned]  сертификат панели
+  update [версия]        обновить панель
+  uninstall              удалить (данные сохраняются)
+EOF
+}
+
+menu() {
+  while true; do
+    cmd_status
+    cat <<EOF
+
+  ${c_acc}${c_b}⛵ Эскадра${c_0} — управление
+   1) Адрес входа            7) Сбросить пароль
+   2) Перезапустить          8) Отключить 2FA
+   3) Логи                   9) Бэкап сейчас
+   4) Сменить порт панели   10) Сертификат
+   5) Сменить путь панели   11) Обновить
+   6) Сменить порт подписок 12) Удалить
+   0) Выход
+EOF
+    read -rp "  Выберите: " c
+    case "$c" in
+      1) cmd_url ;;
+      2) restart ;;
+      3) journalctl -u eskadra -n 60 --no-pager ;;
+      4) cmd_port ;;
+      5) read -rp "Новый путь (Enter — случайный): " p; cmd_path "$p" ;;
+      6) cmd_sub_port ;;
+      7) cli admins; read -rp "Логин (Enter — owner): " u; cmd_reset_password "$u" ;;
+      8) cli admins; read -rp "Логин: " u; [ -n "$u" ] && cli disable-2fa "$u" ;;
+      9) cli backup ;;
+      10) cmd_cert show ;;
+      11) cmd_update ;;
+      12) cmd_uninstall ;;
+      0|q|"") exit 0 ;;
+      *) echo "нет такого пункта" ;;
+    esac
+    read -rp "  Enter — назад в меню" _ || true
+  done
+}
+
+case "${1:-menu}" in
+  menu) menu ;;
+  status) cmd_status ;;
+  url) cmd_url ;;
+  start) systemctl start eskadra && ok запущена ;;
+  stop) systemctl stop eskadra && ok остановлена ;;
+  restart) restart ;;
+  logs) journalctl -u eskadra -n "${2:-100}" --no-pager ;;
+  port) cmd_port "${2:-}" ;;
+  path) cmd_path "${2:-}" ;;
+  sub-port) cmd_sub_port "${2:-}" ;;
+  reset-password) cmd_reset_password "${2:-}" ;;
+  disable-2fa) [ -n "${2:-}" ] || die "eskadra disable-2fa <логин>"; cli disable-2fa "$2" ;;
+  admins) cli admins ;;
+  backup) cli backup ;;
+  cert) shift; cmd_cert "$@" ;;
+  update) cmd_update "${2:-}" ;;
+  uninstall) cmd_uninstall ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 2 ;;
+esac

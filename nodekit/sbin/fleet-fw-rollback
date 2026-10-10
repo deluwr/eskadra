@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-fw-rollback — откат неподтверждённого плана (§7.4, E.4).
+set -euo pipefail
+STATE=/var/lib/fleet/fw
+install -d -m 700 "$STATE"
+exec 9>"$STATE/lock"; flock 9
+[ -f "$STATE/pending.nft" ] || exit 0                         # уже подтверждено — откатывать нечего
+nft delete table inet fleet 2>/dev/null || true
+if [ -s "$STATE/previous.nft" ]; then nft -f "$STATE/previous.nft"; fi
+rm -f "$STATE/pending.nft"
+/usr/local/sbin/fleetctl sync || true
+logger -t fleet "firewall ROLLED BACK"
+echo "ROLLED BACK"

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-exec <op> [args…] — единственная команда, разрешённая пользователю fleet через sudo.
+# Аргументы панели — только из безопасного набора символов; содержимое файлов приходит через stdin.
+set -euo pipefail
+
+mkdir -p /var/lib/fleet && touch /var/lib/fleet/last-checkin   # любая операция панели = «check-in»
+STAGING=/var/lib/fleet/staging
+
+deny() { echo "denied: $*" >&2; exit 126; }
+name_ok() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || deny "name"; }
+staged() {  # принимаем только файлы из staging
+  case "$1" in "$STAGING"/*) ;; *) deny path ;; esac
+  [[ "$1" != *..* ]] || deny path
+  [ -f "$1" ] || deny "no such staged file"
+}
+core_ok() { [[ "$1" == xray || "$1" == sing-box ]] || deny core; }
+
+case "${1:-}" in
+  ping)          echo pong ;;
+  version)       cat /usr/local/lib/fleet/VERSION 2>/dev/null || echo unknown ;;
+  whoami)        echo "${SSH_CONNECTION:-}"; echo "${SUDO_USER:-root}" ;;
+  preflight)     exec /usr/local/sbin/fleet-preflight "${SSH_CONNECTION:-}" ;;
+  baseline)      exec /usr/local/sbin/fleet-baseline ;;
+  stage)         name_ok "${2:?name}"; install -d -m 700 "$STAGING"; head -c 52428800 > "$STAGING/$2.new"; mv "$STAGING/$2.new" "$STAGING/$2"; sha256sum "$STAGING/$2" | cut -d' ' -f1 ;;
+  kit-install)   exec python3 /usr/local/sbin/fleet-kit-install ;;
+  # firewall (§7)
+  fw-plan-check) name_ok "${2:?plan}"; staged "$STAGING/$2"; exec nft -c -f "$STAGING/$2" ;;
+  fw-apply)      name_ok "${2:?plan}"; staged "$STAGING/$2"; exec /usr/local/sbin/fleet-fw-apply "$STAGING/$2" "${3:-120}" ;;
+  fw-confirm)    exec /usr/local/sbin/fleet-fw-confirm ;;
+  fw-rollback)   exec /usr/local/sbin/fleet-fw-rollback ;;
+  fw-state)      if [ -f /var/lib/fleet/fw/pending.nft ]; then echo pending; elif nft list table inet fleet >/dev/null 2>&1; then echo active; else echo none; fi ;;
+  fw-shadow-log) m="${2:-60}"; [[ "$m" =~ ^[0-9]{1,4}$ ]] || deny minutes
+                 journalctl -k --since "-${m}min" --no-pager -o cat 2>/dev/null | grep 'FLEET-WOULD-DROP' | tail -n 2000 || true ;;
+  fw-open)       exec /usr/local/sbin/fleetctl open ;;
+  ufw-disable)   exec /usr/local/sbin/fleetctl ufw-disable ;;
+  # аварийные и данные наборов (§7.10, §7.12): аргументы строго проверяет fleetctl
+  allow)         exec /usr/local/sbin/fleetctl allow "${2:?ip}" ;;
+  relax)         exec /usr/local/sbin/fleetctl relax "${2:-}" ;;
+  unrelax)       exec /usr/local/sbin/fleetctl unrelax ;;
+  status)        exec /usr/local/sbin/fleetctl status ;;
+  port-open|port-close) exec /usr/local/sbin/fleetctl "$1" "${2:?proto}" "${3:?port}" ;;
+  peer-add|peer-del|admin-add|admin-del) exec /usr/local/sbin/fleetctl "$1" "${2:?ip}" ;;
+  user-add)      exec /usr/local/sbin/fleetctl user-add "${2:?ip}" "${3:?ttl}" ;;
+  user-del)      exec /usr/local/sbin/fleetctl user-del "${2:?ip}" ;;
+  ssh-mode)      exec /usr/local/sbin/fleetctl ssh-mode "${2:?mode}" ;;
+  sshd-harden)   exec /usr/local/sbin/fleet-sshd-harden "${2:?action}" ;;
+  fleetadmin-setup) exec /usr/local/sbin/fleetctl fleetadmin-setup ;;
+  peer-check)    exec /usr/local/sbin/fleetctl peer-check "${2:?ip}" "${3:?port}" ;;
+  # ядра VPN
+  core-install)  core_ok "${2:?core}"; exec /usr/local/sbin/fleet-core install "$2" "${3:?version}" "${4:?sha256}" ;;
+  core-apply)    core_ok "${2:?core}"; name_ok "${3:?cfg}"; staged "$STAGING/$3"; exec /usr/local/sbin/fleet-core apply "$2" "$STAGING/$3" ;;
+  core-status)   core_ok "${2:?core}"; exec /usr/local/sbin/fleet-core status "$2" ;;
+  core-stop)     core_ok "${2:?core}"; exec /usr/local/sbin/fleet-core stop "$2" ;;
+  xray-x25519)   exec /usr/local/sbin/fleet-core x25519 ;;
+  xray-stats)    exec /usr/local/sbin/fleet-core stats ;;
+  singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;
+  # уже установленный 3x-ui: inbounds Эскадры живут в его Xray (stdin — JSON с действием)
+  xui)           exec python3 /usr/local/sbin/fleet-xui ;;
+  *) deny "${1:-<empty>}" ;;
+esac

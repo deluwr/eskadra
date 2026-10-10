@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""/usr/local/sbin/fleet-xui — работа Эскадры через уже установленный 3x-ui (без второго Xray).
+
+stdin: JSON {"user": "...", "pass": "...", "code": "", "action": "...", ...}
+  info                         порт/путь/версия 3x-ui (логин не нужен)
+  x25519                       ключи REALITY бинарником Xray из 3x-ui
+  list                         inbounds Эскадры (remark начинается с eskadra-) и статистика клиентов
+  upsert  {"inbound": {...}}   создать или обновить inbound по remark
+  delete  {"remark": "..."}    удалить inbound Эскадры по remark
+  listening {"port": N}        слушается ли порт
+Чужие inbounds (без префикса eskadra-) не читаются для изменения и не трогаются.
+"""
+import glob, http.cookiejar, json, os, re, sqlite3, ssl, subprocess, sys, urllib.parse, urllib.request
+
+DB = "/etc/x-ui/x-ui.db"
+PREFIX = "eskadra-"
+
+
+def settings():
+    if not os.path.exists(DB):
+        raise SystemExit("3x-ui не найден (/etc/x-ui/x-ui.db)")
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    rows = dict(con.execute("SELECT key, value FROM settings").fetchall())
+    con.close()
+    port = int(rows.get("webPort") or 2053)
+    base = rows.get("webBasePath") or "/"
+    if not base.startswith("/"):
+        base = "/" + base
+    if not base.endswith("/"):
+        base += "/"
+    tls = bool(rows.get("webCertFile"))
+    listen = rows.get("webListen") or "127.0.0.1"
+    host = "127.0.0.1" if listen in ("", "0.0.0.0", "::") else listen
+    return {"port": port, "base": base, "tls": tls, "host": host}
+
+
+def version():
+    for b in ("/usr/local/x-ui/x-ui",):
+        if os.path.exists(b):
+            try:
+                return subprocess.run([b, "-v"], capture_output=True, text=True, timeout=10).stdout.strip()
+            except Exception:
+                return "?"
+    return None
+
+
+class Panel:
+    def __init__(self, s, user, pw, code=""):
+        scheme = "https" if s["tls"] else "http"
+        self.root = f"{scheme}://{s['host']}:{s['port']}{s['base']}"
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE   # локальный 127.0.0.1, сертификат выписан на домен 3x-ui
+        self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+                                              urllib.request.HTTPSHandler(context=ctx))
+        data = {"username": user, "password": pw}
+        if code:
+            data["twoFactorCode"] = code
+        r = self.call("login", form=data)
+        if not r.get("success"):
+            raise SystemExit("3x-ui: вход не удался — проверьте логин и пароль 3x-ui")
+
+    def call(self, path, form=None, body=None, method=None):
+        url = self.root + path
+        headers = {"Accept": "application/json"}
+        data = None
+        if form is not None:
+            data = urllib.parse.urlencode(form).encode()
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        elif body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method or ("POST" if data is not None else "GET"))
+        with self.op.open(req, timeout=20) as resp:
+            return json.loads(resp.read().decode() or "{}")
+
+    def ours(self):
+        r = self.call("panel/api/inbounds/list")
+        return [i for i in (r.get("obj") or []) if str(i.get("remark", "")).startswith(PREFIX)]
+
+
+def main():
+    req = json.loads(sys.stdin.read() or "{}")
+    action = req.get("action")
+    s = settings()
+    if action == "info":
+        print(json.dumps({"port": s["port"], "base": s["base"], "tls": s["tls"], "version": version(),
+                          "xray": sorted(glob.glob("/usr/local/x-ui/bin/xray-linux-*"))}))
+        return
+    if action == "x25519":
+        bins = sorted(glob.glob("/usr/local/x-ui/bin/xray-linux-*"))
+        if not bins:
+            raise SystemExit("в 3x-ui не найден бинарник Xray")
+        out = subprocess.run([bins[0], "x25519"], capture_output=True, text=True, timeout=10).stdout
+        priv = re.search(r"^(?:Private key|PrivateKey):\s*(\S+)", out, re.M)
+        pub = re.search(r"^(?:Public key|Password|PublicKey):\s*(\S+)", out, re.M)
+        if not priv or not pub:
+            raise SystemExit("не удалось разобрать вывод xray x25519")
+        print(f"private={priv.group(1)}\npublic={pub.group(1)}")
+        return
+    if action == "listening":
+        port = int(req["port"])
+        out = subprocess.run(["ss", "-ltnupH"], capture_output=True, text=True).stdout
+        print("yes" if re.search(rf":{port}\s", out) else "no")
+        return
+
+    p = Panel(s, req.get("user", ""), req.get("pass", ""), req.get("code", ""))
+    if action == "list":
+        res = []
+        for i in p.ours():
+            res.append({"id": i["id"], "remark": i["remark"], "port": i["port"], "enable": i.get("enable"),
+                        "clientStats": [{"email": c.get("email"), "up": c.get("up", 0), "down": c.get("down", 0)}
+                                        for c in (i.get("clientStats") or [])]})
+        print(json.dumps(res))
+    elif action == "upsert":
+        ib = req["inbound"]
+        if not str(ib.get("remark", "")).startswith(PREFIX):
+            raise SystemExit("remark должен начинаться с eskadra-")
+        existing = next((i for i in p.ours() if i["remark"] == ib["remark"]), None)
+        if existing:
+            r = p.call(f"panel/api/inbounds/update/{existing['id']}", body={**ib, "id": existing["id"]})
+        else:
+            r = p.call("panel/api/inbounds/add", body=ib)
+        if not r.get("success"):
+            raise SystemExit("3x-ui: " + str(r.get("msg")))
+        ours = next((i for i in p.ours() if i["remark"] == ib["remark"]), None)
+        print(json.dumps({"id": ours["id"] if ours else None, "updated": bool(existing)}))
+    elif action == "delete":
+        rem = req["remark"]
+        if not rem.startswith(PREFIX):
+            raise SystemExit("можно удалять только inbounds Эскадры")
+        for i in p.ours():
+            if i["remark"] == rem:
+                r = p.call(f"panel/api/inbounds/del/{i['id']}", body={})
+                if not r.get("success"):
+                    raise SystemExit("3x-ui: " + str(r.get("msg")))
+        print("deleted")
+    else:
+        raise SystemExit("unknown action")
+
+
+if __name__ == "__main__":
+    main()

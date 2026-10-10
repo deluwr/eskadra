@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-fw-confirm — подтверждение и персист (§7.4, E.5).
+set -euo pipefail
+STATE=/var/lib/fleet/fw
+install -d -m 700 "$STATE"
+exec 9>"$STATE/lock"; flock -w 30 9
+# нет маркера — значит, таймер уже откатил правила (таблица при этом может существовать: это ПРЕДЫДУЩИЙ набор)
+[ -f "$STATE/pending.nft" ] || { echo "nothing pending: already rolled back" >&2; exit 1; }
+systemctl stop fleet-fw-rollback.timer 2>/dev/null || true
+install -d -m 755 /etc/fleet
+cp "$STATE/pending.nft" /etc/fleet/fleet-fw.nft.new          # персистим сам план, а не дамп runtime
+mv /etc/fleet/fleet-fw.nft.new /etc/fleet/fleet-fw.nft
+rm -f "$STATE/pending.nft"
+systemctl enable fleet-fw.service >/dev/null 2>&1 || true
+logger -t fleet "firewall CONFIRMED and persisted"
+echo "CONFIRMED"

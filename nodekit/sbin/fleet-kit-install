@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""/usr/local/sbin/fleet-kit-install — обновление nodekit через fleet-exec (stdin: JSON-пакет от панели).
+
+Файлы ставятся только в заранее известные пути; sudoers проверяется visudo до подмены.
+"""
+import base64, json, os, subprocess, sys, tempfile
+
+ALLOWED = {
+    "/usr/local/sbin/fleet-exec", "/usr/local/sbin/fleetctl", "/usr/local/sbin/fleet-preflight",
+    "/usr/local/sbin/fleet-baseline", "/usr/local/sbin/fleet-fw-apply", "/usr/local/sbin/fleet-fw-rollback",
+    "/usr/local/sbin/fleet-fw-confirm", "/usr/local/sbin/fleet-core", "/usr/local/sbin/fleet-gate",
+    "/usr/local/sbin/fleet-kit-install", "/usr/local/sbin/fleet-sshd-harden", "/usr/local/sbin/fleet-xui",
+    "/etc/systemd/system/fleet-fw.service", "/etc/sudoers.d/90-fleet",
+}
+
+def main() -> int:
+    bundle = json.loads(sys.stdin.read())
+    files = bundle["files"]
+    for f in files:
+        if f["dest"] not in ALLOWED:
+            print(f"denied dest {f['dest']}", file=sys.stderr)
+            return 126
+    for f in files:
+        dest, data = f["dest"], base64.b64decode(f["b64"])
+        mode = int(f.get("mode", "0755"), 8)
+        d = os.path.dirname(dest)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".kit-")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, mode)
+        os.chown(tmp, 0, 0)
+        if dest.startswith("/etc/sudoers.d/"):
+            if subprocess.run(["visudo", "-cf", tmp], capture_output=True).returncode != 0:
+                os.unlink(tmp)
+                print("sudoers invalid", file=sys.stderr)
+                return 1
+        os.replace(tmp, dest)
+    os.makedirs("/usr/local/lib/fleet", exist_ok=True)
+    with open("/usr/local/lib/fleet/VERSION", "w") as fh:
+        fh.write(bundle["version"] + "\n")
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    print(f"nodekit {bundle['version']} installed")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

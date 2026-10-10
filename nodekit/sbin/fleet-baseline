@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-baseline — сохранить исходное состояние узла (§6, шаг 2). Только чтение системы.
+set -euo pipefail
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+D=/var/lib/fleet/baseline/$TS
+install -d -m 700 "$D"
+{ nft list ruleset 2>&1 || true; }            > "$D/nft.txt"
+{ iptables-save 2>&1 || true; }               > "$D/iptables.txt"
+{ ip6tables-save 2>&1 || true; }              > "$D/ip6tables.txt"
+{ ufw status verbose 2>&1 || true; }          > "$D/ufw.txt"
+{ install -d /run/sshd; sshd -T 2>&1 || true; } > "$D/sshd_T.txt"
+cp -a /etc/ssh/sshd_config "$D/" 2>/dev/null || true
+cp -a /etc/ssh/sshd_config.d "$D/" 2>/dev/null || true
+{ ss -ltnup 2>&1 || true; }                   > "$D/listen.txt"
+{ systemctl list-units --type=service --state=running --no-legend --plain 2>&1 || true; } > "$D/units.txt"
+for f in /home/fleet/.ssh/authorized_keys /root/.ssh/authorized_keys; do [ -f "$f" ] && sha256sum "$f"; done > "$D/authorized_keys.sha256" || true
+ln -sfn "$D" /var/lib/fleet/baseline/latest
+echo "$D"

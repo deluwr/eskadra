@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-gate — forced command ключа панели в строгом режиме (shell выключен).
+# Пропускает только «sudo -n /usr/local/sbin/fleet-exec <аргументы из безопасного набора>».
+set -euo pipefail
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+prefix='sudo -n /usr/local/sbin/fleet-exec '
+case "$cmd" in "$prefix"*) ;; *) echo "denied: strict mode allows only fleet-exec" >&2; exit 126 ;; esac
+rest="${cmd#"$prefix"}"
+[[ "$rest" =~ ^[A-Za-z0-9._:/@=,\ -]+$ ]] || { echo "denied: characters" >&2; exit 126; }
+read -r -a args <<< "$rest"
+exec sudo -n /usr/local/sbin/fleet-exec "${args[@]}"

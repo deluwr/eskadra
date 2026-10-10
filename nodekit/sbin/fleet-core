@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-core — ядра VPN под управлением Эскадры (отдельно от любых сторонних панелей на хосте).
+#   install <xray|sing-box> <version> <sha256>   скачать официальный релиз, проверить sha256, установить
+#   apply   <xray|sing-box> <staged.json>         проверить конфиг, подменить атомарно, перезапустить, откатить при сбое
+#   status|stop <core> · x25519 · stats · tls <sni>
+set -euo pipefail
+LIB=/usr/local/lib/eskadra
+ETC=/etc/eskadra
+die() { echo "$*" >&2; exit 1; }
+
+arch() {
+  case "$(uname -m)" in
+    x86_64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) die "unsupported arch $(uname -m)" ;;
+  esac
+}
+bin_of() { if [ "$1" = xray ]; then echo /usr/local/bin/eskadra-xray; else echo /usr/local/bin/eskadra-sing-box; fi; }
+unit_of() { echo "eskadra-$1.service"; }
+cfg_of() { echo "$ETC/$1/config.json"; }
+
+url_of() {  # официальные релизы на GitHub; версия без префикса v
+  local core="$1" v="$2" a; a="$(arch)"
+  if [ "$core" = xray ]; then
+    local x; [ "$a" = amd64 ] && x=64 || x=arm64-v8a
+    echo "https://github.com/XTLS/Xray-core/releases/download/v$v/Xray-linux-$x.zip"
+  else
+    echo "https://github.com/SagerNet/sing-box/releases/download/v$v/sing-box-$v-linux-$a.tar.gz"
+  fi
+}
+
+write_unit() {
+  local core="$1" bin cfg run
+  bin="$(bin_of "$core")"; cfg="$(cfg_of "$core")"
+  run="$bin run -c $cfg"
+  local env=""
+  [ "$core" = xray ] && env="Environment=XRAY_LOCATION_ASSET=$(dirname "$(readlink -f "$bin")")"
+  cat > "/etc/systemd/system/$(unit_of "$core").new" <<EOF
+[Unit]
+Description=Eskadra $core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+$env
+ExecStart=$run
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  mv "/etc/systemd/system/$(unit_of "$core").new" "/etc/systemd/system/$(unit_of "$core")"
+  systemctl daemon-reload
+}
+
+cmd_install() {
+  local core="$1" v="$2" sha="$3" url tmp dest
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]] || die "bad version"
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
+  url="$(url_of "$core" "$v")"
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  curl -fsSL --retry 3 --max-time 300 -o "$tmp/pkg" "$url" || die "download failed: $url"
+  echo "$sha  $tmp/pkg" | sha256sum -c --quiet - || die "sha256 mismatch"
+  dest="$LIB/$core/$v"; install -d -m 755 "$dest"
+  if [ "$core" = xray ]; then
+    python3 -m zipfile -e "$tmp/pkg" "$tmp/x"
+    install -m 755 "$tmp/x/xray" "$dest/xray"
+    for f in geoip.dat geosite.dat; do [ -f "$tmp/x/$f" ] && install -m 644 "$tmp/x/$f" "$dest/$f"; done
+    ln -sfn "$dest/xray" /usr/local/bin/eskadra-xray.new && mv -T /usr/local/bin/eskadra-xray.new /usr/local/bin/eskadra-xray
+  else
+    tar -xzf "$tmp/pkg" -C "$tmp"
+    install -m 755 "$tmp"/sing-box-*/sing-box "$dest/sing-box"
+    ln -sfn "$dest/sing-box" /usr/local/bin/eskadra-sing-box.new && mv -T /usr/local/bin/eskadra-sing-box.new /usr/local/bin/eskadra-sing-box
+  fi
+  install -d -m 750 "$ETC/$core"
+  write_unit "$core"
+  echo "$v" > "$LIB/$core/current"
+  echo "installed $core $v"
+}
+
+cmd_apply() {
+  local core="$1" staged="$2" bin cfg unit
+  bin="$(bin_of "$core")"; cfg="$(cfg_of "$core")"; unit="$(unit_of "$core")"
+  [ -x "$bin" ] || die "$core not installed"
+  if [ "$core" = xray ]; then
+    XRAY_LOCATION_ASSET="$(dirname "$(readlink -f "$bin")")" "$bin" run -test -c "$staged" >/dev/null || die "config test failed"
+  else
+    "$bin" check -c "$staged" || die "config check failed"
+  fi
+  install -d -m 750 "$ETC/$core"
+  [ -f "$cfg" ] && cp -a "$cfg" "$cfg.prev"
+  install -m 600 "$staged" "$cfg.new" && mv "$cfg.new" "$cfg"
+  systemctl enable "$unit" >/dev/null 2>&1 || true
+  systemctl restart "$unit"
+  sleep 2
+  if ! systemctl is-active --quiet "$unit"; then
+    journalctl -u "$unit" -n 20 --no-pager >&2 || true
+    if [ -f "$cfg.prev" ]; then mv "$cfg.prev" "$cfg"; systemctl restart "$unit" || true; echo "ROLLED BACK to previous config" >&2; fi
+    die "$core failed to start"
+  fi
+  echo "applied $core"
+}
+
+cmd_status() {
+  local core="$1"
+  echo "version=$(cat "$LIB/$core/current" 2>/dev/null || echo none)"
+  echo "active=$(systemctl is-active "$(unit_of "$core")" 2>/dev/null || true)"
+  echo "listen:"; ss -ltnupH 2>/dev/null | grep -E "eskadra|\"(xray|sing-box)\"" | awk '{print $1" "$5}' || true
+}
+
+cmd_x25519() {  # выводит private=… public=… (формат Xray менялся: Public key / Password)
+  local out; out="$(/usr/local/bin/eskadra-xray x25519)"
+  local priv pub
+  priv="$(printf '%s\n' "$out" | sed -nE 's/^(Private key|PrivateKey):[[:space:]]*//p' | head -1)"
+  pub="$(printf '%s\n' "$out" | sed -nE 's/^(Public key|Password|PublicKey):[[:space:]]*//p' | head -1)"
+  [ -n "$priv" ] && [ -n "$pub" ] || die "cannot parse x25519 output"
+  echo "private=$priv"; echo "public=$pub"
+}
+
+cmd_stats() {  # счётчики пользователей с обнулением (§16)
+  /usr/local/bin/eskadra-xray api statsquery --server=127.0.0.1:10085 -pattern 'user>>>' -reset 2>/dev/null || echo '{}'
+}
+
+cmd_tls() {  # самоподписанный сертификат для Hysteria2 (sing-box); выводит sha256 сертификата для pinning
+  local sni="$1" d="$ETC/sing-box/tls"
+  [[ "$sni" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || die "bad sni"
+  install -d -m 750 "$d"
+  if [ ! -s "$d/$sni.crt" ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+      -subj "/CN=$sni" -addext "subjectAltName=DNS:$sni" -keyout "$d/$sni.key" -out "$d/$sni.crt" >/dev/null 2>&1
+    chmod 600 "$d/$sni.key"
+  fi
+  echo "pin=$(openssl x509 -in "$d/$sni.crt" -outform der | sha256sum | cut -d' ' -f1)"
+  echo "cert=$d/$sni.crt"; echo "key=$d/$sni.key"
+}
+
+case "${1:-}" in
+  install) cmd_install "${2:?}" "${3:?}" "${4:?}" ;;
+  apply)   cmd_apply "${2:?}" "${3:?}" ;;
+  status)  cmd_status "${2:?}" ;;
+  stop)    systemctl disable --now "$(unit_of "${2:?}")" 2>/dev/null || true; echo stopped ;;
+  x25519)  cmd_x25519 ;;
+  stats)   cmd_stats ;;
+  tls)     cmd_tls "${2:?}" ;;
+  *) die "usage: fleet-core install|apply|status|stop|x25519|stats|tls" ;;
+esac

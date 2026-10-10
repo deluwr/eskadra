@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/fleet-sshd-harden apply|confirm|rollback — контроль C3 «SSH только по ключам» под таймером отката (§7.6).
+set -euo pipefail
+F=/etc/ssh/sshd_config.d/00-fleet-hardening.conf
+reload() { install -d /run/sshd; sshd -t && systemctl try-reload-or-restart ssh; }
+case "${1:-}" in
+  apply)
+    systemctl stop fleet-ssh-rollback.timer 2>/dev/null || true
+    systemd-run --unit=fleet-ssh-rollback --on-active=180s --collect /usr/local/sbin/fleet-sshd-harden rollback >/dev/null
+    printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' > "$F.new"
+    mv "$F.new" "$F"
+    if ! reload; then rm -f "$F"; reload || true; echo "sshd config invalid, reverted" >&2; exit 1; fi
+    echo "PENDING: key-only SSH active, confirm within 180s" ;;
+  confirm)
+    [ -f "$F" ] || { echo "nothing to confirm: rolled back" >&2; exit 1; }
+    systemctl stop fleet-ssh-rollback.timer 2>/dev/null || true
+    echo "CONFIRMED" ;;
+  rollback)
+    rm -f "$F"; reload || true
+    logger -t fleet "sshd hardening ROLLED BACK" 2>/dev/null || true
+    echo "ROLLED BACK" ;;
+  status)
+    if [ -f "$F" ]; then echo on; else echo off; fi ;;
+  *) echo "usage: fleet-sshd-harden apply|confirm|rollback|status" >&2; exit 2 ;;
+esac
