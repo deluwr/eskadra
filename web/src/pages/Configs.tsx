@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, type Job, type Server, type Template } from '../api';
-import { CopyBlock, ErrorBox, Seg, Switch, Tag, useAsync, usePoll } from '../ui';
+import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, useAsync, usePoll } from '../ui';
 
 interface Draft {
   id: string | null; name: string; protocol: 'vless-reality' | 'hysteria2'; port: string; sni: string; fingerprint: string;
@@ -73,7 +73,12 @@ function CoresPanel() {
   if (!data) return null;
   const rels = (data.releases[core] ?? []).filter((r) => pre || !r.prerelease);
   const ver = (c: { version: string; previous?: string } | null, k: string, s: CoresInfo['servers'][number]) => {
-    if (!c) return <span className="k">—</span>;
+    if (!c) return (
+      <span className="stack" style={{ gap: 4 }}>
+        <span className="k">не установлено</span>
+        <span><button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/update`, { version: data.pins[k] ?? 'latest' }); void reload(); })}>Установить</button></span>
+      </span>
+    );
     const old = s.outdated.includes(k);
     return (
       <span className="stack" style={{ gap: 4 }}>
@@ -88,7 +93,7 @@ function CoresPanel() {
   return (
     <section className="card">
       <div className="card-head">
-        <div className="row-text"><h2>Ядра</h2><span className="k">Обновление: новая версия ставится рядом, текущий конфиг проверяется новым бинарником, при неудаче узел сам возвращает прежнюю. Xray узлов с 3x-ui обновляется в самом 3x-ui.</span></div>
+        <h2>Ядра <Info>Ядра ставятся при подключении сервера; здесь их можно установить, обновить или откатить. Новая версия ставится рядом со старой и проверяется текущим конфигом — при неудаче сервер сам возвращает прежнюю. Xray серверов с 3x-ui обновляется в самом 3x-ui.</Info></h2>
         <span className="k">последние стабильные: Xray {data.latest.xray ?? '?'} · sing-box {data.latest['sing-box'] ?? '?'}</span>
       </div>
       {data.errors.map((e) => <div key={e} className="alert warn" style={{ margin: '0 20px' }}>GitHub недоступен: {e}</div>)}
@@ -109,7 +114,7 @@ function CoresPanel() {
         </table>
       </div>
       <div className="row stack" style={{ alignItems: 'stretch' }}>
-        <h3>Обновить по флоту</h3>
+        <h3>По всему флоту</h3>
         <div className="flex">
           <Seg value={core} label="Ядро" onChange={(c) => { setCore(c); setVersion('latest'); }} options={[['xray', 'Xray'], ['sing-box', 'sing-box']]} />
           <select className="inp" style={{ width: 'auto' }} value={version} onChange={(e) => setVersion(e.target.value)} aria-label="Версия">
@@ -119,7 +124,7 @@ function CoresPanel() {
           <label className="cb small"><input type="checkbox" checked={pre} onChange={(e) => setPre(e.target.checked)} />показывать предрелизы</label>
         </div>
         <div className="flex">
-          <button className="btn pri" disabled={busy} onClick={() => { if (confirm(`Обновить ${core} до ${version} на всех узлах со своим ядром? Canary → остальные, первая ошибка останавливает.`)) void run(async () => { const r = await api.post<{ jobId: number }>(`/api/v1/cores/${core}/rollout`, { version }); setJobId(r.jobId); }); }}>Обновить все узлы</button>
+          <button className="btn pri" disabled={busy} onClick={() => { if (confirm(`Установить или обновить ${core} (${version}) на всех узлах? По одному узлу, первая ошибка останавливает.`)) void run(async () => { const r = await api.post<{ jobId: number }>(`/api/v1/cores/${core}/rollout`, { version }); setJobId(r.jobId); }); }}>Установить или обновить на всех узлах</button>
           <button className="btn" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/cores/pin', { core, version }); void reload(); })}>Закрепить для новых узлов</button>
           <span className="k">Сейчас новые узлы получают: {core} {data.pins[core] ?? 'latest'}</span>
         </div>

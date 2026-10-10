@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api, ApiError, setOtpProvider } from './api';
-import { ErrorBox, Icon, Modal, useAsync } from './ui';
+import { CopyButton, ErrorBox, Icon, Info, Modal, useAsync } from './ui';
 import { OverviewPage } from './pages/Overview';
 import { ServersPage } from './pages/Servers';
 import { ServerDetailPage } from './pages/ServerDetail';
@@ -99,11 +99,27 @@ export function App() {
 
 function ExecutorFoot() {
   const [ips, setIps] = useState<string[] | null>(null);
-  useEffect(() => { api.get<{ executorIps: string[] }>('/api/v1/settings').then((s) => setIps(s.executorIps)).catch(() => undefined); }, []);
+  const [ver, setVer] = useState<{ version: string; latest: string | null; updateAvailable: boolean } | null>(null);
+  useEffect(() => {
+    api.get<{ executorIps: string[] }>('/api/v1/settings').then((s) => setIps(s.executorIps)).catch(() => undefined);
+    // наличие обновления проверяется при открытии панели
+    api.get<{ version: string; latest: string | null; updateAvailable: boolean }>('/api/v1/version').then(setVer).catch(() => undefined);
+  }, []);
   return (
     <div className="side-foot">
       <span className="k">Исполнитель</span>
       <span className="mono small">{ips?.length ? ips.join(', ') : 'не задан'}</span>
+      {ver && (
+        <span className="flex" style={{ gap: 6, marginTop: 6 }}>
+          <span className="k">Эскадра <span className="mono">{ver.version}</span></span>
+          {ver.updateAvailable && (
+            <span className="flex" style={{ gap: 2 }}>
+              <span className="tag ok">есть {ver.latest}</span>
+              <Info label="Как обновить">Обновление ставится на главном сервере под root: <code>eskadra update</code> (или пункт «Обновить» в меню <code>eskadra</code>). Данные и настройки сохраняются.<br /><CopyButton text="eskadra update" label="Скопировать команду" /></Info>
+            </span>
+          )}
+        </span>
+      )}
     </div>
   );
 }

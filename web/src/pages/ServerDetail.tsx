@@ -11,7 +11,8 @@ export function ServerDetailPage({ id }: { id: string }) {
   const [tab, setTab] = useState<Tab>('protect');
   if (!d) return <><ErrorBox error={error} />{!error && <p className="muted">Загрузка…</p>}</>;
   const s = d.server;
-  const onboarding = s.stage < 2;
+  // блок подключения виден, пока идёт настройка или если последняя попытка не удалась (в т. ч. на шаге ядер)
+  const onboarding = s.stage < 2 || d.onboarding.running || d.onboarding.job?.status === 'failed';
 
   return (
     <>
@@ -96,14 +97,14 @@ function PendingBanner({ d, onChange }: { d: ServerDetail; onChange: () => void 
 
 // ───── подключение: всё делает панель ─────
 
-const ONBOARD_STEPS = ['Первичный доступ', 'Вход ключом панели', 'Проверка сервера', 'Служебные скрипты и sudo'];
+const ONBOARD_STEPS = ['Первичный доступ', 'Вход ключом панели', 'Проверка сервера', 'Служебные скрипты и sudo', 'Ядра Xray и sing-box'];
 
 function Onboarding({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const job = d.onboarding.job;
   const running = d.onboarding.running;
   const log = job?.log ?? '';
-  const reached = Math.max(0, ...[...log.matchAll(/шаг (\d)\/4/g)].map((m) => Number(m[1])));
+  const reached = Math.max(0, ...[...log.matchAll(/шаг (\d)\/5/g)].map((m) => Number(m[1])));
   const failed = !running && job?.status === 'failed';
   const err = failed ? (log.match(/ошибка: (.*)/g)?.pop()?.replace(/^ошибка: /, '') ?? 'неизвестная ошибка') : null;
   const [askAuth, setAskAuth] = useState(false);
@@ -564,6 +565,30 @@ function NodekitStep({ d, onChange }: { d: ServerDetail; onChange: () => void })
   );
 }
 
+/** Свои ядра на узле: версия или «не установлено» с кнопкой установки. */
+function CoreRows({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
+  const s = d.server;
+  const { busy, error, run } = useAsync();
+  const rows: Array<['xray' | 'sing-box', string]> = [['xray', 'Xray'], ['sing-box', 'sing-box']];
+  return (
+    <div className="stack">
+      {rows.map(([core, label]) => {
+        const v = s.cores[core]?.version;
+        const xui = core === 'xray' && s.coreModeEffective === 'xui';
+        return (
+          <div key={core} className="flex" style={{ justifyContent: 'space-between' }}>
+            <span><b>{label}</b> <span className="k">{xui ? `из 3x-ui${s.cores.xui?.version ? ' ' + s.cores.xui.version : ''}` : v ? v : 'не установлено'}</span></span>
+            {!xui && !v && s.sudo_mode === 'restricted' && (
+              <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${core}/update`, {}); onChange(); })}>{busy ? 'Ставлю…' : 'Установить'}</button>
+            )}
+          </div>
+        );
+      })}
+      <ErrorBox error={error} />
+    </div>
+  );
+}
+
 function CoresCard({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const [f, setF] = useState({ user: s.xui_user ?? '', pass: '' });
@@ -576,6 +601,7 @@ function CoresCard({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         <h2>Ядра</h2>
         <Tag kind="acc">{s.coreModeEffective === 'xui' ? 'Xray из 3x-ui' : 'свой Xray Эскадры'}</Tag>
       </div>
+      <CoreRows d={d} onChange={onChange} />
       <div className="flex">
         <span className="k">Найдено на узле:</span>
         {s.external_cores.length ? s.external_cores.map((c) => <Tag key={c.name} kind={c.active === 'active' ? 'info' : undefined}>{c.name}{c.version ? ` ${c.version}` : ''} · {c.active || '?'}</Tag>) : <span className="k">сторонних ядер нет (по данным preflight)</span>}

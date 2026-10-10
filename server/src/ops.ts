@@ -88,10 +88,41 @@ export class Ops {
    * переключает и перезапускает, а при неудаче возвращает прежнюю (fleet-core install).
    * Панель дополнительно проверяет, что порты inbounds снова слушаются; если нет — откат.
    */
+  /**
+   * Ядра узла при подключении: свои Xray и sing-box, если их место не занято. Xray узла с 3x-ui — его собственный;
+   * если работает чужое ядро того же типа, своё не ставится (без конфликта за порты). Возвращает итог по ядрам.
+   */
+  async installCores(s: ServerRow, log: (l: string) => void): Promise<string[]> {
+    const out: string[] = [];
+    for (const core of ['xray', 'sing-box'] as Core[]) {
+      const fresh = this.ctx.server(s.id);
+      const have = json<Record<string, { version: string }>>(fresh.cores, {});
+      if (core === 'xray' && coreMode(fresh) === 'xui') { out.push('Xray: используется Xray из 3x-ui'); continue; }
+      const foreign = foreignCore(fresh, core);
+      if (foreign) { out.push(`${core}: на сервере уже работает ${foreign.name} — своё ядро не ставится`); continue; }
+      if (have[core]) { out.push(`${core} ${have[core]!.version}: уже установлен`); continue; }
+      await this.ctx.onNode(fresh, (n) => this.ensureCore(fresh, n, core, log));
+      out.push(`${core} ${json<Record<string, { version: string }>>(this.ctx.server(s.id).cores, {})[core]?.version ?? '?'}: установлен`);
+    }
+    return out;
+  }
+
   async upgradeCore(s: ServerRow, core: Core, version: string, log: (l: string) => void): Promise<string> {
     if (core === 'xray' && coreMode(s) === 'xui') throw new Error(`${s.name}: Xray принадлежит 3x-ui — обновляйте его в самом 3x-ui`);
     const cores = json<Record<string, { version: string; previous?: string }>>(s.cores, {});
-    if (!cores[core]) throw new Error(`${s.name}: ${core} не установлен — он появится при выкате конфигурации`);
+    if (!cores[core]) {
+      // ядра ещё нет — ставим выбранную версию (ensureCore проверит 3x-ui и чужие ядра)
+      const rel = await releaseFor(core, version === 'latest' ? this.pinned(core) : version, archOf(s));
+      const foreign = foreignCore(s, core);
+      if (foreign) throw new Error(`${s.name}: уже работает ${foreign.name} — Эскадра не ставит второе ядро ${core}`);
+      log(`${s.name}: установка ${core} ${rel.version}`);
+      await this.ctx.onNode(s, async (n) => {
+        await this.ensureKit(s, n, log);
+        await n.must(['core-install', core, rel.version, rel.sha256], { timeoutMs: 600_000 });
+      });
+      this.ctx.updateServer(s.id, { cores: JSON.stringify({ ...cores, [core]: { version: rel.version } }) });
+      return rel.version;
+    }
     const rel = await releaseFor(core, version, archOf(s));
     if (rel.version === cores[core]!.version) { log(`${s.name}: уже ${core} ${rel.version}`); return rel.version; }
     log(`${s.name}: ${core} ${cores[core]!.version} → ${rel.version}`);

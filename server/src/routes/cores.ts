@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { coreMode, Ctx, guard, HttpError } from '../ctx.js';
+import { coreMode, Ctx, foreignCore, guard, HttpError } from '../ctx.js';
 import { getSetting, setSetting } from '../db.js';
 import { audit } from '../lib/audit.js';
 import { Ops, startJob } from '../ops.js';
@@ -87,10 +87,12 @@ export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
     const core = coreParam.parse(req.params.core);
     const b = versionBody.extend({ serverIds: z.array(z.string()).optional() }).parse(req.body ?? {});
     if (running.has(core)) throw new HttpError(409, `обновление ${core} уже идёт`);
+    // узлы, где ядра ещё нет, тоже: обновление ставит его (кроме Xray из 3x-ui и узлов с чужим ядром)
     const targets = ctx.servers().filter((s) =>
-      s.sudo_mode === 'restricted' && json<Record<string, unknown>>(s.cores, {})[core] && !(core === 'xray' && coreMode(s) === 'xui') &&
+      s.sudo_mode === 'restricted' && !(core === 'xray' && coreMode(s) === 'xui') &&
+      (json<Record<string, unknown>>(s.cores, {})[core] || !foreignCore(s, core)) &&
       (!b.serverIds || b.serverIds.includes(s.id)));
-    if (!targets.length) throw new HttpError(409, `нет узлов со своим ${core}`);
+    if (!targets.length) throw new HttpError(409, `нет узлов, где можно поставить или обновить ${core}`);
     const job = startJob(ctx, null, `core.rollout:${core}`);
     running.add(core);
     audit(db, req.admin!.username, 'core.rollout', core, { version: b.version, servers: targets.map((t) => t.name) });

@@ -109,7 +109,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = 'srv-' + randomToken(4).toLowerCase().replace(/[^a-z0-9]/g, 'x');
     const keys = sshUtils.generateKeyPairSync('ed25519', { comment: `fleet-panel/${id}` });
     // главный сервер — P1 по умолчанию (защита опциональна), ноды — цель P3 сразу (§7.11.2)
-    const target = 'P3';   // ноды — сразу высокий уровень (§7.11.2); применение — после проверки
+    const target = 'P1';   // по умолчанию обычная защита; уровень повышается в карточке сервера
     db.prepare(
       `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

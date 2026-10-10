@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { isIP } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { versionInfo } from '../version.js';
 import { Ctx, guard, HttpError } from '../ctx.js';
 import { getSetting, setSetting } from '../db.js';
 import { hashPassword, sha256hex, verifyPassword } from '../lib/crypto.js';
@@ -166,6 +167,8 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   });
 
   // ───── настройки ─────
+  app.get('/api/v1/version', async () => versionInfo());
+
   app.get('/api/v1/settings', async () => ({
     executorIps: ctx.executorIps(),
     sub: { host: getSetting(db, 'sub.host', ''), port: getSetting(db, 'sub.port', 0), scheme: getSetting(db, 'sub.scheme', 'http') },

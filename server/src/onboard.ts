@@ -214,12 +214,12 @@ export function startOnboarding(ctx: Ctx, id: string, who: string, auth?: Bootst
     try {
       let r = ctx.server(id);
       if (auth) {
-        job.log('шаг 1/4: первичный доступ (одноразовые данные не сохраняются)');
+        job.log('шаг 1/5: первичный доступ (одноразовые данные не сохраняются)');
         await bootstrapWithAuth(ctx, r, auth, job.log);
         r = ctx.server(id);
       } else if (!r.host_key_fp) {
         // сниппет выполнен вручную: ключ сервера закрепляется при первом подключении панели (через туннель — тоже)
-        job.log('шаг 1/4: сниппет выполнен вручную — получаю ключ сервера');
+        job.log('шаг 1/5: сниппет выполнен вручную — получаю ключ сервера');
         const t = ctx.target(r);
         const hk = await fetchHostKey(t.host, t.port, 15_000, t);
         ctx.updateServer(id, { host_key_fp: hk.fp, host_key_algo: hk.algo, host_key_pending_fp: null });
@@ -228,21 +228,24 @@ export function startOnboarding(ctx: Ctx, id: string, who: string, auth?: Bootst
       }
       // повторный bootstrap (например, смена канала) снова выдаёт широкий sudo — поэтому с доступом проходим цикл целиком
       if (r.sudo_mode !== 'restricted' || auth) {
-        job.log('шаг 2/4: вход ключом панели и sudo');
+        job.log('шаг 2/5: вход ключом панели и sudo');
         const c = await checkLogin(ctx, r);
         if (!c.ok) throw new Error(`ключ панели работает, но sudo нет: ${c.sudo}`);
         r = ctx.server(id);
-        job.log('шаг 3/4: проверка сервера (только чтение)');
+        job.log('шаг 3/5: проверка сервера (только чтение)');
         const pre = await runPreflight(ctx, r, job);
         if (pre.blocking) throw new Error(`проверка нашла блокирующие проблемы: ${pre.checks.filter((c) => c.status === 'fail').map((c) => c.title).join('; ')}`);
         r = ctx.server(id);
-        job.log('шаг 4/4: служебные скрипты, сужение sudo, строгий режим');
+        job.log('шаг 4/5: служебные скрипты, сужение sudo, строгий режим');
         const v = await installNodekit(ctx, r, job);
-        job.log(`готово: nodekit ${v}`);
+        job.log(`nodekit ${v} установлен`);
       } else {
         job.log('узел уже настроен — проверяю вход');
         await checkLogin(ctx, r);
       }
+      job.log('шаг 5/5: ядра Xray и sing-box');
+      for (const line of await new Ops(ctx).installCores(ctx.server(id), job.log)) job.log(line);
+      job.log('готово');
       job.finish('ok');
       audit(ctx.db, who, 'server.onboarded', id);
     } catch (e) {
