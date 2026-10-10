@@ -14,7 +14,7 @@
 set -euo pipefail
 
 REPO="${ESKADRA_REPO:-deluwr/eskadra}"
-VERSION="${ESKADRA_VERSION:-latest}"
+ESK_VERSION="${ESKADRA_VERSION:-latest}"
 NODE_MAJOR="${ESKADRA_NODE_MAJOR:-24}"
 PREFIX=/opt/eskadra
 DATA=/var/lib/eskadra
@@ -27,8 +27,10 @@ warn() { printf '%s\n' "${c_warn}!${c_0} $*" >&2; }
 die()  { printf '%s\n' "${c_err}✗ $*${c_0}" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "запустите под root (sudo -i)"
-[ -r /etc/os-release ] && . /etc/os-release
-case "${ID:-}" in ubuntu|debian) ;; *) warn "проверено на Ubuntu 22.04/24.04 и Debian; у вас ${PRETTY_NAME:-неизвестная ОС}" ;; esac
+# данные ОС читаем в подоболочке: os-release определяет свои VERSION, NAME, ID и затёр бы переменные установщика
+OS_ID="$( [ -r /etc/os-release ] && . /etc/os-release; echo "${ID:-}" )"
+OS_NAME="$( [ -r /etc/os-release ] && . /etc/os-release; echo "${PRETTY_NAME:-неизвестная ОС}" )"
+case "$OS_ID" in ubuntu|debian) ;; *) warn "проверено на Ubuntu 22.04/24.04 и Debian; у вас $OS_NAME" ;; esac
 case "$(uname -m)" in x86_64) ARCH=x64 ;; aarch64|arm64) ARCH=arm64 ;; *) die "архитектура $(uname -m) не поддерживается" ;; esac
 [[ "$REPO" == */* && "$REPO" != *__* ]] || die "задайте репозиторий: ESKADRA_REPO=owner/eskadra"
 
@@ -60,9 +62,9 @@ install_node() {
 # ── Релиз Эскадры с GitHub, с проверкой SHA256 ──────────────────────────────
 install_app() {
   local base tmp
-  if [ "$VERSION" = latest ]; then base="https://github.com/$REPO/releases/latest/download"
-  else base="https://github.com/$REPO/releases/download/$VERSION"; fi
-  say "Эскадра ($VERSION) из $REPO"
+  if [ "$ESK_VERSION" = latest ]; then base="https://github.com/$REPO/releases/latest/download"
+  else base="https://github.com/$REPO/releases/download/$ESK_VERSION"; fi
+  say "Эскадра ($ESK_VERSION) из $REPO"
   tmp="$(mktemp -d)"
   fetch -o "$tmp/eskadra.tar.gz" "$base/eskadra.tar.gz" || die "не удалось скачать релиз"
   fetch -o "$tmp/eskadra.tar.gz.sha256" "$base/eskadra.tar.gz.sha256" || die "нет файла контрольной суммы релиза"
