@@ -42,10 +42,32 @@ public_ip() {
 public_host() { local h; h="$(getenv FLEET_PUBLIC_HOST)"; [ -n "$h" ] && echo "$h" || public_ip; }
 
 ufw_on() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; }
-ufw_swap() {  # ufw_swap OLD NEW COMMENT
-  ufw_on || return 0
-  [ -n "$1" ] && ufw delete allow "$1/tcp" >/dev/null 2>&1 || true
-  ufw allow "$2/tcp" comment "$3" >/dev/null && ok "ufw: порт $2 открыт${1:+, $1 закрыт}"
+firewalld_on() { command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; }
+ufw_swap() {  # ufw_swap OLD NEW COMMENT — открыть новый порт и закрыть старый в firewall хоста (ufw или firewalld)
+  if ufw_on; then
+    [ -n "$1" ] && ufw delete allow "$1/tcp" >/dev/null 2>&1 || true
+    ufw allow "$2/tcp" comment "$3" >/dev/null && ok "ufw: порт $2 открыт${1:+, $1 закрыт}"
+  fi
+  if firewalld_on; then
+    [ -n "$1" ] && firewall-cmd -q --permanent --remove-port="$1/tcp" 2>/dev/null || true
+    firewall-cmd -q --permanent --add-port="$2/tcp" && firewall-cmd -q --reload && ok "firewalld: порт $2 открыт${1:+, $1 закрыт}"
+  fi
+}
+
+pm() {
+  if command -v apt-get >/dev/null; then echo apt; elif command -v dnf >/dev/null; then echo dnf
+  elif command -v yum >/dev/null; then echo yum; elif command -v zypper >/dev/null; then echo zypper
+  elif command -v pacman >/dev/null; then echo pacman; else echo none; fi
+}
+pkg_add() {  # pkg_add <пакет> — установить пакетным менеджером системы
+  case "$(pm)" in
+    apt) DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -qq "$@" >/dev/null ;;
+    dnf) dnf install -y -q "$@" >/dev/null ;;
+    yum) yum install -y -q "$@" >/dev/null ;;
+    zypper) zypper --non-interactive --quiet install "$@" >/dev/null ;;
+    pacman) pacman -Sy --noconfirm --needed "$@" >/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 restart() { systemctl restart eskadra; sleep 2; systemctl is-active --quiet eskadra && ok "панель перезапущена" || { journalctl -u eskadra -n 20 --no-pager; die "панель не запустилась"; }; }
@@ -132,13 +154,31 @@ cmd_reset_password() {
 
 # ───────────────────────── сертификаты ─────────────────────────
 
+venv_python() {  # Python ≥ 3.9 с рабочим venv (certbot 5.x не ставится на 3.6 из RHEL 8)
+  local py
+  for py in python3.13 python3.12 python3.11 python3.10 python3.9 python3; do
+    command -v "$py" >/dev/null || continue
+    "$py" -c 'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 9))' 2>/dev/null && { command -v "$py"; return 0; }
+  done
+  return 1
+}
+
 ensure_certbot() {
-  # сертификаты на IP требуют certbot ≥ 5.3 (в репозиториях Ubuntu он старее) — ставим в отдельный venv
+  # сертификаты на IP требуют certbot ≥ 5.3 (в репозиториях дистрибутивов он старее) — ставим в отдельный venv
   if [ -x "$CERTBOT" ] && "$CERTBOT" --version 2>/dev/null | awk '{split($2,v,"."); exit !(v[1]>5 || (v[1]==5 && v[2]>=4))}'; then return; fi
   echo "  ставлю certbot…"
-  export DEBIAN_FRONTEND=noninteractive
-  python3 -m venv --help >/dev/null 2>&1 && python3 -c 'import ensurepip' 2>/dev/null || apt-get -o DPkg::Lock::Timeout=600 install -y -qq python3-venv >/dev/null
-  python3 -m venv "$PREFIX/certbot"
+  local py
+  if ! py="$(venv_python)"; then
+    case "$(pm)" in
+      apt) pkg_add python3-venv ;;
+      dnf|yum) pkg_add python3.11 || pkg_add python39 ;;   # RHEL 8: системный python3 — 3.6
+      zypper) pkg_add python311 || pkg_add python3 ;;
+      pacman) pkg_add python ;;
+    esac || true
+    py="$(venv_python)" || die "нужен Python ≥ 3.9 с модулем venv — установите его и повторите"
+  fi
+  rm -rf "$PREFIX/certbot"
+  "$py" -m venv "$PREFIX/certbot"
   "$PREFIX/certbot/bin/pip" install -q --upgrade pip >/dev/null
   "$PREFIX/certbot/bin/pip" install -q 'certbot>=5.4' >/dev/null
   "$CERTBOT" --version >/dev/null || die "certbot не установился"
@@ -151,10 +191,12 @@ write_hooks() {  # write_hooks <unit, который держит :80, или п
     echo '# перед выпуском/продлением: открыть порт 80 на ~30 с (ACME HTTP-01)'
     [ -n "$1" ] && echo "systemctl stop $1"
     echo 'if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw allow 80/tcp comment "eskadra acme" >/dev/null; fi'
+    echo 'if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --add-port=80/tcp; fi'
   } > "$ETC/hooks/pre.sh"
   {
     echo '#!/bin/sh'
     echo 'if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw delete allow 80/tcp >/dev/null 2>&1 || true; fi'
+    echo 'if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --remove-port=80/tcp || true; fi'
     [ -n "$1" ] && echo "systemctl start $1"
     echo 'exit 0'
   } > "$ETC/hooks/post.sh"

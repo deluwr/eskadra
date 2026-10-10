@@ -30,14 +30,48 @@ die()  { printf '%s\n' "${c_err}✗ $*${c_0}" >&2; exit 1; }
 # данные ОС читаем в подоболочке: os-release определяет свои VERSION, NAME, ID и затёр бы переменные установщика
 OS_ID="$( [ -r /etc/os-release ] && . /etc/os-release; echo "${ID:-}" )"
 OS_NAME="$( [ -r /etc/os-release ] && . /etc/os-release; echo "${PRETTY_NAME:-неизвестная ОС}" )"
-case "$OS_ID" in ubuntu|debian) ;; *) warn "проверено на Ubuntu 22.04/24.04 и Debian; у вас $OS_NAME" ;; esac
 case "$(uname -m)" in x86_64) ARCH=x64 ;; aarch64|arm64) ARCH=arm64 ;; *) die "архитектура $(uname -m) не поддерживается" ;; esac
 [[ "$REPO" == */* && "$REPO" != *__* ]] || die "задайте репозиторий: ESKADRA_REPO=owner/eskadra"
 
-say "Пакеты"
-export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-need=""; for p in curl:curl openssl:openssl xz:xz-utils tar:tar ss:iproute2; do command -v "${p%%:*}" >/dev/null || need="$need ${p#*:}"; done
-if [ -n "$need" ]; then apt-get -o DPkg::Lock::Timeout=600 update -qq && apt-get -o DPkg::Lock::Timeout=600 install -y -qq $need >/dev/null; fi
+# ── Совместимость: любой Linux с systemd и glibc ≥ 2.28 ──────────────────────
+# Проверено на Ubuntu 22.04/24.04 и Debian 12; работает на Debian/Ubuntu, RHEL/Rocky/Alma/Fedora,
+# openSUSE и Arch. Alpine (musl, OpenRC) не поддерживается: официальные сборки Node.js — под glibc.
+[ -d /run/systemd/system ] || die "нужен systemd (у вас $OS_NAME без systemd)"
+GLIBC="$(ldd --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
+if [ -z "$GLIBC" ]; then die "не найдена glibc (musl/Alpine не поддерживается: Node.js собирается под glibc)"; fi
+awk -v v="$GLIBC" 'BEGIN { split(v, a, "."); exit !(a[1] > 2 || (a[1] == 2 && a[2] >= 28)) }' \
+  || die "glibc $GLIBC слишком старая для Node.js $NODE_MAJOR (нужна ≥ 2.28; это Ubuntu 20.04+, Debian 10+, RHEL 8+)"
+
+if   command -v apt-get >/dev/null; then PM=apt
+elif command -v dnf     >/dev/null; then PM=dnf
+elif command -v yum     >/dev/null; then PM=yum
+elif command -v zypper  >/dev/null; then PM=zypper
+elif command -v pacman  >/dev/null; then PM=pacman
+else die "не найден поддерживаемый менеджер пакетов (apt, dnf, yum, zypper, pacman)"; fi
+case "$OS_ID" in ubuntu|debian) ;; *) warn "$OS_NAME: не входит в тест-матрицу (Ubuntu/Debian), ставлю через $PM" ;; esac
+
+# pkg_install <команда:пакет-apt:пакет-rpm:пакет-pacman> … — ставит только то, чего нет
+pkg_install() {
+  local need=() spec cmd deb rpm arch
+  for spec in "$@"; do
+    IFS=: read -r cmd deb rpm arch <<< "$spec"
+    command -v "$cmd" >/dev/null && continue
+    case "$PM" in apt) need+=("$deb") ;; dnf|yum|zypper) need+=("$rpm") ;; pacman) need+=("${arch:-$rpm}") ;; esac
+  done
+  [ ${#need[@]} -gt 0 ] || return 0
+  case "$PM" in
+    apt)    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+            apt-get -o DPkg::Lock::Timeout=600 update -qq && apt-get -o DPkg::Lock::Timeout=600 install -y -qq "${need[@]}" >/dev/null ;;
+    dnf)    dnf install -y -q "${need[@]}" >/dev/null ;;
+    yum)    yum install -y -q "${need[@]}" >/dev/null ;;
+    zypper) zypper --non-interactive --quiet install "${need[@]}" >/dev/null ;;
+    pacman) pacman -Sy --noconfirm --needed "${need[@]}" >/dev/null ;;
+  esac
+}
+
+say "Пакеты ($PM)"
+pkg_install curl:curl:curl openssl:openssl:openssl xz:xz-utils:xz tar:tar:tar ss:iproute2:iproute:iproute2 \
+  python3:python3:python3:python sha256sum:coreutils:coreutils useradd:passwd:shadow-utils:shadow
 
 fetch() { curl -fsSL --retry 3 --max-time 600 "$@"; }
 
@@ -102,7 +136,8 @@ FRESH=0
 install_node
 install_app
 
-id eskadra >/dev/null 2>&1 || useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin eskadra
+NOLOGIN="$(command -v nologin || echo /bin/false)"   # /usr/sbin/nologin в Debian, /sbin/nologin в RHEL
+id eskadra >/dev/null 2>&1 || useradd --system --home-dir "$DATA" --shell "$NOLOGIN" eskadra
 install -d -m 700 -o eskadra -g eskadra "$DATA" "$DATA/tls"
 install -d -m 755 "$ETC"
 
@@ -165,10 +200,15 @@ if [ "$FRESH" = 1 ]; then
   cli() { runuser -u eskadra -- env $(grep -v '^#' "$ENVF" | xargs) "$PREFIX/node/bin/node" "$PREFIX/app/server/dist/cli.js" "$@"; }
   [ -n "$IP" ] && cli executor "$IP" >/dev/null
   SUBPORT="$(cli sub-port random "$IP")"
+  # порты панели и подписок — в том firewall хоста, который включён (ufw в Debian/Ubuntu, firewalld в RHEL/Fedora/openSUSE)
   if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
     ufw allow "$PORT/tcp" comment 'eskadra panel' >/dev/null
     ufw allow "$SUBPORT/tcp" comment 'eskadra subscriptions' >/dev/null
     say "ufw: открыты порты $PORT и $SUBPORT"
+  fi
+  if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd -q --permanent --add-port="$PORT/tcp" --add-port="$SUBPORT/tcp" && firewall-cmd -q --reload
+    say "firewalld: открыты порты $PORT и $SUBPORT"
   fi
 fi
 
