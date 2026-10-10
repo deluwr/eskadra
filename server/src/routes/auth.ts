@@ -27,11 +27,14 @@ export function sessionAdmin(ctx: Ctx, req: FastifyRequest) {
   const token = req.cookies[COOKIE];
   if (!token) return undefined;
   const a = ctx.db
-    .prepare(`SELECT a.id, a.username, a.role, a.totp_enabled, a.totp_sealed FROM sessions s JOIN admins a ON a.id = s.admin_id
+    .prepare(`SELECT a.id, a.username, a.role, a.totp_enabled, a.totp_sealed, s.console FROM sessions s JOIN admins a ON a.id = s.admin_id
        WHERE s.token_hash = ? AND s.expires_at > datetime('now')`)
-    .get(sha256hex(token)) as Omit<AdminRow, 'pw_hash'> | undefined;
+    .get(sha256hex(token)) as (Omit<AdminRow, 'pw_hash'> & { console: number }) | undefined;
   if (!a) return undefined;
-  return { id: a.id, username: a.username, role: a.role, totp: !!a.totp_enabled, totpSecret: a.totp_sealed ? ctx.open(a.totp_sealed) : null };
+  return {
+    id: a.id, username: a.console ? `${a.username} (консоль)` : a.username, role: a.role, totp: !!a.totp_enabled,
+    totpSecret: a.totp_sealed ? ctx.open(a.totp_sealed) : null, console: !!a.console,
+  };
 }
 
 /** Защита API: сессия + заголовок X-Fleet на изменяющих запросах (CSRF: кросс-сайт его не пошлёт без CORS). */

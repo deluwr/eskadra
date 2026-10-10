@@ -8,6 +8,9 @@
 #   ESKADRA_VERSION=v0.4.0       конкретная версия (по умолчанию — последняя)
 #   ESKADRA_PORT=…               порт панели (по умолчанию — случайный)
 #   ESKADRA_NODE_MAJOR=24        мажорная версия Node.js
+#   ESKADRA_TLS=ip|domain|self   сертификат панели без вопроса (ip/domain — Let's Encrypt; это согласие с его условиями)
+#   ESKADRA_DOMAIN=panel.example  домен для ESKADRA_TLS=domain
+#   ESKADRA_XUI=keep|remove      что делать с найденным 3x-ui без вопроса
 set -euo pipefail
 
 REPO="${ESKADRA_REPO:-deluwr/eskadra}"
@@ -123,6 +126,8 @@ FLEET_SECURE_COOKIES=1
 FLEET_SUB_BIND=0.0.0.0
 FLEET_NODEKIT=$PREFIX/app/nodekit
 FLEET_WEB_DIST=$PREFIX/app/web/dist
+FLEET_PUBLIC_HOST=$IP
+FLEET_SUB_TLS=0
 EOF
   chmod 640 "$ENVF"; chgrp eskadra "$ENVF"
 fi
@@ -170,8 +175,28 @@ systemctl restart eskadra
 sleep 2
 systemctl is-active --quiet eskadra || { journalctl -u eskadra -n 30 --no-pager; die "панель не запустилась"; }
 
-if command -v x-ui >/dev/null || [ -d /usr/local/x-ui ]; then
-  warn "На сервере есть 3x-ui. Эскадра его не трогает: порты панели и подписок выбраны случайно."
+if [ "$FRESH" = 1 ]; then
+  # Уже установленные ядра: дополнить или удалить (порты панели и подписок с ними не пересекаются в любом случае)
+  say "Сторонние VPN-ядра на этом сервере"
+  /usr/local/bin/eskadra conflicts || warn "проверку ядер можно повторить: eskadra conflicts"
+
+  # Сертификат панели: Let's Encrypt вместо самоподписанного
+  say "Сертификат панели"
+  TLS_MODE="${ESKADRA_TLS:-}"
+  if [ -z "$TLS_MODE" ]; then
+    if [ -r /dev/tty ]; then
+      printf '   1) Let'"'"'s Encrypt на IP %s (без домена, продлевается сам) — рекомендуется\n   2) Let'"'"'s Encrypt на домен\n   3) Пока самоподписанный (можно выпустить позже: eskadra cert letsencrypt)\n' "$IP"
+      read -r -p "  Выберите [1]: " a < /dev/tty || true
+      case "${a:-1}" in 2) TLS_MODE=domain ;; 3) TLS_MODE=self ;; *) TLS_MODE=ip ;; esac
+    else
+      TLS_MODE=self   # без терминала не соглашаемся с условиями Let's Encrypt за пользователя
+    fi
+  fi
+  case "$TLS_MODE" in
+    ip) /usr/local/bin/eskadra cert letsencrypt ip || warn "остался самоподписанный сертификат; повторить: eskadra cert letsencrypt" ;;
+    domain) /usr/local/bin/eskadra cert letsencrypt domain "${ESKADRA_DOMAIN:-}" || warn "остался самоподписанный сертификат; повторить: eskadra cert letsencrypt domain" ;;
+    *) warn "самоподписанный сертификат: браузер предупредит, сверьте отпечаток. Let's Encrypt: eskadra cert letsencrypt" ;;
+  esac
 fi
 
 printf '\n%s\n' "${c_ok}${c_b}Эскадра установлена.${c_0}"

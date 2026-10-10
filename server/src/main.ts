@@ -80,6 +80,18 @@ app.setNotFoundHandler((req, reply) => {
 });
 
 await app.listen({ host: config.host, port: config.port });
+
+// Let's Encrypt продлевает сертификат раз в несколько дней: подхватываем новый без перезапуска панели
+if (config.tlsCert && config.tlsKey) {
+  const reload = () => {
+    try {
+      (app.server as import('node:https').Server).setSecureContext({ cert: fs.readFileSync(config.tlsCert!), key: fs.readFileSync(config.tlsKey!) });
+      sub.reloadTls();
+      app.log.info('TLS-сертификат обновлён');
+    } catch (e) { app.log.warn(`не удалось перечитать сертификат: ${(e as Error).message}`); }
+  };
+  fs.watchFile(config.tlsCert, { interval: 60_000 }, (cur, prev) => { if (cur.mtimeMs !== prev.mtimeMs) reload(); });
+}
 const subPort = await sub.start();
 app.log.info(`сервис подписок: ${process.env.FLEET_SUB_BIND ?? config.host}:${subPort}`);
 bot.start();

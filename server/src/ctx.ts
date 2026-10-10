@@ -134,7 +134,7 @@ const RANK: Record<Role, number> = { operator: 1, admin: 2, owner: 3 };
 
 declare module 'fastify' {
   interface FastifyRequest {
-    admin?: { id: number; username: string; role: Role; totp: boolean; totpSecret: string | null };
+    admin?: { id: number; username: string; role: Role; totp: boolean; totpSecret: string | null; console?: boolean };
   }
 }
 
@@ -147,7 +147,8 @@ export function guard(ctx: Ctx, min: Role, opts: { otp?: boolean } = {}) {
     const a = req.admin;
     if (!a) return reply.code(401).send({ error: 'unauthorized' });
     if (RANK[a.role] < RANK[min]) return reply.code(403).send({ error: `нужна роль ${min} или выше` });
-    if (opts.otp && a.totp) {
+    // консольная сессия создаётся root-ом на самом сервере (eskadra) — код 2FA там не спрашиваем
+    if (opts.otp && a.totp && !a.console) {
       const code = String(req.headers['x-fleet-otp'] ?? '');
       if (!a.totpSecret || !verifyTotp(a.totpSecret, code)) return reply.code(428).send({ error: 'нужен код 2FA', kind: 'otp' });
     }

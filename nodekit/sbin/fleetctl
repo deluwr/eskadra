@@ -211,6 +211,25 @@ cmd_fleetadmin_setup() {  # консольный break-glass пользоват�
   echo "fleetadmin ready (console only)"
 }
 
+cmd_xui_remove() {  # удалить 3x-ui, сохранив его базу и конфиг Xray (решение «удалить или дополнить»)
+  [ -d /usr/local/x-ui ] || [ -d /etc/x-ui ] || systemctl cat x-ui.service >/dev/null 2>&1 || { echo "3x-ui not found"; return 0; }
+  local d; d="$STATE/baseline/x-ui-$(date -u +%Y%m%dT%H%M%SZ)"; install -d -m 700 "$d"
+  tar -czf "$d/x-ui.tar.gz" /etc/x-ui /usr/local/x-ui/bin/config.json 2>/dev/null || true
+  systemctl disable --now x-ui 2>/dev/null || true
+  rm -rf /usr/local/x-ui /etc/x-ui
+  rm -f /etc/systemd/system/x-ui.service /usr/bin/x-ui
+  systemctl daemon-reload
+  logger -t fleet "3x-ui removed, backup $d" 2>/dev/null || true
+  echo "3x-ui removed; backup: $d/x-ui.tar.gz"
+}
+
+cmd_foreign_stop() {  # остановить и отключить стороннее ядро (файлы не удаляются)
+  case "${1:-}" in xray|sing-box|v2ray|hysteria-server) ;; *) die "usage: fleetctl foreign-stop xray|sing-box|v2ray|hysteria-server" ;; esac
+  systemctl disable --now "$1.service" 2>/dev/null || true
+  logger -t fleet "foreign core $1 stopped" 2>/dev/null || true
+  echo "$1 stopped and disabled"
+}
+
 cmd_status() {
   echo "panel ips : $(paste -sd' ' "$IPS" 2>/dev/null || echo none)"
   echo "ssh ports : $(ssh_ports)"
@@ -240,5 +259,7 @@ case "${1:-status}" in
   ufw-disable) cmd_ufw_disable ;;
   peer-check)  cmd_peer_check "${2:-}" "${3:-}" ;;
   fleetadmin-setup) cmd_fleetadmin_setup ;;
+  xui-remove)   cmd_xui_remove ;;
+  foreign-stop) cmd_foreign_stop "${2:-}" ;;
   *) echo "usage: fleetctl allow IP | open | relax [30m] | unrelax | restore | confirm | status"; exit 2 ;;
 esac

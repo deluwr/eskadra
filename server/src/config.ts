@@ -22,6 +22,8 @@ export const config = {
   basePath: normBase(process.env.FLEET_BASE_PATH),
   tlsCert: process.env.FLEET_TLS_CERT || null,
   tlsKey: process.env.FLEET_TLS_KEY || null,
+  // подписки по HTTPS тем же сертификатом — только если он публичный (Let's Encrypt): самоподписанный клиенты не примут
+  subTls: process.env.FLEET_SUB_TLS === '1',
   sessionTtlHours: 12,
   secureCookies: process.env.FLEET_SECURE_COOKIES === '1',
 };

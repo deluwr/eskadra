@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Ctx, guard, HttpError, type UserRow } from '../ctx.js';
 import { getSetting } from '../db.js';
+import { config } from '../config.js';
 import { randomToken } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { effectiveLimits, json, period, Vpn } from '../vpn.js';
@@ -26,7 +27,7 @@ const userBody = z.object({
 export function subBase(ctx: Ctx): string | null {
   const host = getSetting<string>(ctx.db, 'sub.host', '');
   const port = getSetting<number>(ctx.db, 'sub.port', 0);
-  const scheme = getSetting<string>(ctx.db, 'sub.scheme', 'http');
+  const scheme = config.subTls ? 'https' : getSetting<string>(ctx.db, 'sub.scheme', 'http');
   if (!host || !port) return null;
   return `${scheme}://${host.includes(':') ? `[${host}]` : host}:${port}`;
 }

@@ -1,4 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import fs from 'node:fs';
+import { config } from './config.js';
 import { randomInt } from 'node:crypto';
 import type { Ctx, UserRow } from './ctx.js';
 import { getSetting, setSetting } from './db.js';
@@ -52,9 +54,21 @@ export class SubService {
     return ++h.n > 30;
   }
 
+  private tls() {
+    return config.subTls && config.tlsCert && config.tlsKey
+      ? { cert: fs.readFileSync(config.tlsCert), key: fs.readFileSync(config.tlsKey) }
+      : null;
+  }
+
+  reloadTls() {
+    const t = this.tls();
+    if (t && this.app) (this.app.server as import('node:https').Server).setSecureContext(t);
+  }
+
   async start() {
     const port = ensureSubPort(this.ctx);
-    const app = Fastify({ logger: false, trustProxy: false });
+    const tls = this.tls();
+    const app = (tls ? Fastify({ logger: false, trustProxy: false, https: tls }) : Fastify({ logger: false, trustProxy: false })) as unknown as FastifyInstance;
     const vpn = new Vpn(this.ctx);
     const notFound = (reply: { code: (c: number) => { type: (t: string) => { send: (b: string) => unknown } } }) =>
       reply.code(404).type('text/plain').send('not found');

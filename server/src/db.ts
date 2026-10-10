@@ -224,13 +224,16 @@ const MIGRATIONS: string[] = [
   ALTER TABLE servers ADD COLUMN xui_pass_sealed TEXT;
   ALTER TABLE servers ADD COLUMN external_cores TEXT NOT NULL DEFAULT '[]';
   ALTER TABLE inbounds ADD COLUMN ext_id INTEGER;
-  CREATE TABLE xui_counters (
+  CREATE TABLE IF NOT EXISTS xui_counters (
     server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
     email TEXT NOT NULL,
     up INTEGER NOT NULL DEFAULT 0,
     down INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (server_id, email)
   );
+  `,
+  `
+  ALTER TABLE sessions ADD COLUMN console INTEGER NOT NULL DEFAULT 0;
   `,
 ];
 

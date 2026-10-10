@@ -516,6 +516,17 @@ function CoresCard({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         <Seg value={s.core_mode} label="Режим ядра" onChange={(m) => void run(async () => { await api.post(`/api/v1/servers/${s.id}/core-mode`, { mode: m }); onChange(); })}
           options={[['auto', 'авто'], ['own', 'свой'], ['xui', 'через 3x-ui']]} />
       </div>
+      {s.sudo_mode === 'restricted' && (hasXui || s.external_cores.some((c) => ['xray', 'sing-box', 'v2ray', 'hysteria-server'].includes(c.name) && c.active === 'active')) && (
+        <div className="row" style={{ padding: '12px 0 0' }}>
+          <div className="row-text"><b>Конфликт ядер</b><span className="k">Дополнить — оставить как есть (Эскадра не запустит второе ядро того же типа). Удалить 3x-ui — его база сохранится в baseline узла, пользователи 3x-ui потеряют доступ.</span></div>
+          <div className="flex">
+            {hasXui && <button className="btn danger" disabled={busy} onClick={() => { if (confirm('Удалить 3x-ui с узла? Его пользователи потеряют доступ; база сохранится в /var/lib/fleet/baseline.')) void run(async () => { setMsg((await api.post<{ output: string }>(`/api/v1/servers/${s.id}/xui-remove`)).output); onChange(); }); }}>Удалить 3x-ui</button>}
+            {s.external_cores.filter((c) => ['xray', 'sing-box', 'v2ray', 'hysteria-server'].includes(c.name) && c.active === 'active').map((c) => (
+              <button key={c.name} className="btn" disabled={busy} onClick={() => { if (confirm(`Остановить и отключить ${c.name}.service? Файлы не удаляются.`)) void run(async () => { setMsg((await api.post<{ output: string }>(`/api/v1/servers/${s.id}/foreign-stop`, { name: c.name })).output); onChange(); }); }}>Остановить {c.name}</button>
+            ))}
+          </div>
+        </div>
+      )}
       {(s.coreModeEffective === 'xui' || hasXui) && (
         <form className="stack" onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = await api.put<{ info: { port: number; version: string | null } }>(`/api/v1/servers/${s.id}/xui`, f); setMsg(`Вход в 3x-ui ${r.info.version ?? ''} проверен (панель 3x-ui на порту ${r.info.port}).`); setF({ ...f, pass: '' }); onChange(); }); }}>
           <h3>Доступ к 3x-ui {s.xuiConfigured && <Tag kind="ok">задан</Tag>}</h3>

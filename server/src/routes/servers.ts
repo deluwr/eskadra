@@ -328,6 +328,33 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { ok: true, info };
   });
 
+  /** «Удалить или дополнить»: удалить 3x-ui с узла (база сохраняется в baseline узла). */
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/xui-remove', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+    const r = ctx.server(req.params.id);
+    requireKit(r);
+    if (db.prepare(`SELECT 1 FROM inbounds WHERE server_id = ? AND state IN ('active','deploying')`).get(r.id) && coreMode(r) === 'xui')
+      throw new HttpError(409, 'на узле активны inbounds Эскадры внутри 3x-ui — сначала снимите их с узла');
+    const out = await ctx.onNode(r, (n) => n.must(['xui-remove'], { timeoutMs: 120_000 }));
+    const ext = json<Array<{ name: string }>>(r.external_cores, []).filter((c) => c.name !== '3x-ui');
+    const cores = json<Record<string, unknown>>(r.cores, {});
+    delete cores.xui;
+    ctx.updateServer(r.id, { external_cores: JSON.stringify(ext), core_mode: 'auto', xui_user: null, xui_pass_sealed: null, cores: JSON.stringify(cores) });
+    audit(db, who(req), 'server.xui_removed', r.id);
+    return { output: out.trim() };
+  });
+
+  /** Остановить стороннее ядро (xray/sing-box как отдельный сервис), чтобы Эскадра могла поставить своё. */
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/foreign-stop', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+    const r = ctx.server(req.params.id);
+    requireKit(r);
+    const { name } = z.object({ name: z.enum(['xray', 'sing-box', 'v2ray', 'hysteria-server']) }).parse(req.body);
+    const out = await ctx.onNode(r, (n) => n.must(['foreign-stop', name]));
+    const ext = json<Array<{ name: string; active: string }>>(r.external_cores, []).map((c) => (c.name === name ? { ...c, active: 'inactive' } : c));
+    ctx.updateServer(r.id, { external_cores: JSON.stringify(ext) });
+    audit(db, who(req), 'server.foreign_core_stopped', r.id, { name });
+    return { output: out.trim() };
+  });
+
   // ───── доступ и SSH ─────
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/ssh-mode', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
