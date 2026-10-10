@@ -8,7 +8,7 @@
 #   ESKADRA_VERSION=v0.4.0       конкретная версия (по умолчанию — последняя)
 #   ESKADRA_PORT=…               порт панели (по умолчанию — случайный)
 #   ESKADRA_NODE_MAJOR=24        мажорная версия Node.js
-#   ESKADRA_TLS=ip|domain|self   сертификат панели без вопроса (ip/domain — Let's Encrypt; это согласие с его условиями)
+#   ESKADRA_TLS=ip|domain        сертификат Let's Encrypt без вопроса (это согласие с условиями Let's Encrypt)
 #   ESKADRA_DOMAIN=panel.example  домен для ESKADRA_TLS=domain
 #   ESKADRA_XUI=keep|remove      что делать с найденным 3x-ui без вопроса
 set -Eeuo pipefail
@@ -154,11 +154,6 @@ if [ "$FRESH" = 1 ]; then
   say "Первичная настройка"
   PORT="${ESKADRA_PORT:-$(free_port)}"
   BASE="/$(rand_path)/"
-  # Самоподписанный сертификат на IP; отпечаток покажем, чтобы сверить в браузере
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
-    -subj "/CN=${IP:-eskadra}" -addext "subjectAltName=IP:${IP:-127.0.0.1}" \
-    -keyout "$DATA/tls/key.pem" -out "$DATA/tls/cert.pem" >/dev/null 2>&1
-  chown eskadra:eskadra "$DATA/tls/"*.pem; chmod 600 "$DATA/tls/key.pem"
   cat > "$ENVF" <<EOF
 # Эскадра — настройки панели (меняйте через команду eskadra)
 FLEET_HOST=0.0.0.0
@@ -227,38 +222,45 @@ if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; t
   say "firewalld: открыты порты $PORT и $SUBPORT"
 fi
 
-systemctl enable --now eskadra >/dev/null 2>&1 || true
-systemctl restart eskadra
-sleep 2
-systemctl is-active --quiet eskadra || { journalctl -u eskadra -n 30 --no-pager; die "панель не запустилась"; }
-
 if [ ! -f "$SETUP_MARK" ]; then
   [ "$FRESH" = 1 ] || say "Прошлая установка не дошла до конца — продолжаю первичную настройку"
   # Уже установленные ядра: дополнить или удалить (порты панели и подписок с ними не пересекаются в любом случае)
   say "Сторонние VPN-ядра на этом сервере"
   /usr/local/bin/eskadra conflicts || warn "проверку ядер можно повторить: eskadra conflicts"
+fi
 
-  # Сертификат панели: Let's Encrypt вместо самоподписанного
-  say "Сертификат панели"
+# Сертификат панели — только Let's Encrypt, выпускается до первого запуска панели.
+# Выпускается заново, если сертификата нет, он истекает или он самоподписанный (так было до v0.5.5).
+/usr/local/bin/eskadra cert-migrate || warn "перенос сертификата: eskadra cert-migrate"
+cert_ok() {
+  local f="$DATA/tls/cert.pem"
+  openssl x509 -in "$f" -noout -checkend 3600 >/dev/null 2>&1 || return 1
+  [ "$(openssl x509 -in "$f" -noout -issuer -nameopt RFC2253 | cut -d= -f2-)" != "$(openssl x509 -in "$f" -noout -subject -nameopt RFC2253 | cut -d= -f2-)" ]
+}
+if ! cert_ok; then
+  say "Сертификат панели (Let's Encrypt)"
   TLS_MODE="${ESKADRA_TLS:-}"
   if [ -z "$TLS_MODE" ]; then
-    if [ -r /dev/tty ]; then
-      printf '   1) Let'"'"'s Encrypt на IP %s (без домена, продлевается сам) — рекомендуется\n   2) Let'"'"'s Encrypt на домен\n   3) Пока самоподписанный (можно выпустить позже: eskadra cert letsencrypt)\n' "$IP"
-      while read -r -t 0.05 _ < /dev/tty 2>/dev/null; do :; done   # не принимать за ответ то, что набрано заранее
-      read -r -p "  Выберите [1]: " a < /dev/tty || true
-      a="${a//[$'\r' ]/}"
-      case "${a:-1}" in 2) TLS_MODE=domain ;; 3) TLS_MODE=self ;; *) TLS_MODE=ip ;; esac
-    else
-      TLS_MODE=self   # без терминала не соглашаемся с условиями Let's Encrypt за пользователя
-    fi
+    [ -r /dev/tty ] || die "нет терминала для вопросов: задайте ESKADRA_TLS=ip или ESKADRA_TLS=domain ESKADRA_DOMAIN=…"
+    printf '   1) На IP %s — без домена, сертификат на 6 дней, продлевается сам (рекомендуется)\n   2) На домен — нужна A-запись домена на %s\n' "$IP" "$IP"
+    while read -r -t 0.05 _ < /dev/tty 2>/dev/null; do :; done   # не принимать за ответ то, что набрано заранее
+    read -r -p "  Выберите [1]: " a < /dev/tty || true
+    a="${a//[$'\r' ]/}"
+    case "${a:-1}" in 2) TLS_MODE=domain ;; *) TLS_MODE=ip ;; esac
   fi
   case "$TLS_MODE" in
-    ip) /usr/local/bin/eskadra cert letsencrypt ip || warn "остался самоподписанный сертификат; повторить: eskadra cert letsencrypt" ;;
-    domain) /usr/local/bin/eskadra cert letsencrypt domain "${ESKADRA_DOMAIN:-}" || warn "остался самоподписанный сертификат; повторить: eskadra cert letsencrypt domain" ;;
-    *) warn "самоподписанный сертификат: браузер предупредит, сверьте отпечаток. Let's Encrypt: eskadra cert letsencrypt" ;;
+    ip|domain) ;;
+    *) die "ESKADRA_TLS: ip или domain" ;;
   esac
-  date -u +%FT%TZ > "$SETUP_MARK"
+  ESKADRA_INSTALL=1 /usr/local/bin/eskadra cert letsencrypt "$TLS_MODE" "${ESKADRA_DOMAIN:-}" \
+    || die "сертификат не выпущен — установка остановлена. Исправьте причину (см. выше) и запустите ту же команду снова: она продолжит с этого места."
 fi
+
+systemctl enable --now eskadra >/dev/null 2>&1 || true
+systemctl restart eskadra
+sleep 2
+systemctl is-active --quiet eskadra || { journalctl -u eskadra -n 30 --no-pager; die "панель не запустилась"; }
+[ -f "$SETUP_MARK" ] || date -u +%FT%TZ > "$SETUP_MARK"
 
 printf '\n%s\n' "${c_ok}${c_b}Эскадра установлена.${c_0}"
 /usr/local/bin/eskadra url
