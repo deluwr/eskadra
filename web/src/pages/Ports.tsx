@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, ago } from '../api';
-import { ErrorBox, Tag, useAsync, usePoll } from '../ui';
+import { ErrorBox, Info, Tag, roleLabel, useAsync, usePoll } from '../ui';
 
 interface Conn {
   servers: Array<{ id: string; name: string; group: string; role: string; ufw: boolean; sshPorts: number[]; fwMode: string }>;
@@ -18,10 +18,10 @@ export function PortsPage() {
   const last = d.checks.reduce((m, c) => (c.checked_at > m ? c.checked_at : m), '');
   return (
     <>
-      <div className="page-head"><div><h1>Порты и связность</h1><p>Кто до кого достаёт внутри эскадры, какие порты открыты и политика групп</p></div></div>
+      <div className="page-head"><div><h1>Порты и связность</h1><p>Открытые порты и связь между серверами</p></div></div>
       <div className="split">
         <section className="card pad wide stack">
-          <div className="flex" style={{ justifyContent: 'space-between' }}><h2>Связность нод</h2><span className="k">строка → столбец · проверяется каждые 10 мин · {last ? ago(last) : 'ещё не проверялось'}</span></div>
+          <div className="flex" style={{ justifyContent: 'space-between' }}><h2>Связность нод <Info>Строка — откуда, столбец — куда. Проверяется каждые 10 минут. Долгий сбой связи сбрасывает чек-лист защиты обеих нод.</Info></h2><span className="k">{last ? ago(last) : 'ещё не проверялось'}</span></div>
           {d.servers.length < 2 ? <p className="k">Нужно минимум два узла с nodekit.</p> : (
             <div className="table-wrap">
               <table className="mx" aria-label="Матрица связности">
@@ -38,15 +38,14 @@ export function PortsPage() {
               </table>
             </div>
           )}
-          <span className="k">Сбой связи между нодами дольше порога (Настройки) сбрасывает чек-лист обеих нод.</span>
         </section>
         <section className="card narrow">
-          <div className="card-head"><div className="row-text"><h2>Политика групп</h2><span className="k">Новая нода попадает в наборы соседей сама</span></div></div>
+          <div className="card-head"><h2>Политика групп <Info>Группа задаёт скрытность портов, связь между нодами и разрешённый диапазон портов. Новая нода попадает в наборы соседей сама.</Info></h2></div>
           {d.groups.map((g) => <GroupRow key={g.name} g={g} servers={d.servers.filter((s) => s.group === g.name).map((s) => s.name)} onSaved={reload} />)}
         </section>
       </div>
       <section className="card">
-        <div className="card-head"><div className="row-text"><h2>Порты узлов</h2><span className="k">Сервисные порты открываются при выкате конфигурации, защищённые не трогаются никогда</span></div></div>
+        <div className="card-head"><h2>Порты узлов <Info>Порт конфигурации открывается сам при выкате: проверка (не SSH, не занят, в диапазоне группы) → проверка конфига на узле → открытие порта → внешняя проба, при ошибке — откат. Защищённые порты (SSH, служебные) не трогаются никогда. Если у хостера свой firewall, диапазон портов группы откройте в нём заранее.</Info></h2></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
           <table>
             <thead><tr><th>Узел</th><th>Сервисные TCP</th><th>Сервисные UDP</th><th>Защищённые</th><th>Firewall</th><th>ufw/firewalld</th></tr></thead>
@@ -55,7 +54,7 @@ export function PortsPage() {
               const show = (proto: string) => ib.filter((i) => i.proto === proto).map((i) => <Tag key={`${i.port}${i.template}`} kind={i.state === 'active' ? 'ok' : i.state === 'error' ? 'fail' : 'warn'}>{i.port} · {i.template}</Tag>);
               return (
                 <tr key={s.id}>
-                  <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k">{s.group} · {s.role}</div></td>
+                  <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k">{s.group} · {roleLabel(s)}</div></td>
                   <td><span className="flex" style={{ gap: 4 }}>{show('tcp').length ? show('tcp') : <span className="k">—</span>}</span></td>
                   <td><span className="flex" style={{ gap: 4 }}>{show('udp').length ? show('udp') : <span className="k">—</span>}</span></td>
                   <td><span className="flex" style={{ gap: 4 }}>{s.sshPorts.map((p) => <Tag key={p} kind="acc">{p}</Tag>)}<Tag kind="acc">10085 lo</Tag></span></td>
@@ -67,11 +66,6 @@ export function PortsPage() {
           </table>
         </div>
       </section>
-      <div className="grid g3">
-        <div className="card pad stack"><h3>Как открывается порт</h3><ol className="small" style={{ margin: 0, paddingLeft: 18 }}><li>Линтер: не SSH, не резерв, не занят, в диапазоне группы</li><li>Проверка конфигурации на узле</li><li>Порт открывается до запуска inbound</li><li>Внешняя проба; ошибка — откат и закрытие</li></ol></div>
-        <div className="card pad stack"><h3>Firewall провайдеров</h3><span className="k">Решение: управление через API провайдера с заранее открытым диапазоном групп. Интеграции с конкретными провайдерами в этой версии нет — откройте диапазон в security group вручную.</span></div>
-        <div className="card pad stack"><h3>Overlay (WireGuard)</h3><span className="k">Основной путь управления по решению §24. Требует WireGuard на главном сервере — подключается при развёртывании панели на Linux.</span></div>
-      </div>
     </>
   );
 }

@@ -206,7 +206,25 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
+# Помощник «главный сервер как узел»: панель (без root) кладёт запрос, root-юнит добавляет её ключ на этом хосте
+install -d -m 700 -o eskadra -g eskadra "$DATA/selfnode"
+cat > /etc/systemd/system/eskadra-selfnode.service <<EOF
+[Unit]
+Description=Eskadra: panel access to this host (self node)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eskadra self-node-apply
+EOF
+cat > /etc/systemd/system/eskadra-selfnode.path <<EOF
+[Unit]
+Description=Eskadra: watch self-node requests
+[Path]
+PathChanged=$DATA/selfnode/request.json
+[Install]
+WantedBy=multi-user.target
+EOF
 systemctl daemon-reload
+systemctl enable --now eskadra-selfnode.path >/dev/null 2>&1 || warn "не удалось включить eskadra-selfnode.path"
 
 cli() { runuser -u eskadra -- env $(grep -v '^#' "$ENVF" | xargs) "$PREFIX/node/bin/node" "$PREFIX/app/server/dist/cli.js" "$@"; }
 envget() { grep -E "^$1=" "$ENVF" | tail -1 | cut -d= -f2- || true; }

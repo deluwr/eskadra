@@ -53,8 +53,8 @@ export interface Server {
   checklist_passed_at: string | null; kit_version: string | null; stage: number; executorOk: boolean; created_at: string;
   core_mode: 'auto' | 'own' | 'xui'; coreModeEffective: 'own' | 'xui'; xuiConfigured: boolean; xui_user: string | null;
   external_cores: Array<{ name: string; active: string; version: string }>;
-  mgmt_mode: 'direct' | 'tunnel';
-  mgmt: { mode: 'direct' | 'tunnel'; port: number | null; sni: string | null; localPort: number | null; client: { running: boolean; version: string | null; error: string | null } | null };
+  mgmt_mode: 'direct' | 'tunnel' | 'local';
+  mgmt: { mode: 'direct' | 'tunnel' | 'local'; port: number | null; sni: string | null; localPort: number | null; client: { running: boolean; version: string | null; error: string | null } | null };
 }
 
 export interface Preflight { checks: Check[]; sshPorts: number[]; clientIp: string | null; ufwActive: boolean; blocking: boolean; baselinePath?: string; created_at?: string }
@@ -66,6 +66,7 @@ export interface ServerDetail {
   server: Server; snippet: string | null; preflight: Preflight | null; jobs: Job[]; inbounds: InboundView[];
   checklist: { items: ChecklistItem[]; passedAt: string | null; done: number; total: number };
   nodekitVersion: string; kvmCommand: string | null;
+  onboarding: { running: boolean; job: { id: number; status: string; log: string; started_at: string; finished_at: string | null } | null };
 }
 
 export interface Template {

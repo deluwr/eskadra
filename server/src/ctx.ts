@@ -18,13 +18,19 @@ export interface ServerRow {
   admin_ips: string; kit_version: string | null; config_dirty: number; arch: string | null;
   core_mode: 'auto' | 'own' | 'xui'; xui_user: string | null; xui_pass_sealed: string | null; external_cores: string;
   /** Канал управления (§5.8): SSH напрямую или внутри служебного туннеля VLESS-REALITY. */
-  mgmt_mode: 'direct' | 'tunnel'; mgmt_port: number | null; mgmt_uuid: string | null; mgmt_key_sealed: string | null;
+  mgmt_mode: 'direct' | 'tunnel' | 'local'; mgmt_port: number | null; mgmt_uuid: string | null; mgmt_key_sealed: string | null;
   mgmt_pub: string | null; mgmt_sid: string | null; mgmt_sni: string | null; mgmt_local_port: number | null;
+}
+
+/** Порты самой панели и подписок — на главном сервере, ставшем узлом, их нельзя закрыть или занять (§7.7). */
+export function panelPorts(db: Db): number[] {
+  const own = Number(process.env.FLEET_PORT ?? 7070);
+  return [own, getSetting<number>(db, 'sub.port', 0)].filter((p) => p > 0);
 }
 
 /** С каких адресов узел может видеть панель: executor.ips, а для туннеля — ещё и сам узел (127.0.0.1). */
 export function expectedPanelIps(s: ServerRow, executorIps: string[]): string[] {
-  return s.mgmt_mode === 'tunnel' ? ['127.0.0.1', '::1', ...executorIps] : executorIps;
+  return s.mgmt_mode !== 'direct' ? ['127.0.0.1', '::1', ...executorIps] : executorIps;
 }
 
 export interface ExternalCore { name: string; active: string; version: string }
@@ -100,6 +106,8 @@ export class Ctx {
 
   target(r: ServerRow): SshTarget {
     const base = { username: r.ssh_user, privateKey: this.sealer.open(r.key_priv_sealed).toString('utf8'), hostKeyFp: r.host_key_fp };
+    // главный сервер как узел: панель ходит на свой же SSH через loopback
+    if (r.mgmt_mode === 'local') return { ...base, host: '127.0.0.1', port: r.ssh_port };
     if (r.mgmt_mode !== 'tunnel') return { ...base, host: r.host, port: r.ssh_port };
     // через туннель: локальный порт Xray-клиента на главном сервере; host key узла сверяется как обычно
     if (!r.mgmt_local_port) throw new HttpError(409, 'у узла нет данных служебного туннеля — переключите канал заново');

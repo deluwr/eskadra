@@ -1,103 +1,131 @@
 import { useState, type FormEvent } from 'react';
 import { api, ago, type Server } from '../api';
-import { ErrorBox, Seg, StagePip, Tag, useAsync, usePoll } from '../ui';
-
-const ROLE_HINT: Record<string, string> = {
-  entry: 'вход для пользователей', relay: 'промежуточный', exit: 'выход, скрыт', control: 'главный сервер',
-};
+import { ErrorBox, Info, Level, Seg, StagePip, Tag, roleLabel, useAsync, usePoll } from '../ui';
 
 export function ServersPage() {
   const { data: servers, error, reload } = usePoll(() => api.get<Server[]>('/api/v1/servers'), 30_000);
   const [adding, setAdding] = useState(false);
-  const [filter, setFilter] = useState<'all' | 'entry' | 'exit' | 'control' | 'attn'>('all');
+  const [filter, setFilter] = useState<'all' | 'entry' | 'exit' | 'attn'>('all');
+  const self = servers?.find((s) => s.mgmt_mode === 'local');
   const list = (servers ?? []).filter((s) =>
-    filter === 'all' ? true : filter === 'attn' ? !!s.fail_since || !!s.ufw_active || s.stage < 3 : s.role === filter);
+    filter === 'all' ? true : filter === 'attn' ? !!s.fail_since || s.stage < 2 : filter === 'exit' ? s.role === 'exit' : s.role !== 'exit');
 
   return (
     <>
       <div className="page-head">
-        <div><h1>Серверы</h1><p>Главный сервер и ноды: подключение, роль, уровень защиты, прямой доступ</p></div>
-        <button className="btn pri" onClick={() => setAdding((v) => !v)}>{adding ? 'Скрыть форму' : 'Добавить сервер'}</button>
+        <div><h1>Серверы</h1><p>Узлы флота и их состояние</p></div>
+        <div className="flex">
+          {servers && !self && <SelfNodeButton onDone={(id) => { void reload(); location.hash = `#/server/${id}`; }} />}
+          <button className="btn pri" onClick={() => setAdding((v) => !v)}>{adding ? 'Скрыть форму' : 'Добавить сервер'}</button>
+        </div>
       </div>
       <ErrorBox error={error} />
       {adding && <AddServerForm onCreated={(id) => { void reload(); location.hash = `#/server/${id}`; }} onCancel={() => setAdding(false)} />}
-      <div className="flex" style={{ justifyContent: 'space-between' }}>
-        <Seg value={filter} onChange={setFilter} label="Фильтр" options={[
-          ['all', `Все · ${servers?.length ?? 0}`], ['entry', 'entry'], ['exit', 'exit'], ['control', 'главный'], ['attn', 'Требуют внимания'],
-        ]} />
-        <span className="k">Этапы: подключён · настроен · проверен · защищён</span>
-      </div>
+      <Seg value={filter} onChange={setFilter} label="Фильтр" options={[
+        ['all', `Все · ${servers?.length ?? 0}`], ['entry', 'Входы'], ['exit', 'Выходы'], ['attn', 'Требуют внимания'],
+      ]} />
       <section className="card table-wrap">
         <table>
-          <thead><tr><th>Сервер</th><th>Роль</th><th>Этап</th><th>Защита хоста</th><th>Firewall</th><th>Прямой доступ</th><th>Связь</th></tr></thead>
+          <thead><tr><th>Сервер</th><th>Роль</th><th>Этап</th><th>Защита</th><th>Связь</th></tr></thead>
           <tbody>
             {list.map((s) => (
               <tr key={s.id} className="clickable" onClick={() => (location.hash = `#/server/${s.id}`)}>
-                <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k mono">{s.host}:{s.ssh_port}</div></td>
-                <td>{s.role}<div className="k">{s.group_name}</div></td>
+                <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k mono">{s.host}</div></td>
+                <td>{roleLabel(s)}{s.mgmt_mode === 'tunnel' && <div className="k">через туннель</div>}</td>
                 <td><StagePip stage={s.stage} /></td>
-                <td className="mono small">{s.protection_current}{s.protection_current !== s.protection_target && <span className="k"> → цель {s.protection_target}</span>}</td>
-                <td><Tag kind={s.fw_mode === 'enforced' ? 'ok' : s.fw_mode === 'pending' ? 'warn' : undefined}>{s.fw_mode}</Tag></td>
-                <td>{s.direct_access ? <Tag kind="ok">включён</Tag> : <Tag>выключен</Tag>}</td>
+                <td><Level value={s.protection_current} /></td>
                 <td>{s.fail_since ? <Tag kind="fail" dot>нет связи</Tag> : <Tag kind={s.last_seen_at ? 'ok' : undefined} dot>{ago(s.last_seen_at)}</Tag>}</td>
               </tr>
             ))}
-            {servers && !list.length && <tr><td colSpan={7} className="empty">Нет серверов в этом фильтре. Добавьте первый: панель выдаст ключ и bootstrap-сниппет.</td></tr>}
+            {servers && !list.length && <tr><td colSpan={5} className="empty">{servers.length ? 'Нет серверов в этом фильтре.' : 'Серверов пока нет. Начните с «Добавить сервер» — порядок действий описан в «Справке».'}</td></tr>}
           </tbody>
         </table>
       </section>
-      <div className="grid g3">
-        <div className="card pad stack"><span className="k">Главный сервер</span><b>P1 «как есть» по умолчанию</b><span className="k">Защита опциональна: P2 закрывает лишние порты, P3 — ещё whitelist и вход только по ключам.</span></div>
-        <div className="card pad stack"><span className="k">Ноды</span><b>Цель P3 сразу</b><span className="k">Блокировки включаются только после ручного чек-листа и под таймером отката на самом узле.</span></div>
-        <div className="card pad stack"><span className="k">Разные серверы</span><b>Свой ключ на каждый</b><span className="k">Порт SSH, роль и группа задаются при добавлении; связь между нодами настраивается сама.</span></div>
-      </div>
     </>
   );
 }
 
+/** Главный сервер (где работает панель) становится входом для пользователей — одной кнопкой. */
+function SelfNodeButton({ onDone }: { onDone: (id: string) => void }) {
+  const { busy, error, run } = useAsync();
+  return (
+    <span className="flex">
+      <button className="btn" disabled={busy} onClick={() => void run(async () => {
+        const r = await api.post<{ server: Server }>('/api/v1/servers/self');
+        onDone(r.server.id);
+      })}>{busy ? 'Подключаю…' : 'Главный сервер — вход'}</button>
+      <Info>Сервер с панелью тоже начнёт принимать пользователей и пересылать их на выходы. Панель настроит его сама; порты панели и подписок останутся открытыми, защита по умолчанию — обычная.</Info>
+      {error && <span className="tag fail">{error}</span>}
+    </span>
+  );
+}
+
 function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => void; onCancel: () => void }) {
-  const [f, setF] = useState({ name: '', host: '', sshPort: '22', role: 'entry', group: 'default', mgmtMode: 'direct' });
+  const [f, setF] = useState({ name: '', host: '', sshPort: '22', role: 'exit', group: 'default', mgmtMode: 'direct', user: 'root', method: 'password', password: '', privateKey: '', passphrase: '' });
   const { busy, error, run } = useAsync();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    void run(async () => {
-      const r = await api.post<{ server: Server }>('/api/v1/servers', { ...f, sshPort: Number(f.sshPort) });
-      onCreated(r.server.id);
+  const create = (manual: boolean) => run(async () => {
+    const auth = manual ? undefined : f.method === 'password'
+      ? { user: f.user, password: f.password }
+      : { user: f.user, privateKey: f.privateKey, ...(f.passphrase ? { passphrase: f.passphrase } : {}) };
+    const r = await api.post<{ server: Server }>('/api/v1/servers', {
+      name: f.name, host: f.host, sshPort: Number(f.sshPort), role: f.role, group: f.group, mgmtMode: f.mgmtMode, ...(auth ? { auth } : {}),
     });
-  };
+    onCreated(r.server.id);
+  });
+  const submit = (e: FormEvent) => { e.preventDefault(); void create(false); };
+  const hasSecret = f.method === 'password' ? !!f.password : !!f.privateKey.trim();
   return (
-    <form className="card pad stack" onSubmit={submit}>
+    <form className="card pad stack" onSubmit={submit} autoComplete="off">
       <h2>Новый сервер</h2>
       <div className="grid g4">
         <label className="fld">Имя<input className="inp" value={f.name} onChange={set('name')} placeholder="de-1" required /></label>
-        <label className="fld">IP или FQDN<input className="inp mono" value={f.host} onChange={set('host')} placeholder="203.0.113.10" required /></label>
+        <label className="fld">IP или домен<input className="inp mono" value={f.host} onChange={set('host')} placeholder="203.0.113.10" required /></label>
         <label className="fld">Порт SSH<input className="inp mono" value={f.sshPort} onChange={set('sshPort')} inputMode="numeric" required /></label>
-        <label className="fld">Роль
-          <select className="inp" value={f.role} onChange={set('role')}>
-            {Object.entries(ROLE_HINT).map(([v, l]) => <option key={v} value={v}>{v} — {l}</option>)}
-          </select>
+        <label className="fld"><span>Роль <Info>Выход — сервер, через который трафик уходит в интернет. Вход — сервер, к которому подключаются пользователи; он может пересылать их на выходы. Подробнее — в «Справке».</Info></span>
+          <select className="inp" value={f.role} onChange={set('role')}><option value="exit">выход</option><option value="entry">вход</option></select>
         </label>
-        <label className="fld">Группа<input className="inp" value={f.group} onChange={set('group')} placeholder="default" /></label>
       </div>
+
+      <div className="grid g4">
+        <label className="fld"><span>Логин <Info>Обычно root. Подойдёт и пользователь с sudo — тогда пароль используется и для sudo.</Info></span>
+          <input className="inp mono" value={f.user} onChange={set('user')} autoComplete="off" required />
+        </label>
+        <label className="fld">Вход по
+          <select className="inp" value={f.method} onChange={set('method')}><option value="password">паролю</option><option value="key">SSH-ключу</option></select>
+        </label>
+        {f.method === 'password'
+          ? <label className="fld" style={{ gridColumn: 'span 2' }}><span>Пароль <Info>Нужен один раз для первичной настройки. Не сохраняется: после настройки панель входит своим ключом.</Info></span>
+              <input className="inp" type="password" value={f.password} onChange={set('password')} autoComplete="new-password" />
+            </label>
+          : <label className="fld" style={{ gridColumn: 'span 2' }}>Пароль ключа (если есть)<input className="inp" type="password" value={f.passphrase} onChange={set('passphrase')} autoComplete="new-password" /></label>}
+      </div>
+      {f.method === 'key' && (
+        <label className="fld"><span>Приватный ключ <Info>Ключ, которым вы уже входите на этот сервер. Используется один раз и не сохраняется.</Info></span>
+          <textarea className="inp mono" rows={4} value={f.privateKey} onChange={set('privateKey')} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" spellCheck={false} />
+        </label>
+      )}
+
       <fieldset className="stack" style={{ border: 0, padding: 0, margin: 0 }}>
-        <legend className="k" style={{ marginBottom: 6 }}>Канал управления</legend>
+        <legend className="k" style={{ marginBottom: 6 }}>Канал управления <Info>Как панель будет ходить на сервер после настройки. Если главный сервер в РФ — выбирайте туннель: прямой SSH через границу может резаться.</Info></legend>
         <div className="choice">
           <label>
             <input type="radio" name="mgmt" value="direct" checked={f.mgmtMode === 'direct'} onChange={set('mgmtMode')} />
-            <span><b>Напрямую по SSH</b><span className="k">Главный сервер вне РФ или SSH до узла проходит стабильно.</span></span>
+            <span><b>Напрямую по SSH</b><span className="k">главный сервер вне РФ</span></span>
           </label>
           <label>
             <input type="radio" name="mgmt" value="tunnel" checked={f.mgmtMode === 'tunnel'} onChange={set('mgmtMode')} />
-            <span><b>Через служебный туннель</b><span className="k">Главный сервер в РФ: SSH идёт внутри VLESS-REALITY, ТСПУ видит обычный HTTPS. Сниппет поставит на узле служебный Xray.</span></span>
+            <span><b>Через туннель</b><span className="k">главный сервер в РФ</span></span>
           </label>
         </div>
       </fieldset>
+
       <ErrorBox error={error} />
       <div className="flex">
-        <button className="btn pri" disabled={busy}>Создать ключ и сниппет</button>
+        <button className="btn pri" disabled={busy || !hasSecret}>{busy ? 'Добавляю…' : 'Добавить и настроить'}</button>
         <button type="button" className="btn ghost" onClick={onCancel}>Отмена</button>
-        <span className="k">Панель выдаст отдельный ключ ed25519 и сниппет, который только добавляет доступ.</span>
+        <span style={{ flex: 1 }} />
+        <button type="button" className="link" disabled={busy || !f.name || !f.host} onClick={() => void create(true)}>Без пароля: выполню команду на сервере сам</button>
       </div>
     </form>
   );

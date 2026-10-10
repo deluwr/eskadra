@@ -11,6 +11,7 @@ import { AccessPage } from './pages/Access';
 import { SettingsPage } from './pages/Settings';
 import { BackupsPage } from './pages/Backups';
 import { AuditPage } from './pages/Audit';
+import { HelpPage } from './pages/Help';
 
 type Route = { page: string; id?: string };
 const parseHash = (): Route => {
@@ -54,7 +55,7 @@ export function App() {
     ['overview', 'Обзор', Icon.overview], ['servers', 'Серверы', Icon.servers], ['configs', 'Конфигурации', Icon.configs],
     ['users', 'Пользователи', Icon.users], ['ports', 'Порты и связность', Icon.ports], ['access', 'Права и роли', Icon.access],
   ];
-  const nav2: Array<[string, string, ReactNode]> = [['backups', 'Бэкапы', Icon.backups], ['audit', 'Аудит', Icon.audit], ['settings', 'Настройки', Icon.settings]];
+  const nav2: Array<[string, string, ReactNode]> = [['backups', 'Бэкапы', Icon.backups], ['audit', 'Аудит', Icon.audit], ['settings', 'Настройки', Icon.settings], ['help', 'Справка', Icon.help]];
   const active = route.page === 'server' ? 'servers' : route.page;
 
   return (
@@ -88,6 +89,7 @@ export function App() {
           {route.page === 'settings' && <SettingsPage />}
           {route.page === 'backups' && <BackupsPage />}
           {route.page === 'audit' && <AuditPage />}
+          {route.page === 'help' && <HelpPage />}
         </main>
       </div>
       {otpAsk && <OtpModal onDone={(code) => { otpAsk(code); setOtpAsk(null); }} />}
@@ -102,7 +104,6 @@ function ExecutorFoot() {
     <div className="side-foot">
       <span className="k">Исполнитель</span>
       <span className="mono small">{ips?.length ? ips.join(', ') : 'не задан'}</span>
-      <span className="tag warn" style={{ alignSelf: 'flex-start' }}><span className="dot" />overlay не настроен</span>
     </div>
   );
 }

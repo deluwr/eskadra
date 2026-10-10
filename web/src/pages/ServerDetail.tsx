@@ -1,11 +1,13 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { api, ago, fmtTime, type Check, type Job, type Preflight, type ServerDetail } from '../api';
-import { CopyBlock, CopyButton, ErrorBox, Seg, StagePip, Switch, Tag, useAsync, usePoll } from '../ui';
+import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, Switch, Tag, roleLabel, useAsync, usePoll } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
 
 export function ServerDetailPage({ id }: { id: string }) {
-  const { data: d, error, reload } = usePoll(() => api.get<ServerDetail>(`/api/v1/servers/${id}`), 15_000, [id]);
+  const [fast, setFast] = useState(false);
+  const { data: d, error, reload } = usePoll(() => api.get<ServerDetail>(`/api/v1/servers/${id}`), fast ? 2_000 : 15_000, [id]);
+  useEffect(() => setFast(!!d?.onboarding.running), [d?.onboarding.running]);
   const [tab, setTab] = useState<Tab>('protect');
   if (!d) return <><ErrorBox error={error} />{!error && <p className="muted">Загрузка…</p>}</>;
   const s = d.server;
@@ -17,7 +19,14 @@ export function ServerDetailPage({ id }: { id: string }) {
         <div className="stack" style={{ gap: 6 }}>
           <a href="#/servers" className="k">← Серверы</a>
           <h1>{s.name} <StagePip stage={s.stage} /></h1>
-          <span className="k mono">{s.host}:{s.ssh_port} · {s.role} · группа {s.group_name} · {s.os_info?.pretty ?? 'ОС не определена'}{s.kit_version ? ` · nodekit ${s.kit_version}` : ''} · {s.sudo_mode === 'restricted' ? `sudo сужен · ${s.ssh_mode}` : 'sudo широкий'}</span>
+          <span className="k">
+            <span className="mono">{s.host}</span> · {roleLabel(s)} · защита <Level value={s.protection_current} />
+            <Info label="Подробности о сервере">
+              SSH-порт {s.ssh_port} · группа {s.group_name} · {s.os_info?.pretty ?? 'ОС не определена'}<br />
+              Канал: {s.mgmt_mode === 'tunnel' ? `туннель, порт ${s.mgmt.port}` : s.mgmt_mode === 'local' ? 'локально (это главный сервер)' : 'напрямую'}<br />
+              {s.kit_version ? `nodekit ${s.kit_version}, ` : ''}{s.sudo_mode === 'restricted' ? 'sudo сужен до одной обёртки' : 'служебные скрипты ещё не установлены'}
+            </Info>
+          </span>
         </div>
         <HeaderActions d={d} onChange={reload} />
       </div>
@@ -85,134 +94,111 @@ function PendingBanner({ d, onChange }: { d: ServerDetail; onChange: () => void 
   );
 }
 
-// ───── онбординг: шаги 1–5 ─────
+// ───── подключение: всё делает панель ─────
 
-function Step({ n, title, done, cur, off, children }: { n: number; title: string; done: boolean; cur?: boolean; off?: boolean; children: ReactNode }) {
-  return (
-    <li className={`card pad step ${done ? 'done' : ''} ${cur ? 'cur' : ''} ${off ? 'off' : ''}`}>
-      <div className="step-head"><span className="step-n" aria-hidden>{done ? '✓' : n}</span><h2>{title}</h2></div>
-      <div className="step-body">{off ? <p className="k">Станет доступно после предыдущего шага.</p> : children}</div>
-    </li>
-  );
-}
+const ONBOARD_STEPS = ['Первичный доступ', 'Вход ключом панели', 'Проверка сервера', 'Служебные скрипты и sudo'];
 
 function Onboarding({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
-  const pinned = !!s.host_key_fp;
-  const connected = s.stage >= 1;
-  const cmd = `ssh -p ${s.ssh_port} root@${s.host} 'bash -s' < bootstrap-${s.id}.sh`;
+  const job = d.onboarding.job;
+  const running = d.onboarding.running;
+  const log = job?.log ?? '';
+  const reached = Math.max(0, ...[...log.matchAll(/шаг (\d)\/4/g)].map((m) => Number(m[1])));
+  const failed = !running && job?.status === 'failed';
+  const err = failed ? (log.match(/ошибка: (.*)/g)?.pop()?.replace(/^ошибка: /, '') ?? 'неизвестная ошибка') : null;
+  const [askAuth, setAskAuth] = useState(false);
   return (
-    <ol className="steps">
-      <Step n={1} title="Bootstrap-сниппет" done={pinned} cur={!pinned}>
-        <p className="small">Выполните на сервере под <b>root</b>. Сниппет только <b>добавляет</b> пользователя <code>fleet</code> с ключом панели и временный sudo — существующие ключи, пароли, порты и firewall не трогает.</p>
-        <div className="flex"><a className="btn" href={`api/v1/servers/${s.id}/bootstrap.sh`} download>Скачать сниппет</a><span className="k">и запустить со своей машины (спросит root-пароль сервера):</span></div>
-        <CopyBlock text={cmd} />
-        {s.mgmt_mode === 'tunnel' && (
-          <div className="alert info">Канал — <b>служебный туннель</b>: сниппет ещё поставит на узле Xray <code>fleet-mgmt</code> (порт <code>{s.mgmt.port}/tcp</code>). Если у хостера есть свой firewall — откройте в нём этот порт. Если SSH с вашей машины до узла не проходит, выполните сниппет в консоли хостера.</div>
-        )}
-        {d.snippet
-          ? <details><summary className="k" style={{ cursor: 'pointer' }}>Показать сниппет целиком</summary><CopyBlock text={d.snippet} /></details>
-          : <p className="k">Сниппет туннеля содержит ключ узла и доступен только администратору.</p>}
-      </Step>
-      <Step n={2} title="Сверка host key" done={pinned} cur={!pinned}><HostKeyStep d={d} onChange={onChange} /></Step>
-      <Step n={3} title="Вход по ключу и sudo" done={connected} cur={pinned && !connected} off={!pinned}><CheckStep d={d} onChange={onChange} /></Step>
-      <Step n={4} title="Preflight и baseline (только чтение)" done={!!d.preflight} cur={connected && !d.preflight} off={!connected}><PreflightView d={d} onChange={onChange} /></Step>
-      <Step n={5} title="Nodekit, сужение sudo и строгий режим" done={s.sudo_mode === 'restricted'} cur={!!d.preflight} off={!d.preflight || d.preflight.blocking}><NodekitStep d={d} onChange={onChange} /></Step>
-    </ol>
-  );
-}
-
-function HostKeyStep({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
-  const s = d.server;
-  const [fetched, setFetched] = useState<string | null>(s.host_key_pending_fp);
-  const [typed, setTyped] = useState('');
-  const { busy, error, run } = useAsync();
-  const matches = !!fetched && typed.trim() === fetched;
-  return (
-    <>
-      {s.host_key_fp && <p>Закреплён: <code>{s.host_key_fp}</code></p>}
-      <p className="k">Панель запрашивает ключ у сервера, а вы вставляете отпечаток из вывода сниппета. Доверие на первом подключении (TOFU) запрещено.</p>
-      <div className="flex">
-        <button className="btn" disabled={busy} onClick={() => void run(async () => setFetched((await api.post<{ fingerprint: string }>(`/api/v1/servers/${s.id}/host-key/fetch`)).fingerprint))}>{fetched ? 'Получить заново' : 'Получить ключ сервера'}</button>
-        {fetched && <span className="small">Сервер прислал: <code>{fetched}</code></span>}
+    <section className="card pad stack" style={{ gap: 16 }}>
+      <div className="flex" style={{ justifyContent: 'space-between' }}>
+        <h2>Подключение сервера</h2>
+        {running && <Tag kind="info" dot>идёт настройка</Tag>}
       </div>
-      {fetched && fetched !== s.host_key_fp && (
-        <>
-          {s.host_key_fp && <div className="alert fail">Сервер прислал ДРУГОЙ ключ. Подтверждайте только при пересборке сервера — статус и чек-лист сбросятся.</div>}
-          <label className="fld">Отпечаток из вывода сниппета<input className="inp mono" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="SHA256:..." /></label>
-          {typed && !matches && <div className="alert warn">Не совпадает. Не доверяйте ключу, пока не выясните причину.</div>}
-          <div><button className="btn pri" disabled={!matches || busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/host-key/trust`, { fingerprint: typed.trim() }); onChange(); })}>Совпадает — доверять</button></div>
-        </>
+      {job ? (
+        <ol className="onb">
+          {ONBOARD_STEPS.map((t, i) => {
+            const n = i + 1;
+            const st = job.status === 'ok' || n < reached ? 'done' : n === reached ? (failed ? 'fail' : running ? 'cur' : 'done') : '';
+            return <li key={t} className={st}><span className="onb-n">{st === 'done' ? '✓' : st === 'fail' ? '✕' : n}</span>{t}</li>;
+          })}
+        </ol>
+      ) : <p className="small">Сервер добавлен без пароля. Выполните на нём команду ниже (под root), затем нажмите «Подключить» — остальное панель сделает сама.</p>}
+      {err && <div className="alert fail">{err}</div>}
+      {job && <details><summary className="k" style={{ cursor: 'pointer' }}>Журнал</summary><pre className="code">{log.trim()}</pre></details>}
+
+      {!running && (failed || !job) && (
+        <div className="stack">
+          {askAuth || (failed && reached <= 1)
+            ? <AuthForm id={s.id} onStarted={() => { setAskAuth(false); onChange(); }} />
+            : <div className="flex">
+                <ConnectButton id={s.id} label={job ? 'Повторить' : 'Подключить'} onStarted={onChange} />
+                <button className="link" onClick={() => setAskAuth(true)}>Ввести логин и пароль</button>
+              </div>}
+          <ManualSnippet d={d} open={!job} />
+        </div>
       )}
+    </section>
+  );
+}
+
+function ConnectButton({ id, label, onStarted }: { id: string; label: string; onStarted: () => void }) {
+  const { busy, error, run } = useAsync();
+  return (
+    <>
+      <button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${id}/onboard`, {}); onStarted(); })}>{label}</button>
       <ErrorBox error={error} />
     </>
   );
 }
 
-function CheckStep({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
-  const s = d.server;
-  const [res, setRes] = useState<{ ok: boolean; user: string; seenFromIp: string; sudo: string } | null>(null);
+/** Одноразовый доступ для повторной попытки: не сохраняется. */
+function AuthForm({ id, onStarted }: { id: string; onStarted: () => void }) {
+  const [f, setF] = useState({ user: 'root', method: 'password', password: '', privateKey: '' });
   const { busy, error, run } = useAsync();
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   return (
-    <>
-      <div><button className="btn" disabled={busy} onClick={() => void run(async () => { setRes(await api.post(`/api/v1/servers/${s.id}/check`)); onChange(); })}>{busy ? 'Подключаюсь…' : 'Проверить вход'}</button></div>
-      {res && <div className={`alert ${res.ok ? 'ok' : 'fail'}`}>Пользователь <code>{res.user}</code>, сервер видит панель с <code>{res.seenFromIp}</code>, sudo: {res.sudo}</div>}
-      {!res && s.seen_from_ip && <p className="k">Последний вход с {s.seen_from_ip}, {ago(s.last_seen_at)}</p>}
-      <ErrorBox error={error} />
-    </>
-  );
-}
-
-const ICON: Record<Check['status'], string> = { ok: '✓', warn: '!', fail: '✕', info: 'i' };
-
-function PreflightView({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
-  const [p, setP] = useState<Preflight | null>(d.preflight);
-  const { busy, error, run } = useAsync();
-  return (
-    <>
-      <div className="flex">
-        <button className="btn" disabled={busy} onClick={() => void run(async () => { setP(await api.post<Preflight>(`/api/v1/servers/${d.server.id}/preflight`)); onChange(); })}>{busy ? 'Собираю снимок…' : p ? 'Повторить preflight' : 'Запустить preflight'}</button>
-        {p?.created_at && <span className="k">последний: {fmtTime(p.created_at)}</span>}
+    <form className="stack" autoComplete="off" onSubmit={(e) => {
+      e.preventDefault();
+      void run(async () => {
+        const auth = f.method === 'password' ? { user: f.user, password: f.password } : { user: f.user, privateKey: f.privateKey };
+        await api.post(`/api/v1/servers/${id}/onboard`, { auth });
+        onStarted();
+      });
+    }}>
+      <div className="grid g4">
+        <label className="fld">Логин<input className="inp mono" value={f.user} onChange={set('user')} /></label>
+        <label className="fld">Вход по<select className="inp" value={f.method} onChange={set('method')}><option value="password">паролю</option><option value="key">SSH-ключу</option></select></label>
+        {f.method === 'password' && <label className="fld" style={{ gridColumn: 'span 2' }}><span>Пароль <Info>Используется один раз и не сохраняется.</Info></span><input className="inp" type="password" value={f.password} onChange={set('password')} autoComplete="new-password" /></label>}
       </div>
-      {p && (
-        <>
-          {p.blocking && <div className="alert fail">Есть блокирующие проблемы — дальше идти нельзя.</div>}
-          <ul className="checks">
-            {p.checks.map((c) => <li key={c.id} className={`check ${c.status}`}><span className="ci" aria-label={c.status}>{ICON[c.status]}</span><b className="small">{c.title}</b><span className="small muted">{c.detail}</span></li>)}
-          </ul>
-          {p.baselinePath && <p className="k">Baseline на узле: <code>{p.baselinePath}</code></p>}
-        </>
-      )}
+      {f.method === 'key' && <label className="fld">Приватный ключ<textarea className="inp mono" rows={4} value={f.privateKey} onChange={set('privateKey')} spellCheck={false} /></label>}
+      <div><button className="btn pri" disabled={busy || !(f.method === 'password' ? f.password : f.privateKey.trim())}>Подключить</button></div>
       <ErrorBox error={error} />
-    </>
+    </form>
   );
 }
 
-function NodekitStep({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
+/** Запасной путь: команда, которую администратор выполняет на сервере сам (консоль хостера или свой SSH). */
+function ManualSnippet({ d, open }: { d: ServerDetail; open: boolean }) {
   const s = d.server;
-  const [out, setOut] = useState<string | null>(null);
-  const { busy, error, run } = useAsync();
-  const outdated = s.sudo_mode === 'restricted' && s.kit_version !== d.nodekitVersion;
-  return (
-    <>
-      <p className="small muted">Ставит <code>fleet-exec</code>, <code>fleetctl</code>, установщик ядер и страховочные скрипты firewall (не включая их), заменяет широкий sudo одной обёрткой и включает строгий режим ключа панели. Широкий sudo удаляется только после того, как обёртка ответила.</p>
-      {(s.sudo_mode !== 'restricted' || outdated) && (
-        <div><button className="btn pri" disabled={busy} onClick={() => void run(async () => { const r = await api.post<{ version: string }>(`/api/v1/servers/${s.id}/nodekit/install`); setOut(`nodekit ${r.version} установлен, sudo сужен, строгий режим включён`); onChange(); })}>{busy ? 'Устанавливаю…' : outdated ? `Обновить nodekit до ${d.nodekitVersion}` : `Установить nodekit ${d.nodekitVersion}`}</button></div>
-      )}
-      {out && <div className="alert ok">{out}</div>}
-      <ErrorBox error={error} />
-    </>
+  if (!d.snippet) return <p className="k">Ручная команда для этого канала содержит ключ узла и доступна только администратору.</p>;
+  const body = (
+    <div className="stack">
+      <div className="flex">
+        <a className="btn sm" href={`api/v1/servers/${s.id}/bootstrap.sh`} download>Скачать скрипт</a>
+        <Info>Выполните под root: в консоли хостера или по своему SSH. Скрипт только добавляет доступ панели и ничего не удаляет.{s.mgmt_mode === 'tunnel' ? ` Он также поставит служебный Xray на порту ${s.mgmt.port}/tcp — если у хостера свой firewall, откройте этот порт.` : ''}</Info>
+      </div>
+      <CopyBlock text={d.snippet} />
+    </div>
   );
+  return open ? body : <details><summary className="k" style={{ cursor: 'pointer' }}>Не получается подключиться? Выполнить команду на сервере вручную</summary>{body}</details>;
 }
 
 // ───── вкладка «Защита» ─────
 
 const LEVELS = [
-  { code: 'P1', name: 'Обычный', desc: 'Хост как есть. Панель только показывает рекомендации.', c: [false, false, false] },
-  { code: 'P2', name: 'Нормальный', desc: 'Входящие закрыты, открыты только порты роли хоста.', c: [true, false, false] },
-  { code: 'P3', name: 'Высокий', desc: 'Закрытые порты, whitelist адресов и SSH только по ключам.', c: [true, true, true] },
+  { code: 'P1', name: 'Обычная', desc: 'Сервер как есть, ничего не блокируется.' },
+  { code: 'P2', name: 'Средняя', desc: 'Закрыты все порты, кроме нужных.' },
+  { code: 'P3', name: 'Высокая', desc: 'Ещё белые списки адресов и SSH только по ключам.' },
 ] as const;
-const CTRL = ['C1 · закрытые порты', 'C2 · whitelist адресов', 'C3 · SSH только по ключам'];
 
 interface Plan { text: string; lint: string[]; warnings: string[]; summary: { level: string; stealth: string; sshPorts: number[]; svcTcp: number[]; svcUdp: number[]; panel: string[]; admin: string[]; peers: string[]; users: number } }
 
@@ -229,17 +215,15 @@ function ProtectTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
     <div className="stack" style={{ gap: 20 }}>
       <section className="stack">
         <div className="flex" style={{ justifyContent: 'space-between' }}>
-          <h2>Уровень защиты хоста</h2>
-          <span className="k">Сейчас: <b className="mono">{s.protection_current}</b> · цель задаётся здесь, применение — по шагам ниже</span>
+          <h2>Уровень защиты <Info>Выбранный уровень включается не сразу: сначала короткий чек-лист, затем правила с автоматическим откатом, если доступ пропадёт.</Info></h2>
+          <span className="k">Сейчас: <Level value={s.protection_current} /></span>
         </div>
         <div className="grid g3">
           {LEVELS.map((l) => (
             <button key={l.code} className={`lvl ${s.protection_target === l.code ? 'on' : ''}`} aria-pressed={s.protection_target === l.code} disabled={busy}
               onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { protectionTarget: l.code }); setPlan(null); onChange(); })}>
-              <span className="flex" style={{ justifyContent: 'space-between', width: '100%' }}><span className="mono" style={{ color: 'var(--accent)', fontWeight: 500 }}>{l.code}</span><span className="k">{l.code === 'P1' ? 'по умолчанию для главного' : l.code === 'P3' ? 'цель для нод' : ''}</span></span>
               <span style={{ fontSize: 17, fontWeight: 600 }}>{l.name}</span>
               <span className="k">{l.desc}</span>
-              <span className="stack" style={{ gap: 6 }}>{CTRL.map((c, i) => <span key={c} className="ctl"><span style={{ width: 14, color: l.c[i] ? 'var(--ok)' : 'var(--muted)', fontWeight: 700 }}>{l.c[i] ? '✓' : '–'}</span>{c}</span>)}</span>
             </button>
           ))}
         </div>
@@ -261,7 +245,7 @@ function ProtectTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
             <div className="narrow stack">
               <h3>План</h3>
               <div className="flex">
-                <button className="btn" disabled={busy} onClick={() => void run(async () => setPlan(await api.post<Plan>(`/api/v1/servers/${s.id}/fw/plan`, {})))}>Построить план {s.protection_target}</button>
+                <button className="btn" disabled={busy} onClick={() => void run(async () => setPlan(await api.post<Plan>(`/api/v1/servers/${s.id}/fw/plan`, {})))}>Построить план</button>
                 {plan && <Tag kind={plan.lint.length ? 'fail' : 'ok'}>{plan.lint.length ? `линтер: ${plan.lint.length}` : 'линтер пройден'}</Tag>}
               </div>
               {plan && (
@@ -402,7 +386,12 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
   const [ask, setAsk] = useState<'direct' | 'tunnel' | null>(null);
+  const [switched, setSwitched] = useState(false);
   const st = s.mgmt.client;
+  if (s.mgmt_mode === 'local') return (
+    <div className="row"><div className="row-text"><b>Канал управления</b><span className="k">Локально: это главный сервер, панель ходит на свой же SSH.</span></div></div>
+  );
+  const mode = s.mgmt_mode;
   return (
     <div className="row stack" style={{ alignItems: 'stretch' }}>
       <div className="flex" style={{ justifyContent: 'space-between' }}>
@@ -414,15 +403,22 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
               : 'SSH напрямую с адреса главного сервера. Если главный сервер в РФ и SSH режется — переключите на туннель.'}
           </span>
         </div>
-        <Seg value={s.mgmt_mode} label="Канал управления" options={[['direct', 'напрямую'], ['tunnel', 'туннель']]} onChange={(v) => setAsk(v === s.mgmt_mode ? null : v)} />
+        <Seg value={mode} label="Канал управления" options={[['direct', 'напрямую'], ['tunnel', 'туннель']]} onChange={(v) => setAsk(v === mode ? null : v)} />
       </div>
       {ask && (
         <div className="alert warn stack">
-          <span>Панель сразу начнёт подключаться {ask === 'tunnel' ? 'через туннель' : 'напрямую'}. Пока вы не выполните обновлённый bootstrap-сниппет на узле (шаг 1 онбординга, он только добавляет доступ), управление узлом будет недоступно. VPN пользователей это не затрагивает.</span>
+          <span>После переключения панель перенастроит доступ к серверу — понадобится его логин и пароль (один раз). Пока это не сделано, управление сервером недоступно; VPN пользователей это не затрагивает.</span>
           <div className="flex">
-            <button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { mgmtMode: ask }); setAsk(null); onChange(); })}>Переключить</button>
+            <button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { mgmtMode: ask }); setAsk(null); setSwitched(true); onChange(); })}>Переключить</button>
             <button className="btn ghost" onClick={() => setAsk(null)}>Отмена</button>
           </div>
+        </div>
+      )}
+      {switched && (
+        <div className="stack">
+          <b className="small">Перенастроить доступ</b>
+          <AuthForm id={s.id} onStarted={() => { setSwitched(false); onChange(); }} />
+          <ManualSnippet d={d} open={false} />
         </div>
       )}
       <ErrorBox error={error} />
@@ -521,16 +517,50 @@ function HostTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
       </section>
       <CoresCard d={d} onChange={onChange} />
       <section className="card pad stack">
-        <h2>Preflight</h2>
+        <h2>Проверка сервера <Info>Снимок только для чтения: ОС, SSH, firewall, занятые порты, сторонние ядра. Ничего не меняет.</Info></h2>
         <PreflightView d={d} onChange={onChange} />
       </section>
       <section className="card pad stack">
-        <h2>Nodekit</h2>
-        <NodekitStep d={d} onChange={onChange} />
-        {s.kit_version === d.nodekitVersion && <span className="k">Версия актуальна: {s.kit_version}</span>}
+        <h2>Служебные скрипты <Info>Nodekit — скрипты панели на узле: обёртка sudo, установщик ядер, страховочный откат firewall.</Info></h2>
+        {s.kit_version === d.nodekitVersion ? <span className="k">Версия актуальна: {s.kit_version}</span> : <NodekitStep d={d} onChange={onChange} />}
       </section>
       <ErrorBox error={error} />
     </div>
+  );
+}
+
+const ICON: Record<Check['status'], string> = { ok: '✓', warn: '!', fail: '✕', info: 'i' };
+
+/** Снимок сервера (только чтение): что найдено и есть ли проблемы. */
+function PreflightView({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
+  const [p, setP] = useState<Preflight | null>(d.preflight);
+  const { busy, error, run } = useAsync();
+  return (
+    <>
+      <div className="flex">
+        <button className="btn" disabled={busy} onClick={() => void run(async () => { setP(await api.post<Preflight>(`/api/v1/servers/${d.server.id}/preflight`)); onChange(); })}>{busy ? 'Проверяю…' : 'Проверить заново'}</button>
+        {p?.created_at && <span className="k">последняя: {fmtTime(p.created_at)}</span>}
+      </div>
+      {p && (
+        <ul className="checks">
+          {p.checks.map((c) => <li key={c.id} className={`check ${c.status}`}><span className="ci" aria-label={c.status}>{ICON[c.status]}</span><b className="small">{c.title}</b><span className="small muted">{c.detail}</span></li>)}
+        </ul>
+      )}
+      <ErrorBox error={error} />
+    </>
+  );
+}
+
+/** Обновление служебных скриптов на узле, если вышла новая версия. */
+function NodekitStep({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
+  const s = d.server;
+  const { busy, error, run } = useAsync();
+  if (s.sudo_mode === 'restricted' && s.kit_version === d.nodekitVersion) return null;
+  return (
+    <>
+      <div><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/nodekit/install`); onChange(); })}>{busy ? 'Обновляю…' : `Обновить до ${d.nodekitVersion}`}</button></div>
+      <ErrorBox error={error} />
+    </>
   );
 }
 

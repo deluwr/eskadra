@@ -1,5 +1,5 @@
 import { isIP } from 'node:net';
-import { expectedPanelIps, type Ctx, type ServerRow } from './ctx.js';
+import { expectedPanelIps, panelPorts, type Ctx, type ServerRow } from './ctx.js';
 import { json, Vpn } from './vpn.js';
 
 export interface PlanResult {
@@ -92,6 +92,8 @@ export function renderPlan(ctx: Ctx, s: ServerRow, level: 'P2' | 'P3'): PlanResu
   );
   // служебный туннель открыт всем (protected set, §7.3): без ключа REALITY он отвечает как обычный сайт
   if (tunnel && s.mgmt_port) lines.push(`    tcp dport ${s.mgmt_port} accept`);
+  // главный сервер как узел: панель и подписки открыты всем (protected set, §7.7)
+  if (s.mgmt_mode === 'local') lines.push(`    tcp dport { ${panelPorts(ctx.db).join(', ')} } accept`);
   if (level === 'P2') {
     lines.push(`    tcp dport ${sshList} accept`);
   } else {

@@ -445,6 +445,54 @@ cmd_update() {
   ESKADRA_REPO="$repo" ESKADRA_VERSION="${1:-latest}" bash <(curl -fsSL "https://raw.githubusercontent.com/$repo/main/scripts/install.sh")
 }
 
+# ───────────────────────── главный сервер как узел ─────────────────────────
+
+# Root-помощник (юнит eskadra-selfnode.path): панель работает без root и просит доступ к своему же хосту.
+# Делает ровно то, что bootstrap-сниппет узла, но ключ панели пускается только с 127.0.0.1.
+# Принимает от панели только id и публичный ключ строгого формата — никаких команд.
+cmd_self_node_apply() {
+  local dir="$DATA/selfnode" req out id pubkey port fp line
+  req="$dir/request.json"; out="$dir/result.json"
+  [ -f "$req" ] || return 0
+  id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$req" 2>/dev/null || true)"
+  pubkey="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pubkey",""))' "$req" 2>/dev/null || true)"
+  rm -f "$req"
+  reply() {  # reply true|false [порт отпечаток | сообщение]
+    python3 -c 'import json,sys
+ok = sys.argv[2] == "true"
+r = {"id": sys.argv[1], "ok": ok}
+if ok: r.update(sshPort=int(sys.argv[3]), hostKeyFp=sys.argv[4])
+else: r["error"] = sys.argv[3]
+print(json.dumps(r))' "$id" "$@" > "$out.new"
+    chown eskadra:eskadra "$out.new"; mv "$out.new" "$out"
+  }
+  [[ "$id" =~ ^srv-[a-z0-9x]{4,16}$ ]] || { reply false "неверный id"; return 0; }
+  [[ "$pubkey" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{60,80}=*\ fleet-panel/${id}$ ]] || { reply false "неверный ключ"; return 0; }
+  [ -r /etc/ssh/ssh_host_ed25519_key.pub ] || { reply false "на сервере нет ed25519-ключа хоста SSH"; return 0; }
+
+  install -d -m 755 /etc/fleet
+  printf '127.0.0.1\n::1\n' > /etc/fleet/panel-ips
+  id fleet >/dev/null 2>&1 || useradd --create-home --shell /bin/bash fleet
+  usermod -p '*' fleet
+  install -d -m 700 -o fleet -g fleet /home/fleet/.ssh
+  touch /home/fleet/.ssh/authorized_keys
+  line="from=\"127.0.0.1,::1\",restrict,port-forwarding,permitopen=\"127.0.0.1:10085\" $pubkey"
+  grep -qxF "$line" /home/fleet/.ssh/authorized_keys || echo "$line" >> /home/fleet/.ssh/authorized_keys
+  chown fleet:fleet /home/fleet/.ssh/authorized_keys; chmod 600 /home/fleet/.ssh/authorized_keys
+  command -v restorecon >/dev/null && restorecon -R /home/fleet/.ssh || true
+  install -d -m 750 /etc/sudoers.d
+  echo 'fleet ALL=(root) NOPASSWD:ALL' > /etc/sudoers.d/90-fleet-bootstrap
+  chmod 440 /etc/sudoers.d/90-fleet-bootstrap
+  visudo -cf /etc/sudoers.d/90-fleet-bootstrap >/dev/null || { rm -f /etc/sudoers.d/90-fleet-bootstrap; reply false "sudoers не прошёл проверку"; return 0; }
+
+  install -d /run/sshd
+  port="$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+  fp="$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')"
+  [ -n "$port" ] && [ -n "$fp" ] || { reply false "не удалось определить порт SSH или ключ хоста"; return 0; }
+  reply true "$port" "$fp"
+  logger -t eskadra "self-node: panel key for $id added (from 127.0.0.1)" 2>/dev/null || true
+}
+
 fw_close() {  # закрыть в ufw / firewalld все порты Эскадры (панель, подписки, ACME)
   local n port
   if ufw_on; then
@@ -479,11 +527,11 @@ cmd_uninstall() {  # cmd_uninstall [--purge]
     yes_no "  Удалить программу? Данные в $DATA и настройки в $ETC сохранятся." || return 0
   fi
   # по одному юниту: «disable --now a b» падает целиком, если одного юнита нет, и панель оставалась запущенной
-  for unit in eskadra.service eskadra-certbot.timer eskadra-certbot.service; do
+  for unit in eskadra.service eskadra-certbot.timer eskadra-certbot.service eskadra-selfnode.path eskadra-selfnode.service; do
     systemctl disable --now "$unit" >/dev/null 2>&1 || systemctl stop "$unit" >/dev/null 2>&1 || true
   done
   pkill -u eskadra >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-certbot.*
+  rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-certbot.* /etc/systemd/system/eskadra-selfnode.*
   systemctl daemon-reload
   if [ "$purge" = --purge ]; then
     legacy_le_drop
@@ -578,6 +626,7 @@ case "${1:-menu}" in
   cert) shift; cmd_cert "$@" ;;
   cert-deploy) cmd_cert_deploy ;;
   cert-migrate) cmd_cert_migrate ;;
+  self-node-apply) cmd_self_node_apply ;;
   conflicts) cmd_conflicts ;;
   reset-password) cmd_reset_password "${2:-}" ;;
   disable-2fa) [ -n "${2:-}" ] || die "eskadra disable-2fa <логин>"; cli disable-2fa "$2" ;;

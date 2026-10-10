@@ -1,22 +1,25 @@
 import type { FastifyInstance } from 'fastify';
+import fs from 'node:fs';
+import path from 'node:path';
 import { isIP } from 'node:net';
+import { config } from '../config.js';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import ssh2 from 'ssh2';
 import { Ctx, coreMode, expectedPanelIps, guard, HttpError, type Role, type ServerRow } from '../ctx.js';
 import { randomToken, sha256hex } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
-import { bootstrapSnippet } from '../bootstrap.js';
-import { credsFields, credsOf, newTunnel, xrayPin } from '../mgmt.js';
-import { fetchHostKey, mask, withNodeLock, withSession } from '../ssh/executor.js';
-import { parseSections, summarize } from '../preflight.js';
-import { buildInstallScript, kitVersion, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from '../nodekit.js';
+import { credsFields, credsOf, newTunnel } from '../mgmt.js';
+import { checkLogin, installNodekit, onboardingRunning, runPreflight, snippetOf, startOnboarding } from '../onboard.js';
+import { fetchHostKey, withNodeLock, withSession } from '../ssh/executor.js';
+import { kitVersion } from '../nodekit.js';
 import { Ops, startJob } from '../ops.js';
 import { json } from '../vpn.js';
 import { CHECKLIST, renderPlan } from '../firewall.js';
 
 const sshUtils = ssh2.utils;
-const ROLES = ['entry', 'relay', 'exit', 'control'] as const;
+/** entry — вход (к нему подключаются пользователи, он же пересылает на выходы); exit — выход в интернет. relay/control — старые значения. */
+const ROLES = ['entry', 'exit', 'relay', 'control'] as const;
 
 export function publicView(ctx: Ctx, r: ServerRow) {
   const { key_priv_sealed: _secret, fw_plan: _plan, xui_pass_sealed: _xp, mgmt_key_sealed: _mk, mgmt_uuid: _mu, ...rest } = r;
@@ -49,11 +52,20 @@ const createBody = z.object({
   name: z.string().trim().min(1).max(64).regex(/^[\p{L}0-9 ._-]+$/u),
   host: z.string().trim().min(1).max(253).regex(/^[a-zA-Z0-9.:-]+$/),
   sshPort: z.coerce.number().int().min(1).max(65535).default(22),
-  role: z.enum(ROLES).default('entry'),
+  role: z.enum(['entry', 'exit']).default('entry'),
   group: z.string().trim().min(1).max(32).default('default'),
   /** Канал управления (§5.8): напрямую по SSH или через служебный туннель VLESS-REALITY. */
   mgmtMode: z.enum(['direct', 'tunnel']).default('direct'),
+  /** Одноразовый доступ для автоматической настройки; без него — ручной сниппет. Нигде не сохраняется. */
+  auth: z.object({
+    user: z.string().trim().min(1).max(64).regex(/^[a-z_][a-z0-9_.-]*$/i).default('root'),
+    password: z.string().max(1024).optional(),
+    privateKey: z.string().max(16384).optional(),
+    passphrase: z.string().max(1024).optional(),
+  }).refine((a) => !!a.password || !!a.privateKey, 'нужен пароль или ключ').optional(),
 });
+
+const onboardBody = z.object({ auth: createBody.shape.auth });
 
 const patchBody = z.object({
   name: z.string().trim().min(1).max(64).optional(),
@@ -72,27 +84,10 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   const ops = new Ops(ctx);
   const who = (req: { admin?: { username: string } }) => req.admin!.username;
 
-  /** Root-операция до сужения sudo — скрипт через bootstrap-sudo; после — операция fleet-exec. */
-  async function rootScript(r: ServerRow, op: 'preflight' | 'baseline') {
-    return withNodeLock(r.id, () =>
-      withSession(ctx.target(r), (s) =>
-        r.sudo_mode === 'restricted'
-          ? s.exec(`sudo -n /usr/local/sbin/fleet-exec ${op}`, { timeoutMs: 60_000 })
-          : s.exec(`sudo -n bash -s -- "$SSH_CONNECTION"`, { stdin: readKitFile(`sbin/fleet-${op}`), timeoutMs: 60_000 }),
-      ),
-    );
-  }
-
   /** Сниппет под канал узла. В режиме туннеля в нём ключ REALITY узла — поэтому только для admin и выше. */
   async function snippetFor(r: ServerRow, role?: Role): Promise<string | null> {
-    if (r.mgmt_mode !== 'tunnel') return bootstrapSnippet({ panelIps: ctx.executorIps(), pubkey: r.key_pub });
-    if (role && RANK[role] < RANK.admin) return null;
-    const creds = credsOf(ctx, r);
-    if (!creds) throw new HttpError(409, 'у узла нет данных служебного туннеля — переключите канал заново');
-    const xray = await xrayPin(ctx).catch((e: Error) => {
-      throw new HttpError(502, `не удалось получить релиз Xray с GitHub для туннеля: ${e.message}`);
-    });
-    return bootstrapSnippet({ panelIps: ctx.executorIps(), pubkey: r.key_pub, mgmt: { creds, sshPort: r.ssh_port, xray } });
+    if (r.mgmt_mode === 'tunnel' && role && RANK[role] < RANK.admin) return null;
+    return snippetOf(ctx, r);
   }
 
   const tunnelFields = () => credsFields(ctx, newTunnel(ctx.servers().map((x) => x.mgmt_local_port ?? 0)));
@@ -114,15 +109,51 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = 'srv-' + randomToken(4).toLowerCase().replace(/[^a-z0-9]/g, 'x');
     const keys = sshUtils.generateKeyPairSync('ed25519', { comment: `fleet-panel/${id}` });
     // главный сервер — P1 по умолчанию (защита опциональна), ноды — цель P3 сразу (§7.11.2)
-    const target = body.role === 'control' ? 'P1' : 'P3';
+    const target = 'P3';   // ноды — сразу высокий уровень (§7.11.2); применение — после проверки
     db.prepare(
       `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(id, body.name, body.host, body.sshPort, body.role, body.group, target, body.role === 'exit' ? 0 : 1, keys.public.trim(), ctx.seal(keys.private));
     if (body.mgmtMode === 'tunnel') ctx.updateServer(id, { mgmt_mode: 'tunnel', ...tunnelFields() });
-    audit(db, who(req), 'server.create', id, { host: body.host, port: body.sshPort, role: body.role, mgmt: body.mgmtMode });
+    audit(db, who(req), 'server.create', id, { host: body.host, port: body.sshPort, role: body.role, mgmt: body.mgmtMode, auto: !!body.auth });
     const r = ctx.server(id);
-    return { server: publicView(ctx, r), snippet: await snippetFor(r) };
+    // с одноразовым доступом панель настраивает узел сама; без него — ручной сниппет
+    const jobId = body.auth ? startOnboarding(ctx, id, who(req), body.auth) : null;
+    return { server: publicView(ctx, r), jobId, snippet: body.auth ? null : await snippetFor(r) };
+  });
+
+  /**
+   * Главный сервер — тоже узел флота (обычно вход/relay для пользователей из РФ). Панель работает без root,
+   * поэтому доступ себе на своём хосте добавляет узкий root-помощник (eskadra self-node-apply, юнит
+   * eskadra-selfnode.path): он только создаёт пользователя fleet с ключом панели и from="127.0.0.1".
+   */
+  app.post('/api/v1/servers/self', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    if (ctx.servers().some((x) => x.mgmt_mode === 'local')) throw new HttpError(409, 'главный сервер уже добавлен во флот');
+    const host = process.env.FLEET_PUBLIC_HOST || ctx.executorIps()[0];
+    if (!host) throw new HttpError(400, 'неизвестен публичный адрес главного сервера (FLEET_PUBLIC_HOST)');
+    const dir = path.join(config.dataDir, 'selfnode');
+    if (!fs.existsSync(dir)) throw new HttpError(409, 'на сервере нет помощника для этой операции — обновите панель: eskadra update');
+    const id = 'srv-' + randomToken(4).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+    const keys = sshUtils.generateKeyPairSync('ed25519', { comment: `fleet-panel/${id}` });
+    const resultFile = path.join(dir, 'result.json');
+    fs.rmSync(resultFile, { force: true });
+    fs.writeFileSync(path.join(dir, 'request.json'), JSON.stringify({ id, pubkey: keys.public.trim() }) + '\n');
+    let res: { ok: boolean; id?: string; sshPort?: number; hostKeyFp?: string; error?: string } | null = null;
+    for (let i = 0; i < 120 && !res; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (fs.existsSync(resultFile)) {
+        const r = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+        if (r.id === id) res = r;
+      }
+    }
+    if (!res) throw new HttpError(504, 'помощник не ответил за минуту (юнит eskadra-selfnode.path активен? проверьте: systemctl status eskadra-selfnode.path)');
+    if (!res.ok || !res.sshPort || !res.hostKeyFp) throw new HttpError(500, `помощник: ${res.error ?? 'нет данных'}`);
+    db.prepare(
+      `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed, mgmt_mode, host_key_fp, host_key_algo)
+       VALUES (?, 'главный', ?, ?, 'entry', 'default', 'P1', 1, ?, ?, 'local', ?, 'ssh-ed25519')`,
+    ).run(id, host, res.sshPort, keys.public.trim(), ctx.seal(keys.private), res.hostKeyFp);
+    audit(db, who(req), 'server.self_added', id, { host, sshPort: res.sshPort });
+    return { server: publicView(ctx, ctx.server(id)), jobId: startOnboarding(ctx, id, who(req)) };
   });
 
   app.get<{ Params: { id: string } }>('/api/v1/servers/:id', async (req) => {
@@ -142,6 +173,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       inbounds,
       checklist: checklistView(r),
       nodekitVersion: kitVersion(),
+      onboarding: { running: onboardingRunning(r.id), job: db.prepare(`SELECT id, status, log, started_at, finished_at FROM jobs WHERE server_id = ? AND kind = 'onboard' ORDER BY id DESC LIMIT 1`).get(r.id) ?? null },
       kvmCommand: kvmCommand(ctx.executorIps()[0]),
     };
   });
@@ -162,6 +194,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     const r = ctx.server(req.params.id);
     const b = patchBody.parse(req.body);
     if (b.group) db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(b.group);
+    if (b.mgmtMode && r.mgmt_mode === 'local') throw new HttpError(409, 'главный сервер управляется локально — канал не меняется');
     if (b.mgmtMode && b.mgmtMode !== r.mgmt_mode) {
       if (b.mgmtMode === 'direct' && !ctx.executorIps().length) throw new HttpError(400, 'для прямого канала задайте адрес исполнителя (executor.ips)');
       // ключи туннеля сохраняются при переключениях: повторный сниппет не меняет конфиг узла
@@ -180,6 +213,13 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   // ───── подключение (шаги 2–5 runbook) ─────
+
+  /** Автоподключение: с одноразовым доступом — целиком; без него — продолжить с места остановки (сниппет выполнен вручную). */
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/onboard', { preHandler: guard(ctx, 'admin') }, async (req) => {
+    const r = ctx.server(req.params.id);
+    const b = onboardBody.parse(req.body ?? {});
+    return { jobId: startOnboarding(ctx, r.id, who(req), b.auth) };
+  });
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/host-key/fetch', { preHandler: guard(ctx, 'admin') }, async (req) => {
     const r = ctx.server(req.params.id);
@@ -206,49 +246,19 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/check', async (req) => {
     const r = ctx.server(req.params.id);
-    const res = await withNodeLock(r.id, () => withSession(ctx.target(r), async (s) => {
-      if (r.sudo_mode === 'restricted') {
-        const w = await s.exec('sudo -n /usr/local/sbin/fleet-exec whoami');
-        if (w.code === 0) return { ok: true, conn: w.stdout.split('\n')[0] ?? '', user: 'fleet', err: '' };
-        const p = await s.exec('sudo -n /usr/local/sbin/fleet-exec ping');
-        return { ok: p.stdout.trim() === 'pong', conn: '', user: 'fleet', err: p.stderr.trim() };
-      }
-      const w = await s.exec('echo "$SSH_CONNECTION"; id -un');
-      const sudo = await s.exec('sudo -n true && echo sudo_ok');
-      const [conn, user] = w.stdout.trim().split('\n');
-      return { ok: sudo.code === 0, conn: conn ?? '', user: user ?? '', err: sudo.stderr.trim() };
-    }));
-    const seen = res.conn.split(' ')[0] || r.seen_from_ip;
-    ctx.updateServer(r.id, {
-      seen_from_ip: seen, last_seen_at: new Date().toISOString(), fail_since: null,
-      status: r.status === 'pending_bootstrap' && res.ok ? 'connected' : r.status,
-    });
-    audit(db, who(req), 'server.check', r.id, { ok: res.ok, seen });
-    return { ok: res.ok, user: res.user, seenFromIp: seen, sudo: res.ok ? 'ok' : res.err };
+    const res = await checkLogin(ctx, r);
+    audit(db, who(req), 'server.check', r.id, { ok: res.ok, seen: res.seenFromIp });
+    return res;
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/preflight', async (req) => {
     const r = ctx.server(req.params.id);
     const job = startJob(ctx, r.id, 'preflight');
     try {
-      const pre = await rootScript(r, 'preflight');
-      const base = await rootScript(r, 'baseline');
-      if (pre.code !== 0) throw new Error(`preflight exit ${pre.code}: ${pre.stderr}`);
-      job.log(`baseline: ${base.code === 0 ? base.stdout.trim() : 'FAILED ' + base.stderr.trim()}`);
-      const summary = summarize(pre.stdout, expectedPanelIps(r, ctx.executorIps()));
-      const kernel = (parseSections(pre.stdout).get('kernel') ?? '').split('\n');
-      const arch = /aarch64|arm64/.test(kernel[1] ?? '') ? 'arm64' : 'amd64';
-      db.prepare('INSERT INTO preflight_reports (server_id, summary, raw) VALUES (?, ?, ?)').run(
-        r.id, JSON.stringify({ ...summary, baselinePath: base.stdout.trim() }), pre.stdout);
-      ctx.updateServer(r.id, {
-        os_info: JSON.stringify(summary.os), ssh_ports: JSON.stringify(summary.sshPorts), ufw_active: summary.ufwActive ? 1 : 0,
-        external_cores: JSON.stringify(summary.externalCores),
-        arch, last_seen_at: new Date().toISOString(), ...(summary.clientIp ? { seen_from_ip: summary.clientIp } : {}),
-      });
-      job.log(`checks: ${summary.checks.map((c) => `${c.id}=${c.status}`).join(' ')}`);
+      const res = await runPreflight(ctx, r, job);
       job.finish('ok');
-      audit(db, who(req), 'server.preflight', r.id, { blocking: summary.blocking });
-      return { ...summary, baselinePath: base.stdout.trim() };
+      audit(db, who(req), 'server.preflight', r.id, { blocking: res.blocking });
+      return res;
     } catch (e) {
       job.log(`error: ${(e as Error).message}`);
       job.finish('failed');
@@ -256,55 +266,15 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     }
   });
 
-  /**
-   * Шаг 3: nodekit + сужение sudo + строгий режим ключа.
-   * Если узел уже сужен, но nodekit устарел и не умеет kit-install, нужен повторный bootstrap-сниппет:
-   * он вернёт временный широкий sudo, и установка пройдёт заново.
-   */
+  /** Шаг 3: nodekit + сужение sudo + строгий режим ключа. */
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/nodekit/install', { preHandler: guard(ctx, 'admin') }, async (req) => {
     const r = ctx.server(req.params.id);
     const job = startJob(ctx, r.id, 'nodekit.install');
-    const t = ctx.target(r);
     try {
-      const wide = await withNodeLock(r.id, () => withSession(t, (s) => s.exec('sudo -n true')));
-      if (wide.code !== 0) {
-        if (r.sudo_mode !== 'restricted') throw new Error('нет ни bootstrap-sudo, ни fleet-exec: выполните bootstrap-сниппет');
-        await ctx.onNode(r, (n) => ops.ensureKit(r, n, job.log));
-      } else {
-        await withNodeLock(r.id, () => withSession(t, async (s) => {
-          const inst = await s.exec('sudo -n bash -s', { stdin: buildInstallScript(), timeoutMs: 600_000 });
-          job.log(mask(`install: exit ${inst.code}\n${inst.stdout}${inst.stderr}`, [t.privateKey]));
-          if (inst.code !== 0) throw new Error('nodekit install failed');
-          const w = await s.exec('sudo -n bash -s', { stdin: SUDO_NARROW_WRITE });
-          job.log(`sudoers 90-fleet: exit ${w.code} ${w.stdout.trim()} ${w.stderr.trim()}`);
-          if (w.code !== 0) throw new Error('writing 90-fleet failed');
-          const ping = await s.exec('sudo -n /usr/local/sbin/fleet-exec ping');
-          if (ping.stdout.trim() !== 'pong') throw new Error('fleet-exec ping failed — широкий sudo НЕ удалён');
-          const drop = await s.exec('sudo -n bash -s', { stdin: SUDO_DROP_BOOTSTRAP });
-          job.log(`drop 90-fleet-bootstrap: ${drop.stdout.trim()} ${drop.stderr.trim()}`);
-          if (drop.code !== 0) throw new Error('could not drop bootstrap sudo');
-        }));
-      }
-      // Строгий режим: ключ панели — только через fleet-gate. Проверяем НОВОЙ сессией.
-      await ctx.onNode(r, (n) => n.must(['ssh-mode', 'strict']));
-      const verify = await withSession(t, async (s) => ({
-        wide: await s.exec('sudo -n true'),
-        raw: await s.exec('id -un'),
-        ping: await s.exec('sudo -n /usr/local/sbin/fleet-exec ping'),
-        ver: await s.exec('sudo -n /usr/local/sbin/fleet-exec version'),
-      }));
-      const ok = verify.wide.code !== 0 && verify.raw.code !== 0 && verify.ping.stdout.trim() === 'pong';
-      job.log(`verify: wide sudo ${verify.wide.code === 0 ? 'STILL WORKS' : 'denied'}; raw shell ${verify.raw.code === 0 ? 'STILL WORKS' : 'denied'}; fleet-exec ${verify.ping.stdout.trim()}; version ${verify.ver.stdout.trim()}`);
-      if (!ok) throw new Error('строгий режим не подтвердился: широкий sudo или shell всё ещё доступны');
-      ctx.updateServer(r.id, {
-        sudo_mode: 'restricted', ssh_mode: 'strict', kit_version: verify.ver.stdout.trim(),
-        status: r.status === 'connected' ? 'configured' : r.status,
-      });
+      const version = await installNodekit(ctx, r, job);
       job.finish('ok');
-      audit(db, who(req), 'server.nodekit_installed', r.id, { version: verify.ver.stdout.trim() });
-      // новая нода попадает в наборы соседей (§7.12.1)
-      void ops.peerSync(() => undefined);
-      return { ok: true, version: verify.ver.stdout.trim(), jobId: job.id };
+      audit(db, who(req), 'server.nodekit_installed', r.id, { version });
+      return { ok: true, version, jobId: job.id };
     } catch (e) {
       job.log(`error: ${(e as Error).message}`);
       job.finish('failed');

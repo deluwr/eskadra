@@ -1,5 +1,5 @@
 import { api, ago, fmtBytes, fmtTime, type Server } from '../api';
-import { ErrorBox, StagePip, Tag, usePoll } from '../ui';
+import { ErrorBox, Level, StagePip, Tag, roleLabel, usePoll } from '../ui';
 
 interface Overview {
   servers: Server[];
@@ -40,9 +40,9 @@ export function OverviewPage() {
                     {d.servers.map((s) => (
                       <tr key={s.id} className="clickable" onClick={() => (location.hash = `#/server/${s.id}`)}>
                         <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k mono">{s.host}</div></td>
-                        <td>{s.role}</td>
+                        <td>{roleLabel(s)}</td>
                         <td><StagePip stage={s.stage} /></td>
-                        <td className="mono small">{s.protection_current}{s.protection_current !== s.protection_target && ` → ${s.protection_target}`}</td>
+                        <td><Level value={s.protection_current} /></td>
                         <td>{s.fail_since ? <Tag kind="fail" dot>нет связи</Tag> : <Tag kind={s.last_seen_at ? 'ok' : undefined} dot>{ago(s.last_seen_at)}</Tag>}</td>
                       </tr>
                     ))}
