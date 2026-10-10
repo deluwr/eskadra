@@ -13,6 +13,7 @@ import { serverRoutes } from './routes/servers.js';
 import { templateRoutes } from './routes/templates.js';
 import { userRoutes } from './routes/users.js';
 import { adminRoutes } from './routes/admin.js';
+import { coreRoutes } from './routes/cores.js';
 import { HostKeyError } from './ssh/executor.js';
 import { Bot } from './bot.js';
 import { Backups } from './backup.js';
@@ -62,6 +63,7 @@ await app.register(async (root) => {
     await serverRoutes(secured, ctx);
     await templateRoutes(secured, ctx);
     await userRoutes(secured, ctx);
+    await coreRoutes(secured, ctx);
     await adminRoutes(secured, ctx, { backups, bot, sub });
   });
   if (fs.existsSync(config.webDist)) await root.register(fastifyStatic, { root: config.webDist, prefix: '/' });

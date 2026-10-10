@@ -151,3 +151,12 @@ test('fleet-xui is valid python', (t) => {
   if (!py) return t.skip('python не найден');
   execFileSync(py, ['-c', 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())', path.join(process.cwd(), '..', 'nodekit', 'sbin', 'fleet-xui')]);
 });
+
+test('version comparison for core updates', async () => {
+  const { cmpVersion } = await import('./releases.js');
+  assert.equal(cmpVersion('25.10.15', '25.9.30'), 1);
+  assert.equal(cmpVersion('1.12.0', '1.12.0'), 0);
+  assert.equal(cmpVersion('1.12.0-beta.3', '1.12.0'), -1);
+  assert.equal(cmpVersion('v1.11.15', '1.12.0-alpha.1'), -1);
+  assert.equal(cmpVersion('26.1.0', '25.12.31'), 1);
+});

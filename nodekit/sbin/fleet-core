@@ -4,8 +4,10 @@
 #   apply   <xray|sing-box> <staged.json>         проверить конфиг, подменить атомарно, перезапустить, откатить при сбое
 #   status|stop <core> · x25519 · stats · tls <sni>
 set -euo pipefail
-LIB=/usr/local/lib/eskadra
-ETC=/etc/eskadra
+LIB="${FLEET_CORE_LIB:-/usr/local/lib/eskadra}"
+ETC="${FLEET_CORE_ETC:-/etc/eskadra}"
+BIN="${FLEET_CORE_BIN:-/usr/local/bin}"
+UNITS="${FLEET_CORE_UNITS:-/etc/systemd/system}"
 die() { echo "$*" >&2; exit 1; }
 
 arch() {
@@ -15,7 +17,7 @@ arch() {
     *) die "unsupported arch $(uname -m)" ;;
   esac
 }
-bin_of() { if [ "$1" = xray ]; then echo /usr/local/bin/eskadra-xray; else echo /usr/local/bin/eskadra-sing-box; fi; }
+bin_of() { if [ "$1" = xray ]; then echo "$BIN/eskadra-xray"; else echo "$BIN/eskadra-sing-box"; fi; }
 unit_of() { echo "eskadra-$1.service"; }
 cfg_of() { echo "$ETC/$1/config.json"; }
 
@@ -35,7 +37,7 @@ write_unit() {
   run="$bin run -c $cfg"
   local env=""
   [ "$core" = xray ] && env="Environment=XRAY_LOCATION_ASSET=$(dirname "$(readlink -f "$bin")")"
-  cat > "/etc/systemd/system/$(unit_of "$core").new" <<EOF
+  cat > "$UNITS/$(unit_of "$core").new" <<EOF
 [Unit]
 Description=Eskadra $core
 After=network-online.target
@@ -54,33 +56,90 @@ NoNewPrivileges=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-  mv "/etc/systemd/system/$(unit_of "$core").new" "/etc/systemd/system/$(unit_of "$core")"
+  mv "$UNITS/$(unit_of "$core").new" "$UNITS/$(unit_of "$core")"
   systemctl daemon-reload
 }
 
-cmd_install() {
-  local core="$1" v="$2" sha="$3" url tmp dest
-  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]] || die "bad version"
-  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
-  url="$(url_of "$core" "$v")"
-  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL --retry 3 --max-time 300 -o "$tmp/pkg" "$url" || die "download failed: $url"
-  echo "$sha  $tmp/pkg" | sha256sum -c --quiet - || die "sha256 mismatch"
-  dest="$LIB/$core/$v"; install -d -m 755 "$dest"
-  if [ "$core" = xray ]; then
-    python3 -m zipfile -e "$tmp/pkg" "$tmp/x"
-    install -m 755 "$tmp/x/xray" "$dest/xray"
-    for f in geoip.dat geosite.dat; do [ -f "$tmp/x/$f" ] && install -m 644 "$tmp/x/$f" "$dest/$f"; done
-    ln -sfn "$dest/xray" /usr/local/bin/eskadra-xray.new && mv -T /usr/local/bin/eskadra-xray.new /usr/local/bin/eskadra-xray
-  else
-    tar -xzf "$tmp/pkg" -C "$tmp"
-    install -m 755 "$tmp"/sing-box-*/sing-box "$dest/sing-box"
-    ln -sfn "$dest/sing-box" /usr/local/bin/eskadra-sing-box.new && mv -T /usr/local/bin/eskadra-sing-box.new /usr/local/bin/eskadra-sing-box
-  fi
-  install -d -m 750 "$ETC/$core"
+exe_of() { if [ "$1" = xray ]; then echo "$LIB/xray/$2/xray"; else echo "$LIB/sing-box/$2/sing-box"; fi; }
+
+link_to() {  # переключить /usr/local/bin/eskadra-<core> на версию и переписать юнит
+  local core="$1" v="$2" bin; bin="$(bin_of "$core")"
+  ln -sfn "$(exe_of "$core" "$v")" "$bin.new" && mv -T "$bin.new" "$bin"
   write_unit "$core"
   echo "$v" > "$LIB/$core/current"
-  echo "installed $core $v"
+}
+
+test_cfg() {  # test_cfg <core> <version>: принимает ли версия текущий конфиг
+  local core="$1" v="$2" cfg exe; cfg="$(cfg_of "$core")"; exe="$(exe_of "$core" "$v")"
+  [ -f "$cfg" ] || return 0
+  if [ "$core" = xray ]; then XRAY_LOCATION_ASSET="$(dirname "$exe")" "$exe" run -test -c "$cfg" >/dev/null 2>&1
+  else "$exe" check -c "$cfg" >/dev/null 2>&1; fi
+}
+
+restart_ok() {  # перезапустить, если ядро должно работать; вернуть 0, если поднялось
+  local core="$1" unit; unit="$(unit_of "$core")"
+  [ -f "$(cfg_of "$core")" ] || return 0
+  systemctl is-enabled --quiet "$unit" 2>/dev/null || return 0
+  systemctl restart "$unit"; sleep 2
+  systemctl is-active --quiet "$unit"
+}
+
+# Установка и обновление одной командой:
+#   новая версия ставится рядом → текущий конфиг проверяется новым бинарником → переключение → перезапуск;
+#   если ядро не поднялось — автоматический возврат на прежнюю версию.
+cmd_install() {
+  local core="$1" v="$2" sha="$3" url dest prev tmp
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.]+)?$ ]] || die "bad version"
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
+  prev="$(cat "$LIB/$core/current" 2>/dev/null || true)"
+  [ "$prev" = "$v" ] && [ -x "$(exe_of "$core" "$v")" ] && { echo "already $core $v"; return 0; }
+  dest="$LIB/$core/$v"
+  if [ ! -x "$(exe_of "$core" "$v")" ]; then
+    url="$(url_of "$core" "$v")"
+    tmp="$(mktemp -d)"; _CLEANUP="$tmp"; trap 'rm -rf "${_CLEANUP:-}"' EXIT
+    curl -fsSL --retry 3 --max-time 300 -o "$tmp/pkg" "$url" || die "download failed: $url"
+    echo "$sha  $tmp/pkg" | sha256sum -c --quiet - || die "sha256 mismatch"
+    install -d -m 755 "$dest.new"
+    if [ "$core" = xray ]; then
+      python3 -m zipfile -e "$tmp/pkg" "$tmp/x"
+      install -m 755 "$tmp/x/xray" "$dest.new/xray"
+      for f in geoip.dat geosite.dat; do [ -f "$tmp/x/$f" ] && install -m 644 "$tmp/x/$f" "$dest.new/$f"; done
+    else
+      tar -xzf "$tmp/pkg" -C "$tmp"
+      install -m 755 "$tmp"/sing-box-*/sing-box "$dest.new/sing-box"
+    fi
+    rm -rf "$dest"; mv "$dest.new" "$dest"
+  fi
+  drop_rejected() { [ "$v" = "$prev" ] || rm -rf "$dest"; }
+  test_cfg "$core" "$v" || { drop_rejected; die "$core $v не принимает текущий конфиг — обновление отменено, работает $prev"; }
+  install -d -m 750 "$ETC/$core"
+  link_to "$core" "$v"
+  if ! restart_ok "$core"; then
+    journalctl -u "$(unit_of "$core")" -n 15 --no-pager >&2 || true
+    if [ -n "$prev" ] && [ -x "$(exe_of "$core" "$prev")" ]; then
+      link_to "$core" "$prev"; restart_ok "$core" || true; drop_rejected
+      die "$core $v не запустился — возвращена версия $prev"
+    fi
+    die "$core $v не запустился"
+  fi
+  [ -n "$prev" ] && [ "$prev" != "$v" ] && echo "$prev" > "$LIB/$core/previous"
+  # храним текущую и предыдущую версии, остальные удаляем
+  for d in "$LIB/$core"/*/; do
+    d="${d%/}"; b="$(basename "$d")"
+    [ "$b" = "$v" ] || [ "$b" = "$prev" ] || rm -rf "$d"
+  done
+  echo "installed $core $v${prev:+ (было $prev)}"
+}
+
+cmd_rollback() {  # вернуть предыдущую версию ядра
+  local core="$1" prev cur
+  prev="$(cat "$LIB/$core/previous" 2>/dev/null || true)"; cur="$(cat "$LIB/$core/current" 2>/dev/null || true)"
+  [ -n "$prev" ] && [ -x "$(exe_of "$core" "$prev")" ] || die "предыдущей версии $core нет"
+  test_cfg "$core" "$prev" || die "$core $prev не принимает текущий конфиг"
+  link_to "$core" "$prev"
+  restart_ok "$core" || { link_to "$core" "$cur"; restart_ok "$core" || true; die "$core $prev не запустился — оставлена $cur"; }
+  echo "$cur" > "$LIB/$core/previous"
+  echo "rolled back $core to $prev (было $cur)"
 }
 
 cmd_apply() {
@@ -109,12 +168,13 @@ cmd_apply() {
 cmd_status() {
   local core="$1"
   echo "version=$(cat "$LIB/$core/current" 2>/dev/null || echo none)"
+  echo "previous=$(cat "$LIB/$core/previous" 2>/dev/null || echo none)"
   echo "active=$(systemctl is-active "$(unit_of "$core")" 2>/dev/null || true)"
   echo "listen:"; ss -ltnupH 2>/dev/null | grep -E "eskadra|\"(xray|sing-box)\"" | awk '{print $1" "$5}' || true
 }
 
 cmd_x25519() {  # выводит private=… public=… (формат Xray менялся: Public key / Password)
-  local out; out="$(/usr/local/bin/eskadra-xray x25519)"
+  local out; out="$("$BIN/eskadra-xray" x25519)"
   local priv pub
   priv="$(printf '%s\n' "$out" | sed -nE 's/^(Private key|PrivateKey):[[:space:]]*//p' | head -1)"
   pub="$(printf '%s\n' "$out" | sed -nE 's/^(Public key|Password|PublicKey):[[:space:]]*//p' | head -1)"
@@ -123,7 +183,7 @@ cmd_x25519() {  # выводит private=… public=… (формат Xray ме�
 }
 
 cmd_stats() {  # счётчики пользователей с обнулением (§16)
-  /usr/local/bin/eskadra-xray api statsquery --server=127.0.0.1:10085 -pattern 'user>>>' -reset 2>/dev/null || echo '{}'
+  "$BIN/eskadra-xray" api statsquery --server=127.0.0.1:10085 -pattern 'user>>>' -reset 2>/dev/null || echo '{}'
 }
 
 cmd_tls() {  # самоподписанный сертификат для Hysteria2 (sing-box); выводит sha256 сертификата для pinning
@@ -141,6 +201,7 @@ cmd_tls() {  # самоподписанный сертификат для Hyster
 
 case "${1:-}" in
   install) cmd_install "${2:?}" "${3:?}" "${4:?}" ;;
+  rollback) cmd_rollback "${2:?}" ;;
   apply)   cmd_apply "${2:?}" "${3:?}" ;;
   status)  cmd_status "${2:?}" ;;
   stop)    systemctl disable --now "$(unit_of "${2:?}")" 2>/dev/null || true; echo stopped ;;

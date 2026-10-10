@@ -3,7 +3,9 @@ import { randomBytes } from 'node:crypto';
 import { coreMode, foreignCore, type Ctx, type InboundRow, type NodeSession, type ServerRow, type TemplateRow } from './ctx.js';
 import { getSetting } from './db.js';
 import { json, Vpn } from './vpn.js';
-import { latestRelease, type Core } from './releases.js';
+import { releaseFor, type Core } from './releases.js';
+
+const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
 import { buildKitBundle, kitVersion } from './nodekit.js';
 import { parseSections } from './preflight.js';
 
@@ -68,13 +70,61 @@ export class Ops {
     if (foreign)
       throw new Error(`${s.name}: уже работает ${foreign.name} — Эскадра не запускает второе ядро ${core}, чтобы не было конфликта.` +
         (foreign.name === '3x-ui' ? ' Включите режим «через 3x-ui».' : ' Остановите его или используйте другой узел.'));
-    const arch = (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
-    const rel = await latestRelease(core, arch);
+    const rel = await releaseFor(core, this.pinned(core), archOf(s));
     log(`установка ${core} ${rel.version} (${rel.asset}, sha256 ${rel.sha256.slice(0, 12)}…)`);
     await n.must(['core-install', core, rel.version, rel.sha256], { timeoutMs: 600_000 });
     cores[core] = { version: rel.version };
     this.ctx.updateServer(s.id, { cores: JSON.stringify(cores) });
     s.cores = JSON.stringify(cores);
+  }
+
+  /** Версия, которую ставят новые узлы: закреплённая в настройках или последняя стабильная. */
+  pinned(core: Core): string {
+    return getSetting<Record<string, string>>(this.ctx.db, 'cores.pin', {})[core] ?? 'latest';
+  }
+
+  /**
+   * Обновление ядра на узле: узел ставит версию рядом, проверяет текущий конфиг новым бинарником,
+   * переключает и перезапускает, а при неудаче возвращает прежнюю (fleet-core install).
+   * Панель дополнительно проверяет, что порты inbounds снова слушаются; если нет — откат.
+   */
+  async upgradeCore(s: ServerRow, core: Core, version: string, log: (l: string) => void): Promise<string> {
+    if (core === 'xray' && coreMode(s) === 'xui') throw new Error(`${s.name}: Xray принадлежит 3x-ui — обновляйте его в самом 3x-ui`);
+    const cores = json<Record<string, { version: string; previous?: string }>>(s.cores, {});
+    if (!cores[core]) throw new Error(`${s.name}: ${core} не установлен — он появится при выкате конфигурации`);
+    const rel = await releaseFor(core, version, archOf(s));
+    if (rel.version === cores[core]!.version) { log(`${s.name}: уже ${core} ${rel.version}`); return rel.version; }
+    log(`${s.name}: ${core} ${cores[core]!.version} → ${rel.version}`);
+    return this.ctx.onNode(s, async (n) => {
+      await this.ensureKit(s, n, log);
+      const out = await n.must(['core-install', core, rel.version, rel.sha256], { timeoutMs: 600_000 });
+      log(`${s.name}: ${out.trim()}`);
+      const ports = this.vpn.inbounds(`server_id = ? AND state = 'active'`, s.id)
+        .filter((i) => this.vpn.template(i.template_id)?.core === core).map((i) => i.port);
+      const st = await n.op(['core-status', core]);
+      const missing = ports.filter((p) => !new RegExp(`:${p}\\b`).test(st.stdout));
+      if (missing.length) {
+        const rb = await n.op(['core-rollback', core]);
+        log(`${s.name}: после обновления не слушаются порты ${missing.join(', ')} — откат: ${(rb.stdout || rb.stderr).trim()}`);
+        throw new Error(`${s.name}: ${core} ${rel.version} не поднял порты ${missing.join(', ')}, возвращена ${cores[core]!.version}`);
+      }
+      cores[core] = { version: rel.version, previous: cores[core]!.version };
+      this.ctx.updateServer(s.id, { cores: JSON.stringify(cores) });
+      return rel.version;
+    });
+  }
+
+  async rollbackCore(s: ServerRow, core: Core, log: (l: string) => void): Promise<string> {
+    if (core === 'xray' && coreMode(s) === 'xui') throw new Error(`${s.name}: Xray принадлежит 3x-ui`);
+    const out = await this.ctx.onNode(s, (n) => n.must(['core-rollback', core]));
+    log(`${s.name}: ${out.trim()}`);
+    const st = await this.ctx.onNode(s, (n) => n.op(['core-status', core]));
+    const ver = st.stdout.match(/^version=(\S+)/m)?.[1] ?? '?';
+    const prev = st.stdout.match(/^previous=(\S+)/m)?.[1];
+    const cores = json<Record<string, { version: string; previous?: string }>>(s.cores, {});
+    cores[core] = { version: ver, ...(prev && prev !== 'none' ? { previous: prev } : {}) };
+    this.ctx.updateServer(s.id, { cores: JSON.stringify(cores) });
+    return ver;
   }
 
   /** Линтер порта (§7.12.2): не SSH, не резерв, не занят чужим процессом, в разрешённом диапазоне группы. */

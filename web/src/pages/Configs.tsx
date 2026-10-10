@@ -50,7 +50,83 @@ export function ConfigsPage() {
           {current && <Preview t={current} servers={servers ?? []} />}
         </div>
       </div>
+      <CoresPanel />
     </>
+  );
+}
+
+interface CoresInfo {
+  latest: Record<string, string | null>;
+  releases: Record<string, Array<{ version: string; published: string; prerelease: boolean }>>;
+  pins: Record<string, string>;
+  errors: string[];
+  servers: Array<{ id: string; name: string; mode: 'own' | 'xui'; xray: { version: string; previous?: string } | null; singbox: { version: string; previous?: string } | null; xui: { version: string; panel?: string } | null; outdated: string[] }>;
+}
+
+function CoresPanel() {
+  const { data, reload } = usePoll(() => api.get<CoresInfo>('/api/v1/cores'), null);
+  const [core, setCore] = useState<'xray' | 'sing-box'>('xray');
+  const [version, setVersion] = useState('latest');
+  const [pre, setPre] = useState(false);
+  const [jobId, setJobId] = useState<number | null>(null);
+  const { busy, error, run } = useAsync();
+  if (!data) return null;
+  const rels = (data.releases[core] ?? []).filter((r) => pre || !r.prerelease);
+  const ver = (c: { version: string; previous?: string } | null, k: string, s: CoresInfo['servers'][number]) => {
+    if (!c) return <span className="k">—</span>;
+    const old = s.outdated.includes(k);
+    return (
+      <span className="stack" style={{ gap: 4 }}>
+        <span className="flex" style={{ gap: 6 }}><span className="mono small">{c.version}</span>{old && <Tag kind="warn">устарел</Tag>}</span>
+        <span className="flex" style={{ gap: 6 }}>
+          {old && <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/update`, { version: data.pins[k] ?? 'latest' }); void reload(); })}>Обновить</button>}
+          {c.previous && <button className="btn ghost sm" disabled={busy} onClick={() => { if (confirm(`Вернуть ${k} ${c.previous} на ${s.name}?`)) void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/rollback`); void reload(); }); }}>Откат на {c.previous}</button>}
+        </span>
+      </span>
+    );
+  };
+  return (
+    <section className="card">
+      <div className="card-head">
+        <div className="row-text"><h2>Ядра</h2><span className="k">Обновление: новая версия ставится рядом, текущий конфиг проверяется новым бинарником, при неудаче узел сам возвращает прежнюю. Xray узлов с 3x-ui обновляется в самом 3x-ui.</span></div>
+        <span className="k">последние стабильные: Xray {data.latest.xray ?? '?'} · sing-box {data.latest['sing-box'] ?? '?'}</span>
+      </div>
+      {data.errors.map((e) => <div key={e} className="alert warn" style={{ margin: '0 20px' }}>GitHub недоступен: {e}</div>)}
+      <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
+        <table>
+          <thead><tr><th>Узел</th><th>Режим</th><th>Xray</th><th>sing-box</th></tr></thead>
+          <tbody>
+            {data.servers.map((s) => (
+              <tr key={s.id}>
+                <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a></td>
+                <td>{s.mode === 'xui' ? <Tag kind="info">через 3x-ui</Tag> : <Tag>своё ядро</Tag>}</td>
+                <td>{s.mode === 'xui' ? <span className="stack" style={{ gap: 2 }}><span className="mono small">{s.xui?.version ?? '?'}</span><span className="k">3x-ui {s.xui?.panel ?? ''}</span></span> : ver(s.xray, 'xray', s)}</td>
+                <td>{ver(s.singbox, 'sing-box', s)}</td>
+              </tr>
+            ))}
+            {!data.servers.length && <tr><td colSpan={4} className="k">Узлов с nodekit нет.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div className="row stack" style={{ alignItems: 'stretch' }}>
+        <h3>Обновить по флоту</h3>
+        <div className="flex">
+          <Seg value={core} label="Ядро" onChange={(c) => { setCore(c); setVersion('latest'); }} options={[['xray', 'Xray'], ['sing-box', 'sing-box']]} />
+          <select className="inp" style={{ width: 'auto' }} value={version} onChange={(e) => setVersion(e.target.value)} aria-label="Версия">
+            <option value="latest">последняя стабильная ({data.latest[core] ?? '?'})</option>
+            {rels.map((r) => <option key={r.version} value={r.version}>{r.version}{r.prerelease ? ' · предрелиз' : ''} · {r.published.slice(0, 10)}</option>)}
+          </select>
+          <label className="cb small"><input type="checkbox" checked={pre} onChange={(e) => setPre(e.target.checked)} />показывать предрелизы</label>
+        </div>
+        <div className="flex">
+          <button className="btn pri" disabled={busy} onClick={() => { if (confirm(`Обновить ${core} до ${version} на всех узлах со своим ядром? Canary → остальные, первая ошибка останавливает.`)) void run(async () => { const r = await api.post<{ jobId: number }>(`/api/v1/cores/${core}/rollout`, { version }); setJobId(r.jobId); }); }}>Обновить все узлы</button>
+          <button className="btn" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/cores/pin', { core, version }); void reload(); })}>Закрепить для новых узлов</button>
+          <span className="k">Сейчас новые узлы получают: {core} {data.pins[core] ?? 'latest'}</span>
+        </div>
+        <ErrorBox error={error} />
+      </div>
+      {jobId && <div style={{ padding: '0 20px 16px' }}><JobLog id={jobId} onDone={() => void reload()} /></div>}
+    </section>
   );
 }
 

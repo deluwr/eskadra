@@ -84,8 +84,15 @@ def main():
     action = req.get("action")
     s = settings()
     if action == "info":
-        print(json.dumps({"port": s["port"], "base": s["base"], "tls": s["tls"], "version": version(),
-                          "xray": sorted(glob.glob("/usr/local/x-ui/bin/xray-linux-*"))}))
+        bins = sorted(glob.glob("/usr/local/x-ui/bin/xray-linux-*"))
+        xv = None
+        if bins:
+            try:
+                m = re.search(r"Xray\s+v?(\d+\.\d+\.\d+)", subprocess.run([bins[0], "version"], capture_output=True, text=True, timeout=10).stdout)
+                xv = m.group(1) if m else None
+            except Exception:
+                pass
+        print(json.dumps({"port": s["port"], "base": s["base"], "tls": s["tls"], "version": version(), "xrayVersion": xv}))
         return
     if action == "x25519":
         bins = sorted(glob.glob("/usr/local/x-ui/bin/xray-linux-*"))

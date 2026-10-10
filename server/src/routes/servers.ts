@@ -321,7 +321,9 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       await ops.xui(probe, n, 'list'); // проверка входа
       return i;
     });
-    ctx.updateServer(r.id, { xui_user: b.user, xui_pass_sealed: probe.xui_pass_sealed });
+    const cores = json<Record<string, unknown>>(r.cores, {});
+    cores.xui = { version: (info as { xrayVersion?: string }).xrayVersion ?? '?', panel: info.version };
+    ctx.updateServer(r.id, { xui_user: b.user, xui_pass_sealed: probe.xui_pass_sealed, cores: JSON.stringify(cores) });
     audit(db, who(req), 'server.xui_credentials', r.id, { user: b.user, version: info.version });
     return { ok: true, info };
   });

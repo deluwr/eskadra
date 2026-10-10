@@ -2,6 +2,8 @@ import { isIP } from 'node:net';
 import type { FastifyBaseLogger } from 'fastify';
 import { coreMode, type Ctx, type ServerRow, type UserRow } from './ctx.js';
 import { audit } from './lib/audit.js';
+import { getSetting, setSetting } from './db.js';
+import { cmpVersion, listReleases } from './releases.js';
 import { Ops } from './ops.js';
 import { effectiveLimits, json, period } from './vpn.js';
 import type { Backups } from './backup.js';
@@ -27,6 +29,34 @@ export class Workers {
       this.ctx.db.prepare('DELETE FROM allowed_ips WHERE expires_at < ?').run(new Date().toISOString());
     });
     this.every('backup', 60_000, () => this.backups.tick());
+    this.every('cores', 6 * 3600_000, () => this.coreCheck());
+  }
+
+  /** Новые версии ядер: одно уведомление на версию; версия Xray у узлов с 3x-ui обновляется в карточке. */
+  async coreCheck() {
+    const notified = getSetting<Record<string, string>>(this.ctx.db, 'cores.notified', {});
+    for (const core of ['xray', 'sing-box'] as const) {
+      let latest: string | undefined;
+      try { latest = (await listReleases(core)).find((r) => !r.prerelease)?.version; } catch { continue; }
+      if (!latest) continue;
+      const outdated = this.managed().filter((s) => {
+        const v = json<Record<string, { version: string }>>(s.cores, {})[core]?.version;
+        return v && cmpVersion(v, latest!) < 0;
+      });
+      if (outdated.length && notified[core] !== latest) {
+        void this.bot.notifyAdmins(`⬆️ Доступен ${core} ${latest}. Устарел на: ${outdated.map((s) => s.name).join(', ')}. Обновить: Конфигурации → Ядра.`);
+        notified[core] = latest;
+      }
+    }
+    setSetting(this.ctx.db, 'cores.notified', notified);
+    for (const s of this.managed().filter((x) => coreMode(x) === 'xui')) {
+      try {
+        const info = await this.ctx.onNode(s, (n) => this.ops.xui<{ xrayVersion: string | null; version: string | null }>(s, n, 'info'));
+        const cores = json<Record<string, unknown>>(this.ctx.server(s.id).cores, {});
+        cores.xui = { version: info.xrayVersion ?? '?', panel: info.version };
+        this.ctx.updateServer(s.id, { cores: JSON.stringify(cores) });
+      } catch { /* узел недоступен — это ловит heartbeat */ }
+    }
   }
 
   stop() { for (const t of this.timers) clearInterval(t); }
