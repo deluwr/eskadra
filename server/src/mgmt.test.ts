@@ -170,3 +170,24 @@ test('bot proxy: service client on the chosen inbound, HTTP proxy in the main se
   const cfg = clientConfig([], part) as any;
   assert.deepEqual(cfg.routing.rules[0], { type: 'field', inboundTag: ['bot-in'], outboundTag: 'bot-out' });
 });
+
+test('ядро, остановленное вручную, выкат не запускает', async () => {
+  const { ctx, db } = fixture();
+  db.prepare(`UPDATE servers SET cores = '{"xray":{"version":"26.3.27"}}' WHERE id = 'n1'`).run();
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids) VALUES ('t1', 'rv', 'xray', 'vless-reality', 8443, '["sni.example"]', '["n1"]')`).run();
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, private_key_sealed, public_key, short_id) VALUES ('ib1', 't1', 'n1', 'direct', 8443, 'tcp', 'active', ?, 'PUB', 'aa11')`).run(ctx.seal('PRIV'));
+  const calls: string[] = [];
+  const n = {
+    op: async (a: (string | number)[]) => { calls.push(String(a[0])); return { code: 0, stdout: '', stderr: '' }; },
+    must: async (a: (string | number)[]) => { calls.push(String(a[0])); return 'ok'; },
+    stage: async () => 'hash',
+  } as any;
+  const { setSetting } = await import('./db.js');
+  setSetting(db, 'core.off.n1', ['xray']);
+  await new Ops(ctx).applyServer(ctx.server('n1'), n, () => undefined);
+  assert.deepEqual(calls.slice(calls.indexOf('core-apply')), ['core-apply', 'core-stop'], 'после выката ядро снова остановлено');
+  setSetting(db, 'core.off.n1', []);
+  calls.length = 0;
+  await new Ops(ctx).applyServer(ctx.server('n1'), n, () => undefined);
+  assert.ok(!calls.includes('core-stop'));
+});

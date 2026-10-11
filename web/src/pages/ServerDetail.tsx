@@ -653,24 +653,48 @@ function NodekitStep({ d, onChange }: { d: ServerDetail; onChange: () => void })
 }
 
 /** Свои ядра на узле: версия или «не установлено» с кнопкой установки. */
+type CoreState = Record<string, { active: boolean; manualOff: boolean }>;
+
 function CoreRows({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
-  const rows: Array<['xray' | 'sing-box', string]> = [['xray', 'Xray'], ['sing-box', 'sing-box']];
+  const managed = s.sudo_mode === 'restricted';
+  const { data: state, setData: setState } = usePoll(() => (managed ? api.get<CoreState>(`/api/v1/servers/${s.id}/cores/state`) : Promise.resolve({} as CoreState)), null, [s.id]);
+  const rows: Array<['xray' | 'sing-box' | 'telemt', string]> = [['xray', 'Xray'], ['sing-box', 'sing-box'], ['telemt', 'telemt (MTProto)']];
+  const power = async (core: string, label: string, on: boolean) => {
+    if (!on && !(await ask(`Остановить ${label} на ${s.name}? Пользователи, подключённые к этому серверу напрямую или через него, потеряют связь, пока ядро не запустят снова. Панель не запустит его сама — даже при выкате конфигурации.`))) return;
+    void run(async () => {
+      const r = await api.post<{ state: CoreState }>(`/api/v1/servers/${s.id}/cores/${core}/power`, { on });
+      setState(r.state);
+      toast(on ? `${label} запущен` : `${label} остановлен — «Авто» перепроверяет выходы`);
+      onChange();
+    });
+  };
   return (
     <div className="stack">
       {rows.map(([core, label]) => {
         const v = s.cores[core]?.version;
         const xui = core === 'xray' && s.coreModeEffective === 'xui';
+        const st = state?.[core];
+        if (core === 'telemt' && !v && !st) return null;
         return (
           <div key={core} className="flex" style={{ justifyContent: 'space-between' }}>
-            <span><b>{label}</b> <span className="k">{xui ? `из 3x-ui${s.cores.xui?.version ? ' ' + s.cores.xui.version : ''}` : v ? v : 'не установлено'}</span></span>
-            {!xui && !v && s.sudo_mode === 'restricted' && (
-              <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${core}/update`, {}); onChange(); })}>{busy ? 'Ставлю…' : 'Установить'}</button>
-            )}
+            <span className="flex" style={{ gap: 8 }}>
+              <b>{label}</b><span className="k">{xui ? `из 3x-ui${s.cores.xui?.version ? ' ' + s.cores.xui.version : ''}` : v ? v : 'не установлено'}</span>
+              {st && (st.active ? <Tag kind="ok" dot>работает</Tag> : <Tag kind={st.manualOff ? 'warn' : 'fail'} dot>{st.manualOff ? 'остановлен вручную' : 'не работает'}</Tag>)}
+            </span>
+            <span className="flex" style={{ gap: 6 }}>
+              {!xui && !v && managed && (
+                <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${core}/update`, {}); onChange(); })}>{busy ? 'Ставлю…' : 'Установить'}</button>
+              )}
+              {!xui && st && (st.active
+                ? <button className="btn sm" disabled={busy} onClick={() => void power(core, label, false)}>Остановить</button>
+                : <button className="btn sm pri" disabled={busy} onClick={() => void power(core, label, true)}>Запустить</button>)}
+            </span>
           </div>
         );
       })}
+      <span className="k">Остановка ядра — например, чтобы проверить, что профиль «вход → авто» уходит на другой выход. Остановленное вручную ядро остаётся выключенным, пока его не запустят здесь.</span>
       <ErrorBox error={error} />
     </div>
   );

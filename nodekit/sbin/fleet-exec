@@ -52,6 +52,7 @@ case "${1:-}" in
   core-status)   core_ok "${2:?core}"; exec /usr/local/sbin/fleet-core status "$2" ;;
   core-rollback) core_ok "${2:?core}"; exec /usr/local/sbin/fleet-core rollback "$2" ;;
   core-stop)     core_ok "${2:?core}"; exec /usr/local/sbin/fleet-core stop "$2" ;;
+  core-start)    core_ok "${2:?core}"; exec /usr/local/sbin/fleet-core start "$2" ;;
   xray-x25519)   exec /usr/local/sbin/fleet-core x25519 ;;
   xray-stats)    exec /usr/local/sbin/fleet-core stats ;;
   singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;

@@ -898,4 +898,13 @@ export const EN: Record<string, string> = {
   "Прямой доступ к {} выключен: в подписке нет профиля «{} · напрямую»": "Direct access to {} is off: subscriptions have no “{} · direct” profile",
   "Прямой доступ к {} открыт": "Direct access to {} opened",
   "только через вход": "entry only",
+  "{} запущен": "{} started",
+  "{} остановлен — «Авто» перепроверяет выходы": "{} stopped — “Auto” is rechecking exits",
+  "Запустить": "Start",
+  "Остановить {} на {}? Пользователи, подключённые к этому серверу напрямую или через него, потеряют связь, пока ядро не запустят снова. Панель не запустит его сама — даже при выкате конфигурации.": "Stop {} on {}? Users connected to this server directly or through it lose connectivity until the core is started again. The panel won't start it by itself — not even on rollout.",
+  "Остановка ядра — например, чтобы проверить, что профиль «вход → авто» уходит на другой выход. Остановленное вручную ядро остаётся выключенным, пока его не запустят здесь.": "Stopping a core lets you check, for example, that the “entry → auto” profile moves to another exit. A manually stopped core stays off until it's started here.",
+  "не работает": "not running",
+  "остановлен вручную": "stopped manually",
+  "{}: {} остановлен вручную": "{}: {} stopped manually",
+  "Пользователи этого сервера без связи. Запустите ядро на вкладке «Хост».": "Users of this server have no connectivity. Start the core on the “Host” tab.",
 };

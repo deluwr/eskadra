@@ -6,6 +6,9 @@ import { json, Vpn } from './vpn.js';
 import { releaseFor, type Core } from './releases.js';
 import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
 
+/** Ядра узла, остановленные вручную на вкладке «Хост». */
+export const coresOff = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx.db, `core.off.${serverId}`, []);
+
 export interface ExitHealth { exitId: string; name: string; rttMs: number | null; mbps: number | null; ok: boolean; error: string | null }
 
 const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
@@ -272,6 +275,8 @@ export class Ops {
       await n.stage(name, typeof cfg === 'string' ? cfg : JSON.stringify(cfg, null, 2));
       const out = await n.must(['core-apply', core, name], { timeoutMs: 60_000 });
       log(`${core}: ${out.trim()}`);
+      // остановлено вручную (проверка отказоустойчивости) — конфиг обновлён, но ядро остаётся выключенным
+      if (coresOff(this.ctx, s.id).includes(core)) { await n.op(['core-stop', core]); log(`${core}: остановлен вручную — не запускаю`); }
     }
     this.ctx.updateServer(s.id, { config_dirty: 0 });
     // перезапуск Xray сбрасывает переключение балансировщика — возвращаем выбранные выходы «Авто» входа
@@ -311,6 +316,31 @@ export class Ops {
     });
     this.ctx.updateServer(s.id, { tls_state: JSON.stringify(st) });
     return st!;
+  }
+
+  /** Ручное включение и выключение ядра (вкладка «Хост»): выключенное ядро панель не запускает при выкате. */
+  async setCorePower(s: ServerRow, core: 'xray' | 'sing-box' | 'telemt', on: boolean): Promise<string> {
+    const out = await this.ctx.onNode(s, async (n) => { await this.ensureKit(s, n, () => undefined); return n.must([on ? 'core-start' : 'core-stop', core], { timeoutMs: 60_000 }); });
+    const off = coresOff(this.ctx, s.id).filter((c) => c !== core);
+    setSetting(this.ctx.db, `core.off.${s.id}`, on ? off : [...off, core]);
+    // вход сразу перепроверяет выходы «Авто»: выключили выход — трафик уходит на следующий без ожидания
+    for (const t of this.vpn.templates().filter((x) => x.entry_id && this.vpn.spec(x).autoMode !== 'random' && (x.entry_id === s.id || this.vpn.relayTargets(x).some((r) => r.id === s.id))))
+      void this.checkExits(t, () => undefined).catch(() => undefined);
+    return out.trim();
+  }
+
+  /** Состояние ядер узла: работает ли каждое установленное. */
+  async coreStates(s: ServerRow): Promise<Record<string, { active: boolean; manualOff: boolean }>> {
+    const off = coresOff(this.ctx, s.id);
+    const out: Record<string, { active: boolean; manualOff: boolean }> = {};
+    await this.ctx.onNode(s, async (n) => {
+      for (const core of ['xray', 'sing-box', 'telemt'] as const) {
+        const st = await n.op(['core-status', core]);
+        if (/^version=none/m.test(st.stdout)) continue;
+        out[core] = { active: /^active=active/m.test(st.stdout), manualOff: off.includes(core) };
+      }
+    });
+    return out;
   }
 
   async checkExits(t: TemplateRow, log: (l: string) => void): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null } | null } | null> {

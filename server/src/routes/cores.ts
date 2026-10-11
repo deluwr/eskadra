@@ -66,6 +66,25 @@ export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
     }
   });
 
+  app.get<{ Params: { id: string } }>('/api/v1/servers/:id/cores/state', async (req) => {
+    const s = ctx.server(req.params.id);
+    if (s.sudo_mode !== 'restricted') return {};
+    return ops.coreStates(s);
+  });
+
+  /** Ручное включение/выключение ядра — например, проверить, что «Авто» уходит на другой выход. */
+  app.post<{ Params: { id: string; core: string } }>('/api/v1/servers/:id/cores/:core/power', { preHandler: guard(ctx, 'admin') }, async (req) => {
+    const s = ctx.server(req.params.id);
+    const core = coreParam.parse(req.params.core);
+    const { on } = z.object({ on: z.boolean() }).parse(req.body);
+    if (core === 'xray' && coreMode(s) === 'xui') throw new HttpError(409, 'Xray этого узла принадлежит 3x-ui — управляйте им там');
+    try {
+      const out = await ops.setCorePower(s, core, on);
+      audit(db, req.admin!.username, on ? 'core.start' : 'core.stop', s.id, { core });
+      return { output: out, state: await ops.coreStates(s) };
+    } catch (e) { throw new HttpError(500, (e as Error).message); }
+  });
+
   app.post<{ Params: { id: string; core: string } }>('/api/v1/servers/:id/cores/:core/rollback', { preHandler: guard(ctx, 'admin') }, async (req) => {
     const s = ctx.server(req.params.id);
     const core = coreParam.parse(req.params.core);
