@@ -77,7 +77,10 @@ test('profiles and links', () => {
   const vpn = new Vpn(ctx);
   const u = db.prepare(`SELECT * FROM users WHERE id = 'u-00000001'`).get() as any;
   const ps = vpn.profiles(u);
-  assert.deepEqual(ps.map((p) => p.name).sort(), ['de · через вход', 'Авто · через вход'].sort());
+  assert.deepEqual(ps.map((p) => p.name).sort(), ['entry → de', 'entry → авто'].sort());
+  setSetting(db, 'ui.lang', 'en');
+  assert.deepEqual(vpn.profiles(u).map((p) => p.name).sort(), ['entry → auto', 'entry → de'].sort(), 'имена на языке панели');
+  setSetting(db, 'ui.lang', 'ru');
   const link = vpn.link(u, ps.find((p) => p.mode === 'via')!);
   assert.match(link, /^vless:\/\/[0-9a-f-]{36}@203\.0\.113\.1:9443\?/);
   assert.match(link, /pbk=PUBEN/);

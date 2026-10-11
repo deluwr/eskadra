@@ -13,6 +13,7 @@ npm ci
 npm run build -w web
 npm run build -w server
 npm test -w server
+npm run i18n:check -w web
 
 rm -rf "$OUT"; mkdir -p "$STAGE/server" "$STAGE/web" "$STAGE/scripts"
 cp package.json package-lock.json "$STAGE/"

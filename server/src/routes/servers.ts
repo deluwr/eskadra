@@ -150,7 +150,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!res.ok || !res.sshPort || !res.hostKeyFp) throw new HttpError(500, `помощник: ${res.error ?? 'нет данных'}`);
     db.prepare(
       `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed, mgmt_mode, host_key_fp, host_key_algo)
-       VALUES (?, 'главный', ?, ?, 'entry', 'default', 'P1', 1, ?, ?, 'local', ?, 'ssh-ed25519')`,
+       VALUES (?, 'relay', ?, ?, 'entry', 'default', 'P1', 1, ?, ?, 'local', ?, 'ssh-ed25519')`,
     ).run(id, host, res.sshPort, keys.public.trim(), ctx.seal(keys.private), res.hostKeyFp);
     audit(db, who(req), 'server.self_added', id, { host, sshPort: res.sshPort });
     return { server: publicView(ctx, ctx.server(id)), jobId: startOnboarding(ctx, id, who(req)) };

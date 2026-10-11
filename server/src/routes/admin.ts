@@ -183,6 +183,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   app.get('/api/v1/version', async () => versionInfo());
 
   app.get('/api/v1/settings', async () => ({
+    lang: getSetting(db, 'ui.lang', 'ru'),
     executorIps: ctx.executorIps(),
     sub: { host: getSetting(db, 'sub.host', ''), port: getSetting(db, 'sub.port', 0), scheme: getSetting(db, 'sub.scheme', 'http') },
     knockTtlHours: getSetting(db, 'knock.ttlHours', 12),
@@ -192,6 +193,14 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     bot: { configured: !!getSetting(db, 'bot.token', '') },
     backup: deps.backups.settings(),
   }));
+
+  /** Язык панели: интерфейс у каждого свой (в браузере), а имена профилей в подписках — по этой настройке. */
+  app.put('/api/v1/settings/lang', { preHandler: guard(ctx, 'admin') }, async (req) => {
+    const { lang } = z.object({ lang: z.enum(['ru', 'en']) }).parse(req.body);
+    setSetting(db, 'ui.lang', lang);
+    audit(db, who(req), 'settings.lang', undefined, { lang });
+    return { lang };
+  });
 
   app.post('/api/v1/settings/executor/detect', async () => ({ ip: await detectEgressIp() }));
 

@@ -13,6 +13,7 @@ import { BackupsPage } from './pages/Backups';
 import { AuditPage } from './pages/Audit';
 import { HelpPage } from './pages/Help';
 import { CoresPage } from './pages/Cores';
+import { getLang, setLang } from './i18n';
 
 type Route = { page: string; id?: string };
 const parseHash = (): Route => {
@@ -84,6 +85,11 @@ export function App() {
         <header className="topbar">
           <span style={{ flex: 1 }} />
           {!auth.totp && <a className="tag warn" href="#/access">2FA не включена</a>}
+          <button className="btn ghost sm static no-tr" onClick={() => {
+            const next = getLang() === 'en' ? 'ru' : 'en';
+            // язык панели: названия профилей в подписках тоже на нём (нужна роль admin; иначе меняется только интерфейс)
+            void api.put('/api/v1/settings/lang', { lang: next }).catch(() => undefined).finally(() => setLang(next));
+          }} aria-label="Language / Язык" title="Language / Язык">{getLang() === 'en' ? 'RU' : 'EN'}</button>
           <button className="btn ghost icon" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label="Переключить тему">{theme === 'dark' ? Icon.sun : Icon.moon}</button>
           <span className="flex"><span className="tag">{auth.role}</span><span>{auth.username}</span></span>
           <button className="btn ghost" onClick={logout}>Выйти</button>

@@ -314,7 +314,7 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
 
       {info.relay && (
         <div className="stack" style={{ gap: 8 }}>
-          <h3>Вход <Info>Необязательно. Пользователь подключается к входу, а тот пересылает трафик на выбранный сервер: в подписке появятся «DE · через вход» и «Авто · через вход».</Info></h3>
+          <h3>Вход <Info>Необязательно. Пользователь подключается к входу, а тот пересылает трафик на выбранный сервер: в подписке появятся профили «вход → de-1» для каждого выхода и «вход → авто».</Info></h3>
           <div className="flex">
             <select className="inp" style={{ width: 'auto' }} value={d.entryId} onChange={(e) => setD({ ...d, entryId: e.target.value })} aria-label="Сервер-вход">
               <option value="">без входа</option>
