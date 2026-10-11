@@ -247,7 +247,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
   const stateOf = (sid: string, kind: string) => current?.inbounds.find((i) => i.server_id === sid && i.kind === kind);
   const relayState = d.entryId ? stateOf(d.entryId, 'relay') : undefined;
   // схема: выбранные серверы (в порядке «Авто»), затем остальные — их можно включить кликом
-  const lead = health?.selected ?? (st.autoMode !== 'random' ? health?.rows.find((r) => r.ok)?.exit_id : undefined);
+  const lead = health?.actual ?? health?.selected ?? (st.autoMode !== 'random' ? health?.rows.find((r) => r.ok)?.exit_id : undefined);
   const mapExits: MapExit[] = [
     ...exits.map((x): MapExit => {
       const ib = stateOf(x.id, 'direct');
@@ -463,7 +463,7 @@ function JobLog({ id, onDone }: { id: number; onDone: () => void }) {
   );
 }
 
-interface Health { rows: Array<{ exit_id: string; name: string; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; checkedAt: string | null }
+interface Health { rows: Array<{ exit_id: string; name: string; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null }
 
 /** Выходы «Авто через вход»: последние замеры, какой выбран; ручная проверка. */
 function ExitHealth({ t }: { t: Template }) {
@@ -471,6 +471,7 @@ function ExitHealth({ t }: { t: Template }) {
   const { busy, error, run } = useAsync();
   const sp = t.spec as { maxRttMs?: number; minMbps?: number; autoMode?: string };
   const order = sp.autoMode === 'order';
+  const lead = data?.actual ?? data?.selected ?? null;   // реальный выбор входа; если его ещё не видели — назначенный
   return (
     <section className="card">
       <div className="card-head">
@@ -486,10 +487,10 @@ function ExitHealth({ t }: { t: Template }) {
           <tbody>
             {data?.rows.map((r) => (
               <tr key={r.exit_id}>
-                <td><b>{r.name}</b>{data.selected === r.exit_id && <> <Tag kind="acc">выбран</Tag></>}</td>
+                <td><b>{r.name}</b>{lead === r.exit_id && <> <Tag kind="acc" dot>ведёт трафик</Tag></>}{data.selected === r.exit_id && lead !== r.exit_id && <> <Tag kind="warn">назначен, вход ещё не переключился</Tag></>}</td>
                 <td className="mono">{r.rtt_ms !== null ? `${r.rtt_ms} мс` : '—'}</td>
                 {!order && <td className="mono">{r.mbps !== null ? `${r.mbps} Мбит/с` : '—'}</td>}
-                <td>{r.ok ? <Tag kind="ok">{order ? 'отвечает' : 'проходит'}</Tag> : <Tag kind={r.error ? 'fail' : 'warn'}>{r.error ?? 'ниже порога'}</Tag>}</td>
+                <td>{r.ok ? <Tag kind="ok">{order ? 'отвечает' : 'проходит'}</Tag> : <Tag kind={r.error ? 'fail' : 'warn'}>{r.error === 'выход не отвечает' ? 'неактивен — нет связи' : r.error ?? 'ниже порога'}</Tag>}</td>
               </tr>
             ))}
             {data && !data.rows.length && <tr><td colSpan={4} className="empty">Проверок ещё не было — нажмите «Проверить сейчас» или подождите расписания.</td></tr>}

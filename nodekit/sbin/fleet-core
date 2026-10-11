@@ -194,17 +194,20 @@ cmd_status() {
 cmd_probe() {  # probe <локальный SOCKS-порт выхода> <байт>: задержка (мс) и скорость скачивания (Мбит/с) через этот выход
   local port="$1" bytes="$2" t s
   [[ "$port" =~ ^[0-9]{2,5}$ ]] && [[ "$bytes" =~ ^[0-9]{1,9}$ ]] || die "usage: probe <port> <bytes>"
-  # задержка — как у наблюдения Xray: HTTPS-запрос к generate_204 через выход (лучший из трёх)
-  local best=""
+  # задержка — как у наблюдения Xray: HTTPS-запрос к generate_204 через выход (лучший из трёх).
+  # Засчитывается только настоящий ответ 204: при таймауте curl тоже печатает время (~10 с), это не «ответил»
+  local best="" r code
   for _ in 1 2 3; do
-    t="$(curl -s -o /dev/null -w '%{time_total}' --max-time 10 --socks5-hostname "127.0.0.1:$port" https://www.gstatic.com/generate_204 || true)"
-    [[ "$t" =~ ^[0-9.]+$ ]] && [ "$t" != "0.000000" ] || continue
+    r="$(curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 10 --socks5-hostname "127.0.0.1:$port" https://www.gstatic.com/generate_204 || true)"
+    code="${r%% *}"; t="${r#* }"
+    [ "$code" = 204 ] && [[ "$t" =~ ^[0-9.]+$ ]] || continue
     if [ -z "$best" ] || awk -v a="$t" -v b="$best" 'BEGIN{exit !(a<b)}'; then best="$t"; fi
   done
   [ -n "$best" ] && echo "rtt_ms=$(awk -v t="$best" 'BEGIN{printf "%d", t*1000}')" || echo "rtt_ms=fail"
   [ "$bytes" = 0 ] && return 0   # только задержка (быстрая проверка закреплённого выхода)
-  s="$(curl -s -o /dev/null -w '%{speed_download}' --max-time 40 --socks5-hostname "127.0.0.1:$port" "https://speed.cloudflare.com/__down?bytes=$bytes" || true)"
-  if [[ "$s" =~ ^[0-9.]+$ ]] && [ "${s%%.*}" != "0" ]; then echo "mbps=$(awk -v b="$s" 'BEGIN{printf "%.1f", b*8/1000000}')"; else echo "mbps=fail"; fi
+  r="$(curl -s -o /dev/null -w '%{http_code} %{speed_download}' --max-time 40 --socks5-hostname "127.0.0.1:$port" "https://speed.cloudflare.com/__down?bytes=$bytes" || true)"
+  code="${r%% *}"; s="${r#* }"
+  if [ "$code" = 200 ] && [[ "$s" =~ ^[0-9.]+$ ]] && [ "${s%%.*}" != "0" ]; then echo "mbps=$(awk -v b="$s" 'BEGIN{printf "%.1f", b*8/1000000}')"; else echo "mbps=fail"; fi
 }
 
 cmd_hoststat() {  # сырые счётчики хоста для живой статистики панели (разбирает и считает скорости панель)
@@ -216,6 +219,12 @@ cmd_hoststat() {  # сырые счётчики хоста для живой с�
   echo "@nproc"; nproc 2>/dev/null || echo 1
   echo "@df"; df -PB1 / 2>/dev/null | tail -1
   echo "@ip"; ip -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}'
+}
+
+cmd_bi() {  # bi <балансировщик>: какой выход назначен (override) и какой реально выбран (selects)
+  local bin; bin="$(bin_of xray)"
+  [ -x "$bin" ] || die "xray not installed"
+  "$bin" api bi --server=127.0.0.1:10085 "$1"
 }
 
 cmd_bo() {  # bo <балансировщик> <outbound|clear>: переключить выбор балансировщика Xray на лету (без перезапуска)
@@ -416,6 +425,7 @@ case "${1:-}" in
   hoststat) cmd_hoststat ;;
   probe)   cmd_probe "${2:?}" "${3:?}" ;;
   bo)      cmd_bo "${2:?}" "${3:?}" ;;
+  bi)      cmd_bi "${2:?}" ;;
   stats)   cmd_stats ;;
   tls)     cmd_tls "${2:?}" ;;
   cert-issue)  cmd_cert_issue "${2:?}" "${3:?}" "${4:?}" ;;

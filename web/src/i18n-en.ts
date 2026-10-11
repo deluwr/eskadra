@@ -1003,4 +1003,7 @@ export const EN: Record<string, string> = {
   "Что попадёт в подписку": "What goes into the subscription",
   "ни одного": "none",
   "профилей нет: проверьте режимы и выкат конфигурации": "no profiles: check the modes and the configuration rollout",
+  "назначен, вход ещё не переключился": "assigned, entry hasn't switched yet",
+  "неактивен": "inactive",
+  "неактивен — нет связи": "inactive — no connection",
 };

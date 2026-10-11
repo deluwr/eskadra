@@ -9,6 +9,19 @@ import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
 /** Ядра узла, остановленные вручную на вкладке «Хост». */
 export const coresOff = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx.db, `core.off.${serverId}`, []);
 
+export interface BalancerState { override: string | null; selected: string | null }
+
+/** Вывод `xray api bi`: строки после «Selecting Override:» и «Selects:» — «  1   <tag>». */
+export function parseBalancerInfo(out: string): BalancerState {
+  const after = (title: string) => {
+    const lines = out.split('\n');
+    const i = lines.findIndex((l) => l.includes(title));
+    const m = i >= 0 ? lines[i + 1]?.match(/^\s*\d+\s+(\S+)?/) : null;
+    return m?.[1] ?? null;
+  };
+  return { override: after('Selecting Override:'), selected: after('Selects:') };
+}
+
 export interface ExitHealth { exitId: string; name: string; rttMs: number | null; mbps: number | null; ok: boolean; error: string | null }
 
 const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
@@ -280,9 +293,14 @@ export class Ops {
     }
     this.ctx.updateServer(s.id, { config_dirty: 0 });
     // перезапуск Xray сбрасывает переключение балансировщика — возвращаем выбранные выходы «Авто» входа
+    // (с повтором: сразу после перезапуска API Xray может ещё не отвечать) и сверяем с тем, что реально выбрано
     if (!xuiMode) for (const t of this.vpn.templates().filter((x) => x.entry_id === s.id)) {
       const ov = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
-      if (ov && this.vpn.spec(t).autoMode !== 'random') await n.op(['xray-bo', `bal-${t.id}`, ov]).catch(() => undefined);
+      if (ov && this.vpn.spec(t).autoMode !== 'random') {
+        const st = await this.setOverride(n, t.id, ov).catch(() => null);
+        if (st) setSetting(this.ctx.db, `auto.actual.${t.id}`, st.override || st.selected);
+        else log(`«${t.name}»: вход не принял выбор выхода — повторю при следующей проверке`);
+      }
     }
   }
 
@@ -292,6 +310,25 @@ export class Ops {
    * подходящий выход (без перезапуска Xray). Если подходящих нет — переключение снимается и выбор остаётся за Xray
    * (наименьшая задержка). Возвращает результаты и смену выхода (для уведомления).
    */
+  /** Что выбрано в балансировщике входа: назначенный панелью выход (override) и тот, через который идёт трафик. */
+  async balancerState(n: NodeSession, templateId: string): Promise<BalancerState | null> {
+    const r = await n.op(['xray-bi', `bal-${templateId}`]);
+    return r.code === 0 ? parseBalancerInfo(r.stdout) : null;
+  }
+
+  /** Назначить выход балансировщику (null — снять) и убедиться, что вход его принял; до 5 попыток. */
+  async setOverride(n: NodeSession, templateId: string, tag: string | null): Promise<BalancerState | null> {
+    for (let i = 0; i < 5; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 1500));
+      const r = await n.op(['xray-bo', `bal-${templateId}`, tag ?? 'clear']);
+      if (r.code !== 0) continue;
+      const st = await this.balancerState(n, templateId);
+      if (!st) return { override: tag, selected: tag };   // старый nodekit без xray-bi — проверить нечем
+      if ((st.override ?? null) === tag) return st;
+    }
+    return null;
+  }
+
   /** Быстрая проверка закреплённого выхода (только задержка, без скачивания): false — выход не отвечает или медленнее порога. */
   async pinnedAlive(t: TemplateRow): Promise<boolean> {
     const sp = this.vpn.spec(t);
@@ -369,10 +406,14 @@ export class Ops {
     const results: ExitHealth[] = [];
     const prev = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
     let next: string | null = prev;
+    let actualBefore: string | null = getSetting<string | null>(this.ctx.db, `auto.actual.${t.id}`, prev);
+    let actualAfter: string | null = null;
     // по порядку — только «отвечает ли выход» (таймаут = выход недоступен), без замера скорости и порогов
     const order = sp.autoMode === 'order';
     await this.ctx.onNode(entry, async (n) => {
       await this.ensureKit(entry, n, log);   // проба выходов появилась в nodekit 0.10 — старый nodekit обновляем сам
+      const before = await this.balancerState(n, t.id);
+      if (before) actualBefore = before.override || before.selected;
       for (const x of targets) {
         const r = await n.op(['exit-probe', probePort(t.id, x.id), order ? 0 : sp.testMB * 1_000_000], { timeoutMs: order ? 60_000 : 120_000 });
         const rtt = Number(r.stdout.match(/^rtt_ms=(\d+)/m)?.[1] ?? NaN);
@@ -392,14 +433,17 @@ export class Ops {
       const first = results.find((r) => r.ok);
       if (sp.autoMode === 'order') next = first ? `to-${t.id}-${first.exitId}` : null;
       else next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
-      if (next !== prev) {
-        await n.must(['xray-bo', `bal-${t.id}`, next ?? 'clear']);
-        setSetting(this.ctx.db, `auto.override.${t.id}`, next);
-      }
+      // сверяемся с входом на каждой проверке, а не только при смене: выбор мог сброситься перезапуском Xray
+      const st = await this.setOverride(n, t.id, next);
+      if (!st) log(`${entry.name}: вход не принял выбор выхода ${next ?? '(по задержке)'} — повторю при следующей проверке`);
+      setSetting(this.ctx.db, `auto.override.${t.id}`, next);
+      actualAfter = st ? st.override || st.selected : null;
+      setSetting(this.ctx.db, `auto.actual.${t.id}`, actualAfter);
     });
     setSetting(this.ctx.db, `auto.checked.${t.id}`, new Date().toISOString());
     const nameOf = (tag: string | null) => (tag ? targets.find((x) => tag === `to-${t.id}-${x.id}`)?.name ?? tag : null);
-    return { results, switched: next !== prev ? { from: nameOf(prev), to: nameOf(next) } : null };
+    // уведомляем о реальной смене выхода, через который идёт трафик
+    return { results, switched: actualAfter && actualAfter !== actualBefore ? { from: nameOf(actualBefore), to: nameOf(actualAfter) } : !next && prev ? { from: nameOf(prev), to: null } : null };
   }
 
   /** Выкат шаблона: canary → остальные direct-узлы → вход. Ошибка — откат inbound и остановка. */

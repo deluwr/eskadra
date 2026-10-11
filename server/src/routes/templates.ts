@@ -145,7 +145,10 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!t) throw new HttpError(404, 'шаблон не найден');
     const rows = db.prepare(`SELECT h.exit_id, s.name, h.rtt_ms, h.mbps, h.ok, h.error, h.checked_at FROM exit_health h JOIN servers s ON s.id = h.exit_id WHERE h.template_id = ? ORDER BY s.name`).all(t.id);
     const ov = getSetting<string | null>(db, `auto.override.${t.id}`, null);
-    return { rows, selected: ov ? ov.slice(`to-${t.id}-`.length) : null, checkedAt: getSetting<string>(db, `auto.checked.${t.id}`, '') || null };
+    const act = getSetting<string | null>(db, `auto.actual.${t.id}`, null);
+    const id = (tag: string | null) => (tag ? tag.slice(`to-${t.id}-`.length) : null);
+    // selected — что назначила панель; actual — через какой выход вход реально ведёт трафик (по данным Xray входа)
+    return { rows, selected: id(ov), actual: id(act), checkedAt: getSetting<string>(db, `auto.checked.${t.id}`, '') || null };
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/templates/:id/health/check', { preHandler: guard(ctx, 'operator') }, async (req) => {

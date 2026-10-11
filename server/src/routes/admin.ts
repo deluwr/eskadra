@@ -57,7 +57,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   const routesOf = () => vpn.templates().filter((t) => t.entry_id).map((t) => {
     const sp = vpn.spec(t);
     const health = new Map((db.prepare('SELECT exit_id, rtt_ms, mbps, ok, error FROM exit_health WHERE template_id = ?').all(t.id) as Array<{ exit_id: string; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null }>).map((h) => [h.exit_id, h]));
-    const ov = getSetting<string | null>(db, `auto.override.${t.id}`, null);
+    const ov = getSetting<string | null>(db, `auto.actual.${t.id}`, null) ?? getSetting<string | null>(db, `auto.override.${t.id}`, null);
     return {
       id: t.id, name: t.name, entryId: t.entry_id, autoMode: sp.autoMode,
       selected: ov ? ov.slice(`to-${t.id}-`.length) : null,

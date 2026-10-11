@@ -61,6 +61,7 @@ case "${1:-}" in
   host-stat)     exec /usr/local/sbin/fleet-core hoststat ;;
   exit-probe)    exec /usr/local/sbin/fleet-core probe "${2:?port}" "${3:?bytes}" ;;
   xray-bo)       name_ok "${2:?balancer}"; name_ok "${3:?tag|clear}"; exec /usr/local/sbin/fleet-core bo "$2" "$3" ;;
+  xray-bi)       name_ok "${2:?balancer}"; exec /usr/local/sbin/fleet-core bi "$2" ;;
   tls-issue)     name_ok "${2:?name}"; exec /usr/local/sbin/fleet-core cert-issue "$2" "${3:?ip|domain}" "${4:?value}" ;;
   tls-set)       name_ok "${2:?name}"; name_ok "${3:?crt}"; name_ok "${4:?key}"; staged "$STAGING/$3"; staged "$STAGING/$4"
                  exec /usr/local/sbin/fleet-core cert-set "$2" "$STAGING/$3" "$STAGING/$4" ;;
