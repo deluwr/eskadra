@@ -187,7 +187,8 @@ export class Vpn {
             observeRtt = Math.max(observeRtt, sp.maxRttMs);
             balancers.push({
               tag: `bal-${t.id}`, selector: [`to-${t.id}-`], fallbackTag: `to-${t.id}-${targets[0]!.id}`,
-              strategy: { type: 'leastLoad', settings: { expected: 1, maxRTT: `${sp.maxRttMs}ms`, tolerance: 0.01 } },
+              // по порядку порогов нет: Xray лишь обходит недоступные выходы, выбор делает панель (ops.checkExits)
+              strategy: { type: 'leastLoad', settings: { expected: 1, ...(sp.autoMode === 'smart' ? { maxRTT: `${sp.maxRttMs}ms` } : {}), tolerance: 0.01 } },
             });
           } else {
             balancers.push({ tag: `bal-${t.id}`, selector: [`to-${t.id}-`], strategy: { type: 'random' } });

@@ -32,7 +32,7 @@ const CERT_LABEL: Record<CertMode, string> = {
 type AutoMode = 'smart' | 'order' | 'random';
 const AUTO_HINT: Record<AutoMode, string> = {
   smart: 'Трафик идёт через выход, который проходит пороги задержки и скорости. Пока он их проходит — не меняется; перестал — вход переключается на самый быстрый из подходящих.',
-  order: 'Трафик идёт через первый выход в списке, который проходит пороги. Перестал — через следующий; первый снова в норме — трафик возвращается к нему.',
+  order: 'Трафик идёт через первый выход в списке. Не ответил (таймаут) — через следующий; первый снова отвечает — трафик возвращается к нему. Проверка каждую минуту, без замера скорости.',
   random: 'Каждое соединение — через любой выход наугад. Без проверок задержки и скорости.',
 };
 
@@ -369,7 +369,7 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
             <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
             <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ['random', 'случайно']]} />
             <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}{st.autoMode === 'order' ? ' Порядок — стрелками на схеме.' : ''}</span>
-            {st.autoMode !== 'random' && (
+            {st.autoMode === 'smart' && (
               <div className="grid g4">
                 <label className="fld">Задержка не больше, мс<input className="inp mono" inputMode="numeric" value={st.maxRttMs} onChange={(e) => setSt({ maxRttMs: Number(e.target.value.replace(/\D/g, '')) })} /></label>
                 <label className="fld">Скорость не меньше, Мбит/с<input className="inp mono" inputMode="decimal" value={st.minMbps} onChange={(e) => setSt({ minMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} /></label>
@@ -459,11 +459,12 @@ interface Health { rows: Array<{ exit_id: string; name: string; rtt_ms: number |
 function ExitHealth({ t }: { t: Template }) {
   const { data, reload } = usePoll(() => api.get<Health>(`/api/v1/templates/${t.id}/health`), 60_000, [t.id]);
   const { busy, error, run } = useAsync();
-  const sp = t.spec as { maxRttMs?: number; minMbps?: number };
+  const sp = t.spec as { maxRttMs?: number; minMbps?: number; autoMode?: string };
+  const order = sp.autoMode === 'order';
   return (
     <section className="card">
       <div className="card-head">
-        <h2>Выходы «Авто» <Info>{`Пороги: задержка не больше ${sp.maxRttMs ?? 100} мс, скорость не меньше ${sp.minMbps ?? 10} Мбит/с. Выбранный выход меняется, только когда текущий перестаёт проходить пороги.`}</Info></h2>
+        <h2>Выходы «Авто» <Info>{order ? 'По порядку: трафик идёт через первый отвечающий выход. Проверка каждую минуту.' : `Пороги: задержка не больше ${sp.maxRttMs ?? 100} мс, скорость не меньше ${sp.minMbps ?? 10} Мбит/с. Выбранный выход меняется, только когда текущий перестаёт проходить пороги.`}</Info></h2>
         <span className="flex">
           {data?.checkedAt && <span className="k">проверено {ago(data.checkedAt)}</span>}
           <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/templates/${t.id}/health/check`); await reload(); })}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>
@@ -471,21 +472,21 @@ function ExitHealth({ t }: { t: Template }) {
       </div>
       <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
         <table>
-          <thead><tr><th>Выход</th><th>Задержка</th><th>Скорость</th><th>Состояние</th></tr></thead>
+          <thead><tr><th>Выход</th><th>Задержка</th>{!order && <th>Скорость</th>}<th>Состояние</th></tr></thead>
           <tbody>
             {data?.rows.map((r) => (
               <tr key={r.exit_id}>
                 <td><b>{r.name}</b>{data.selected === r.exit_id && <> <Tag kind="acc">выбран</Tag></>}</td>
                 <td className="mono">{r.rtt_ms !== null ? `${r.rtt_ms} мс` : '—'}</td>
-                <td className="mono">{r.mbps !== null ? `${r.mbps} Мбит/с` : '—'}</td>
-                <td>{r.ok ? <Tag kind="ok">проходит</Tag> : <Tag kind={r.error ? 'fail' : 'warn'}>{r.error ?? 'ниже порога'}</Tag>}</td>
+                {!order && <td className="mono">{r.mbps !== null ? `${r.mbps} Мбит/с` : '—'}</td>}
+                <td>{r.ok ? <Tag kind="ok">{order ? 'отвечает' : 'проходит'}</Tag> : <Tag kind={r.error ? 'fail' : 'warn'}>{r.error ?? 'ниже порога'}</Tag>}</td>
               </tr>
             ))}
             {data && !data.rows.length && <tr><td colSpan={4} className="empty">Проверок ещё не было — нажмите «Проверить сейчас» или подождите расписания.</td></tr>}
           </tbody>
         </table>
       </div>
-      {!data?.selected && !!data?.rows.length && <div className="k" style={{ padding: '10px 20px' }}>Выход не закреплён: Xray выбирает по наименьшей задержке.</div>}
+      {!data?.selected && !!data?.rows.length && <div className="k" style={{ padding: '10px 20px' }}>Выход не закреплён: {order ? 'ни один выход не отвечает.' : 'Xray выбирает по наименьшей задержке.'}</div>}
       <div style={{ padding: '0 20px' }}><ErrorBox error={error} /></div>
     </section>
   );

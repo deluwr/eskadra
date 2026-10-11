@@ -819,7 +819,6 @@ export const EN: Record<string, string> = {
   "Сохранено, выкат начался": "Saved, rollout started",
   "Ссылка откроет бота. После нажатия «Старт» Telegram привяжется сам — панель увидит это сразу.": "The link opens the bot. After “Start” is pressed, Telegram links itself — the panel sees it right away.",
   "Трафик идёт через выход, который проходит пороги задержки и скорости. Пока он их проходит — не меняется; перестал — вход переключается на самый быстрый из подходящих.": "Traffic goes through an exit that meets the latency and speed thresholds. It stays while it meets them; once it doesn't, the entry switches to the fastest exit that does.",
-  "Трафик идёт через первый выход в списке, который проходит пороги. Перестал — через следующий; первый снова в норме — трафик возвращается к нему.": "Traffic goes through the first exit in the list that meets the thresholds. If it stops meeting them — through the next one; once the first is healthy again, traffic returns to it.",
   "Удалить {}? Его ссылки и подписка перестанут работать.": "Delete {}? Their links and subscription will stop working.",
   "Уровень защиты: {}": "Protection level: {}",
   "Черновик сохранён — на серверах прежняя версия": "Draft saved — servers keep the previous version",
@@ -867,4 +866,10 @@ export const EN: Record<string, string> = {
   "работает": "running",
   "трафик за месяц {}": "traffic this month {}",
   "через": "via",
+  "Xray выбирает по наименьшей задержке.": "Xray picks the lowest latency.",
+  "Выход не закреплён:": "No exit pinned:",
+  "По порядку: трафик идёт через первый отвечающий выход. Проверка каждую минуту.": "In order: traffic goes through the first exit that responds. Checked every minute.",
+  "Трафик идёт через первый выход в списке. Не ответил (таймаут) — через следующий; первый снова отвечает — трафик возвращается к нему. Проверка каждую минуту, без замера скорости.": "Traffic goes through the first exit in the list. If it doesn't respond (timeout) — through the next one; once the first responds again, traffic returns to it. Checked every minute, no speed test.",
+  "ни один выход не отвечает.": "no exit responds.",
+  "отвечает": "responds",
 };

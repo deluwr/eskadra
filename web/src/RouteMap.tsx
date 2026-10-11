@@ -81,9 +81,10 @@ export function RouteMap({ entry, entryOff, exits, ordered, onToggle, onMove, em
 
 /** Подписи выхода по замерам «Авто»: что сейчас с ним и цифры. */
 export function exitView(h: { rtt_ms: number | null; mbps: number | null; ok: number; error: string | null } | null | undefined, opts: { lead: boolean; failSince?: string | null; mode?: string; ago?: (iso: string) => string }): Pick<MapExit, 'state' | 'note' | 'metric'> {
-  const metric = h && (h.rtt_ms !== null || h.mbps !== null) ? `${h.rtt_ms ?? '—'} мс · ${h.mbps ?? '—'} Мбит/с` : undefined;
+  let metric = h && (h.rtt_ms !== null || h.mbps !== null) ? `${h.rtt_ms ?? '—'} мс · ${h.mbps ?? '—'} Мбит/с` : undefined;
   if (opts.failSince) return { state: 'fail', note: opts.ago ? `нет связи · ${opts.ago(opts.failSince)}` : 'нет связи', metric };
   if (h && !h.ok) return { state: 'fail', note: h.error ?? 'ниже порога', metric };
+  if (opts.mode === 'order') metric = h?.rtt_ms != null ? `${h.rtt_ms} мс` : undefined;
   if (opts.lead) return { state: 'lead', note: 'ведёт трафик', metric };
   return { state: 'ok', note: opts.mode === 'random' ? 'в пуле' : 'в резерве', metric };
 }

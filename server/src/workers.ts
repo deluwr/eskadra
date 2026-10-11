@@ -203,11 +203,13 @@ export class Workers {
       const last = getSetting<string>(this.ctx.db, `auto.checked.${t.id}`, '');
       try {
         // между полными проверками — раз в минуту только задержка закреплённого выхода; не отвечает — проверяем всё сразу
-        if (last && Date.now() - Date.parse(last) < sp.checkMin * 60_000 && (await this.ops.pinnedAlive(t).catch(() => true))) continue;
+        // по порядку — проверка каждую минуту (только доступность, дёшево); по качеству — полная по расписанию
+        if (sp.autoMode === 'smart' && last && Date.now() - Date.parse(last) < sp.checkMin * 60_000 && (await this.ops.pinnedAlive(t).catch(() => true))) continue;
         const r = await this.ops.checkExits(t, () => undefined);
         if (r?.switched) {
           const msg = r.switched.to
             ? `«${t.name}»: «Авто» переключён ${r.switched.from ? `с ${r.switched.from} ` : ''}на ${r.switched.to}`
+            : sp.autoMode === 'order' ? `«${t.name}»: ни один выход не отвечает`
             : `«${t.name}»: ни один выход не проходит пороги (задержка ≤ ${sp.maxRttMs} мс, скорость ≥ ${sp.minMbps} Мбит/с) — выбор по наименьшей задержке`;
           this.log.info(msg);
           void this.bot.notifyAdmins(msg, [[{ text: 'Выходы «Авто»', callback_data: 'ex' }]]);

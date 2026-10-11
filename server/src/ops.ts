@@ -295,7 +295,7 @@ export class Ops {
     await this.ctx.onNode(this.ctx.server(t.entry_id), async (n) => {
       const r = await n.op(['exit-probe', probePort(t.id, ov.slice(`to-${t.id}-`.length)), 0], { timeoutMs: 60_000 });
       const rtt = Number(r.stdout.match(/^rtt_ms=(\d+)/m)?.[1] ?? NaN);
-      ok = !Number.isNaN(rtt) && rtt <= sp.maxRttMs;
+      ok = !Number.isNaN(rtt) && (sp.autoMode === 'order' || rtt <= sp.maxRttMs);
     });
     return ok;
   }
@@ -310,22 +310,25 @@ export class Ops {
     const results: ExitHealth[] = [];
     const prev = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
     let next: string | null = prev;
+    // по порядку — только «отвечает ли выход» (таймаут = выход недоступен), без замера скорости и порогов
+    const order = sp.autoMode === 'order';
     await this.ctx.onNode(entry, async (n) => {
+      await this.ensureKit(entry, n, log);   // проба выходов появилась в nodekit 0.10 — старый nodekit обновляем сам
       for (const x of targets) {
-        const r = await n.op(['exit-probe', probePort(t.id, x.id), sp.testMB * 1_000_000], { timeoutMs: 120_000 });
+        const r = await n.op(['exit-probe', probePort(t.id, x.id), order ? 0 : sp.testMB * 1_000_000], { timeoutMs: order ? 60_000 : 120_000 });
         const rtt = Number(r.stdout.match(/^rtt_ms=(\d+)/m)?.[1] ?? NaN);
         const mbps = Number(r.stdout.match(/^mbps=([\d.]+)/m)?.[1] ?? NaN);
-        const err = r.code !== 0 ? (r.stderr || r.stdout).trim().slice(0, 200) : Number.isNaN(rtt) ? 'выход не отвечает' : Number.isNaN(mbps) ? 'скачивание не удалось' : null;
-        const ok = !err && rtt <= sp.maxRttMs && mbps >= sp.minMbps;
+        const err = r.code !== 0 ? (r.stderr || r.stdout).trim().slice(0, 200) : Number.isNaN(rtt) ? 'выход не отвечает' : !order && Number.isNaN(mbps) ? 'скачивание не удалось' : null;
+        const ok = !err && (order || (rtt <= sp.maxRttMs && mbps >= sp.minMbps));
         results.push({ exitId: x.id, name: x.name, rttMs: Number.isNaN(rtt) ? null : rtt, mbps: Number.isNaN(mbps) ? null : mbps, ok, error: err });
         this.ctx.db.prepare(`INSERT INTO exit_health (template_id, exit_id, rtt_ms, mbps, ok, error, checked_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
           ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, mbps = excluded.mbps, ok = excluded.ok, error = excluded.error, checked_at = excluded.checked_at`)
           .run(t.id, x.id, Number.isNaN(rtt) ? null : rtt, Number.isNaN(mbps) ? null : mbps, ok ? 1 : 0, err);
-        log(`${entry.name} → ${x.name}: ${err ?? `${rtt} мс, ${mbps} Мбит/с`}${ok ? '' : ' — не проходит пороги'}`);
+        log(`${entry.name} → ${x.name}: ${err ?? (order ? `отвечает, ${rtt} мс` : `${rtt} мс, ${mbps} Мбит/с`)}${ok || err ? '' : ' — не проходит пороги'}`);
       }
       const good = results.filter((r) => r.ok).sort((a, b) => (b.mbps! - a.mbps!) || (a.rttMs! - b.rttMs!));
       const cur = prev ? results.find((r) => `to-${t.id}-${r.exitId}` === prev) : undefined;
-      // по порядку — первый проходящий пороги выход (вернулся вышестоящий — возвращаемся к нему);
+      // по порядку — первый отвечающий выход (вернулся вышестоящий — возвращаемся к нему);
       // по качеству — текущий, пока проходит пороги (без лишних переключений), иначе лучший подходящий; никто — Xray сам
       const first = results.find((r) => r.ok);
       if (sp.autoMode === 'order') next = first ? `to-${t.id}-${first.exitId}` : null;
