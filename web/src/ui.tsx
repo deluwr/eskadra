@@ -83,7 +83,7 @@ export function CopyButton({ text, label = 'Копировать' }: { text: str
   return <button className="btn sm" onClick={() => void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>{copied ? 'Скопировано' : label}</button>;
 }
 
-const P = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+const P = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
 
 export const Icon = {
   logo: (s = 24) => (

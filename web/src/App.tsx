@@ -33,7 +33,14 @@ export function App() {
   const [confirmAsk, setConfirmAsk] = useState<{ text: string; done: (ok: boolean) => void } | null>(null);
 
   useEffect(() => {
+    // смена темы мгновенно: без этого все переходы цвета и фона срабатывают разом и страница «размазывается»
+    const off = document.createElement('style');
+    off.textContent = '*,*::before,*::after{transition:none !important}';
+    document.head.appendChild(off);
     document.documentElement.dataset.theme = theme;
+    void getComputedStyle(document.body).opacity;   // принудительный перерасчёт стилей
+    requestAnimationFrame(() => off.remove());
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0B1019' : '#F3F5F8');
     try { localStorage.setItem('eskadra.theme', theme); } catch { /* приватный режим */ }
   }, [theme]);
 

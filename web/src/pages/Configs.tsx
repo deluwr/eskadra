@@ -82,7 +82,7 @@ export function ConfigsPage() {
         <button className="btn pri" onClick={() => { setDraft(empty()); setJobId(null); }}>Новая конфигурация</button>
       </div>
       <div className="split">
-        <section className="card narrow" style={{ padding: 10, flex: '1 1 280px' }} aria-label="Шаблоны">
+        <section className="card narrow tpl-list" style={{ flex: '1 1 280px' }} aria-label="Конфигурации">
           <div className="k" style={{ padding: '6px 8px' }}>Конфигурации · {templates?.length ?? 0}</div>
           {templates?.map((t) => (
             <button key={t.id} className={`tpl ${draft?.id === t.id ? 'on' : ''}`} onClick={() => { setDraft(toDraft(t)); setJobId(null); }}>
