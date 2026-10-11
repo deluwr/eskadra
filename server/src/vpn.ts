@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Ctx, InboundRow, ServerRow, TemplateRow, UserRow } from './ctx.js';
+import { certName, link as protoLink, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
   if (!s) return fallback;
@@ -110,20 +111,11 @@ export class Vpn {
     return this.ctx.servers().filter((s) => s.id !== t.entry_id && active.has(s.id));
   }
 
+  spec = (t: TemplateRow): Spec => specOf(t);
+
   link(u: UserRow, p: Profile): string {
-    const t = p.template;
-    const sni = json<string[]>(t.sni, [])[0] ?? '';
-    const secret = this.cred(u.id, p.credKey);
-    const tag = encodeURIComponent(p.name);
-    if (t.protocol === 'hysteria2') {
-      const q = new URLSearchParams({ sni, insecure: '1', ...(p.inbound.tls_pin ? { pinSHA256: p.inbound.tls_pin } : {}) });
-      return `hysteria2://${secret}@${hostForUri(p.host)}:${p.port}/?${q}#${tag}`;
-    }
-    const q = new URLSearchParams({
-      encryption: 'none', flow: 'xtls-rprx-vision', security: 'reality', sni, fp: t.fingerprint,
-      pbk: p.inbound.public_key ?? '', sid: p.inbound.short_id ?? '', type: 'tcp',
-    });
-    return `vless://${secret}@${hostForUri(p.host)}:${p.port}?${q}#${tag}`;
+    const sp = this.spec(p.template);
+    return protoLink(sp, this.cred(u.id, p.credKey), { host: p.host, port: p.port, name: p.name, serverId: p.inbound.server_id, inbound: p.inbound });
   }
 
   // ───── рендер конфигов узла ─────
@@ -148,26 +140,20 @@ export class Vpn {
 
     for (const ib of ibs) {
       const t = this.template(ib.template_id)!;
-      const sni = json<string[]>(t.sni, []);
-      let clients: Array<{ id: string; email: string; flow: string }> = [];
-      if (ib.kind === 'direct') {
-        clients = this.directClients(server, t, users);
-      } else {
+      const sp = this.spec(t);
+      let clients = ib.kind === 'direct' ? this.directClients(server, t, users) : [];
+      if (ib.kind === 'relay') {
         const targets = this.relayTargets(t);
         for (const x of targets) {
           const outTag = `to-${t.id}-${x.id}`;
           const xi = this.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct'`, t.id, x.id)[0];
-          if (!xi?.public_key) continue;
-          outbounds.push({
-            tag: outTag, protocol: 'vless',
-            settings: { vnext: [{ address: x.host, port: xi.port, users: [{ id: this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), encryption: 'none', flow: 'xtls-rprx-vision' }] }] },
-            streamSettings: { network: 'tcp', security: 'reality', realitySettings: { serverName: sni[0] ?? '', fingerprint: t.fingerprint, publicKey: xi.public_key, shortId: xi.short_id ?? '' } },
-          });
+          if (!xi || (sp.security === 'reality' && !xi.public_key)) continue;
+          outbounds.push(xrayOutbound(sp, xi, outTag, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id));
           const emails: string[] = [];
           for (const u of users)
             if (json<string[]>(u.modes, []).includes('via') && this.userAllows(u, x.id)) {
               const email = `${u.id}.v-${x.id}`;
-              clients.push({ id: this.cred(u.id, `v:${t.id}:${x.id}`), email, flow: 'xtls-rprx-vision' });
+              clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:${x.id}`), email));
               emails.push(email);
             }
           if (emails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: emails, outboundTag: outTag });
@@ -177,7 +163,7 @@ export class Vpn {
           for (const u of users)
             if (json<string[]>(u.modes, []).includes('via')) {
               const email = `${u.id}.a-${t.id}`;
-              clients.push({ id: this.cred(u.id, `v:${t.id}:auto`), email, flow: 'xtls-rprx-vision' });
+              clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:auto`), email));
               autoEmails.push(email);
             }
           balancers.push({ tag: `bal-${t.id}`, selector: [`to-${t.id}-`], strategy: { type: 'random' } });
@@ -186,15 +172,11 @@ export class Vpn {
         // всё прочее с входа, не попавшее в правила, не выпускаем наружу с самого входа
         rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], outboundTag: 'block' });
       }
-      inbounds.push({
-        tag: `in-${ib.id}`, listen: '0.0.0.0', port: ib.port, protocol: 'vless',
-        settings: { clients, decryption: 'none' },
-        streamSettings: {
-          network: 'tcp', security: 'reality',
-          realitySettings: { show: false, target: `${sni[0] ?? 'www.apple.com'}:443`, serverNames: sni, privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : '', shortIds: [ib.short_id ?? ''] },
-        },
-        sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'] },
-      });
+      inbounds.push(xrayInbound(sp, ib, `in-${ib.id}`, clients, {
+        privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : undefined,
+        cert: certName(sp, t.id, server.id, server.host),
+        ssServerKey: ib.public_key ?? undefined,
+      }));
     }
     return {
       log: { loglevel: 'warning' },
@@ -209,12 +191,13 @@ export class Vpn {
 
   /** Клиенты direct-inbound: пользователи с прямым доступом к узлу + служебный клиент входа, ведущего сюда. */
   directClients(server: ServerRow, t: TemplateRow, users = this.users(true)) {
-    const clients: Array<{ id: string; email: string; flow: string }> = [];
+    const sp = this.spec(t);
+    const clients = [];
     for (const u of users)
       if (json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id))
-        clients.push({ id: this.cred(u.id, `t:${t.id}`), email: `${u.id}.d-${t.id}`, flow: 'xtls-rprx-vision' });
+        clients.push(xrayClient(sp, this.cred(u.id, `t:${t.id}`), `${u.id}.d-${t.id}`));
     if (t.entry_id && t.entry_id !== server.id)
-      clients.push({ id: this.svcCred(`relay:${t.id}:${t.entry_id}:${server.id}`), email: `svc.relay-${t.entry_id}-${t.id}`, flow: 'xtls-rprx-vision' });
+      clients.push(xrayClient(sp, this.svcCred(`relay:${t.id}:${t.entry_id}:${server.id}`), `svc.relay-${t.entry_id}-${t.id}`));
     return clients;
   }
 
@@ -224,23 +207,27 @@ export class Vpn {
    */
   xuiInbound(server: ServerRow, ib: InboundRow): Record<string, unknown> {
     const t = this.template(ib.template_id)!;
-    const sni = json<string[]>(t.sni, []);
+    const sp = this.spec(t);
     const clients = this.directClients(server, t).map((c) => ({
-      id: c.id, flow: c.flow, email: c.email, limitIp: 0, totalGB: 0, expiryTime: 0, enable: true, tgId: '', subId: '', reset: 0,
+      ...c, limitIp: 0, totalGB: 0, expiryTime: 0, enable: true, tgId: '', subId: '', reset: 0,
     }));
+    const x = xrayInbound(sp, ib, `in-${ib.id}`, clients, {
+      privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : undefined,
+      cert: certName(sp, t.id, server.id, server.host),
+      ssServerKey: ib.public_key ?? undefined,
+    }) as { settings: Record<string, unknown>; streamSettings?: Record<string, unknown> };
+    const stream = { ...(x.streamSettings ?? { network: 'tcp', security: 'none' }) } as Record<string, unknown>;
+    // 3x-ui хранит REALITY с полем dest и публичным ключом для своих ссылок
+    if (stream.realitySettings) {
+      const r = stream.realitySettings as Record<string, unknown>;
+      stream.realitySettings = { ...r, dest: r.target, xver: 0, minClient: '', maxClient: '', maxTimediff: 0,
+        settings: { publicKey: ib.public_key ?? '', fingerprint: sp.fingerprint, serverName: '', spiderX: '/' } };
+    }
     return {
-      up: 0, down: 0, total: 0, remark: `eskadra-${t.name}-${ib.id}`, enable: true, expiryTime: 0, listen: '', port: ib.port, protocol: 'vless',
-      settings: JSON.stringify({ clients, decryption: 'none', fallbacks: [] }),
-      streamSettings: JSON.stringify({
-        network: 'tcp', security: 'reality', externalProxy: [],
-        realitySettings: {
-          show: false, xver: 0, dest: `${sni[0] ?? 'www.apple.com'}:443`, serverNames: sni,
-          privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : '', minClient: '', maxClient: '', maxTimediff: 0,
-          shortIds: [ib.short_id ?? ''], settings: { publicKey: ib.public_key ?? '', fingerprint: t.fingerprint, serverName: '', spiderX: '/' },
-        },
-        tcpSettings: { acceptProxyProtocol: false, header: { type: 'none' } },
-      }),
-      sniffing: JSON.stringify({ enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false, routeOnly: false }),
+      up: 0, down: 0, total: 0, remark: `eskadra-${t.name}-${ib.id}`, enable: true, expiryTime: 0, listen: '', port: ib.port, protocol: sp.protocol,
+      settings: JSON.stringify({ ...x.settings, ...(sp.protocol === 'vless' ? { fallbacks: [] } : {}) }),
+      streamSettings: JSON.stringify(stream),
+      sniffing: JSON.stringify({ enabled: sp.sniffing, destOverride: ['http', 'tls', 'quic'], metadataOnly: false, routeOnly: false }),
       allocate: JSON.stringify({ strategy: 'always', refresh: 5, concurrency: 3 }),
     };
   }
@@ -255,19 +242,41 @@ export class Vpn {
       log: { level: 'warn' },
       inbounds: ibs.map((ib) => {
         const t = this.template(ib.template_id)!;
-        const sni = json<string[]>(t.sni, [])[0] ?? 'localhost';
+        const sp = this.spec(t);
+        const cert = certName(sp, t.id, server.id, server.host);
+        const self = sp.sni[0] ?? 'localhost';
         return {
           type: 'hysteria2', tag: `in-${ib.id}`, listen: '::', listen_port: ib.port,
           users: users
             .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id))
             .map((u) => ({ name: `${u.id}.d-${t.id}`, password: this.cred(u.id, `t:${t.id}`) })),
-          tls: { enabled: true, server_name: sni, certificate_path: `/etc/eskadra/sing-box/tls/${sni}.crt`, key_path: `/etc/eskadra/sing-box/tls/${sni}.key` },
+          ...(sp.hy2Obfs ? { obfs: { type: 'salamander', password: sp.hy2Obfs } } : {}),
+          tls: {
+            enabled: true, server_name: tlsServerName(sp, server.id) || self, alpn: ['h3'],
+            ...(cert
+              ? { certificate_path: `/etc/eskadra/tls/${cert}/fullchain.pem`, key_path: `/etc/eskadra/tls/${cert}/privkey.pem` }
+              : { certificate_path: `/etc/eskadra/sing-box/tls/${self}.crt`, key_path: `/etc/eskadra/sing-box/tls/${self}.key` }),
+          },
         };
       }),
       outbounds: [{ type: 'direct', tag: 'direct' }],
       // домен сначала резолвится, затем локальные и частные адреса отклоняются (sing-box ≥ 1.11)
       route: { rules: [{ action: 'resolve' }, { ip_cidr: PRIVATE_NETS, action: 'reject' }] },
     };
+  }
+
+  /** config.toml telemt (MTProto) для узла: на узле — одна MTProto-конфигурация (у неё свой домен маскировки). */
+  renderTelemt(server: ServerRow): string | null {
+    const ibs = this.inbounds(`server_id = ? AND state IN ('active','deploying') AND kind = 'direct'`, server.id)
+      .filter((i) => this.template(i.template_id)?.core === 'telemt');
+    if (!ibs.length) return null;
+    if (ibs.length > 1) throw new Error(`${server.name}: на узле может быть только одна конфигурация MTProto`);
+    const ib = ibs[0]!;
+    const t = this.template(ib.template_id)!;
+    const users = this.users(true)
+      .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id))
+      .map((u) => ({ name: `${u.id}.d-${t.id}`, secret: this.cred(u.id, `t:${t.id}`), maxIps: effectiveLimits(this.ctx, u).devices }));
+    return telemtConfig(this.spec(t), ib.port, users, server.host);
   }
 
   template(id: string): TemplateRow | undefined {

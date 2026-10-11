@@ -3,6 +3,9 @@
 #   install <xray|sing-box> <version> <sha256>   скачать официальный релиз, проверить sha256, установить
 #   apply   <xray|sing-box> <staged.json>         проверить конфиг, подменить атомарно, перезапустить, откатить при сбое
 #   status|stop <core> · x25519 · stats · tls <sni>
+#   cert-issue <имя> ip|domain <значение>     Let's Encrypt на IP или домен узла (certbot, HTTP-01), автопродление
+#   cert-set <имя> <fullchain> <privkey>      загруженный сертификат (общий домен / wildcard)
+# Ядра: xray, sing-box, telemt (MTProto).
 set -euo pipefail
 LIB="${FLEET_CORE_LIB:-/usr/local/lib/eskadra}"
 ETC="${FLEET_CORE_ETC:-/etc/eskadra}"
@@ -17,15 +20,18 @@ arch() {
     *) die "unsupported arch $(uname -m)" ;;
   esac
 }
-bin_of() { if [ "$1" = xray ]; then echo "$BIN/eskadra-xray"; else echo "$BIN/eskadra-sing-box"; fi; }
+bin_of() { echo "$BIN/eskadra-$1"; }
 unit_of() { echo "eskadra-$1.service"; }
-cfg_of() { echo "$ETC/$1/config.json"; }
+cfg_of() { if [ "$1" = telemt ]; then echo "$ETC/telemt/config.toml"; else echo "$ETC/$1/config.json"; fi; }
 
 url_of() {  # официальные релизы на GitHub; версия без префикса v
   local core="$1" v="$2" a; a="$(arch)"
   if [ "$core" = xray ]; then
     local x; [ "$a" = amd64 ] && x=64 || x=arm64-v8a
     echo "https://github.com/XTLS/Xray-core/releases/download/v$v/Xray-linux-$x.zip"
+  elif [ "$core" = telemt ]; then
+    local x; [ "$a" = amd64 ] && x=x86_64 || x=aarch64
+    echo "https://github.com/telemt/telemt/releases/download/$v/telemt-$x-linux-musl.tar.gz"
   else
     echo "https://github.com/SagerNet/sing-box/releases/download/v$v/sing-box-$v-linux-$a.tar.gz"
   fi
@@ -37,6 +43,8 @@ write_unit() {
   run="$bin run -c $cfg"
   local env=""
   [ "$core" = xray ] && env="Environment=XRAY_LOCATION_ASSET=$(dirname "$(readlink -f "$bin")")"
+  # telemt: «telemt config.toml», кэш TLS-эмуляции (tls_front_dir) — в каталоге конфига
+  [ "$core" = telemt ] && { run="$bin $cfg"; env="WorkingDirectory=$ETC/telemt"; }
   cat > "$UNITS/$(unit_of "$core").new" <<EOF
 [Unit]
 Description=Eskadra $core
@@ -60,7 +68,7 @@ EOF
   systemctl daemon-reload
 }
 
-exe_of() { if [ "$1" = xray ]; then echo "$LIB/xray/$2/xray"; else echo "$LIB/sing-box/$2/sing-box"; fi; }
+exe_of() { echo "$LIB/$1/$2/$1"; }
 
 link_to() {  # переключить /usr/local/bin/eskadra-<core> на версию и переписать юнит
   local core="$1" v="$2" bin; bin="$(bin_of "$core")"
@@ -72,6 +80,7 @@ link_to() {  # переключить /usr/local/bin/eskadra-<core> на вер�
 test_cfg() {  # test_cfg <core> <version>: принимает ли версия текущий конфиг
   local core="$1" v="$2" cfg exe; cfg="$(cfg_of "$core")"; exe="$(exe_of "$core" "$v")"
   [ -f "$cfg" ] || return 0
+  [ "$core" = telemt ] && return 0
   if [ "$core" = xray ]; then XRAY_LOCATION_ASSET="$(dirname "$exe")" "$exe" run -test -c "$cfg" >/dev/null 2>&1
   else "$exe" check -c "$cfg" >/dev/null 2>&1; fi
 }
@@ -104,6 +113,9 @@ cmd_install() {
       python3 -m zipfile -e "$tmp/pkg" "$tmp/x"
       install -m 755 "$tmp/x/xray" "$dest.new/xray"
       for f in geoip.dat geosite.dat; do [ -f "$tmp/x/$f" ] && install -m 644 "$tmp/x/$f" "$dest.new/$f"; done
+    elif [ "$core" = telemt ]; then
+      tar -xzf "$tmp/pkg" -C "$tmp"
+      install -m 755 "$tmp/telemt" "$dest.new/telemt"
     else
       tar -xzf "$tmp/pkg" -C "$tmp"
       install -m 755 "$tmp"/sing-box-*/sing-box "$dest.new/sing-box"
@@ -148,10 +160,16 @@ cmd_apply() {
   [ -x "$bin" ] || die "$core not installed"
   if [ "$core" = xray ]; then
     XRAY_LOCATION_ASSET="$(dirname "$(readlink -f "$bin")")" "$bin" run -test -c "$staged" >/dev/null || die "config test failed"
-  else
+  elif [ "$core" = sing-box ]; then
     "$bin" check -c "$staged" || die "config check failed"
   fi
   install -d -m 750 "$ETC/$core"
+  if [ "$core" = telemt ] && [ -f "$cfg" ] && systemctl is-active --quiet "$unit" \
+     && [ "$(sed '/^\[access/,$d' "$cfg")" = "$(sed '/^\[access/,$d' "$staged")" ]; then
+    # telemt сам подхватывает [access.*] (пользователи, лимиты) — соединения Telegram не рвём
+    install -m 600 "$staged" "$cfg.new" && mv "$cfg.new" "$cfg"
+    echo "applied telemt (users reloaded without restart)"; return 0
+  fi
   [ -f "$cfg" ] && cp -a "$cfg" "$cfg.prev"
   install -m 600 "$staged" "$cfg.new" && mv "$cfg.new" "$cfg"
   systemctl enable "$unit" >/dev/null 2>&1 || true
@@ -170,7 +188,7 @@ cmd_status() {
   echo "version=$(cat "$LIB/$core/current" 2>/dev/null || echo none)"
   echo "previous=$(cat "$LIB/$core/previous" 2>/dev/null || echo none)"
   echo "active=$(systemctl is-active "$(unit_of "$core")" 2>/dev/null || true)"
-  echo "listen:"; ss -ltnupH 2>/dev/null | grep -E "eskadra|\"(xray|sing-box)\"" | awk '{print $1" "$5}' || true
+  echo "listen:"; ss -ltnupH 2>/dev/null | grep -E "eskadra|\"(xray|sing-box|telemt)\"" | awk '{print $1" "$5}' || true
 }
 
 cmd_x25519() {  # выводит private=… public=… (формат Xray менялся: Public key / Password)
@@ -199,6 +217,128 @@ cmd_tls() {  # самоподписанный сертификат для Hyster
   echo "cert=$d/$sni.crt"; echo "key=$d/$sni.key"
 }
 
+# ───── сертификаты TLS для inbounds: /etc/eskadra/tls/<имя>/{fullchain,privkey}.pem ─────
+CB="$LIB/certbot/bin/certbot"
+LEDIR="$ETC/letsencrypt"
+cb() { "$CB" --config-dir "$LEDIR" --work-dir "$LEDIR/work" --logs-dir /var/log/eskadra-letsencrypt "$@"; }
+
+ensure_certbot() {  # certbot ≥ 5.4 (сертификаты на IP) в своём venv; системный certbot не трогаем
+  if [ -x "$CB" ] && "$CB" --version 2>/dev/null | awk '{split($2,v,"."); exit !(v[1]>5 || (v[1]==5 && v[2]>=4))}'; then return; fi
+  local py=""
+  for c in $(compgen -c python3 | grep -E '^python3(\.[0-9]+)?$' | sort -t. -k2,2nr -u); do
+    "$c" -c 'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 9))' 2>/dev/null && { py="$(command -v "$c")"; break; }
+  done
+  if [ -z "$py" ]; then
+    if command -v apt-get >/dev/null; then
+      export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+      apt-get -o DPkg::Lock::Timeout=600 update -qq >/dev/null 2>&1 || true
+      apt-get -o DPkg::Lock::Timeout=600 install -y -qq python3-venv >/dev/null 2>&1 \
+        || apt-get -o DPkg::Lock::Timeout=600 install -y -qq "python$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')-venv" >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null; then dnf install -y -q python3.12 >/dev/null 2>&1 || dnf install -y -q python3.11 >/dev/null 2>&1 || true
+    elif command -v zypper >/dev/null; then zypper --non-interactive -q install python311 >/dev/null 2>&1 || true
+    elif command -v pacman >/dev/null; then pacman -Sy --noconfirm --needed python >/dev/null 2>&1 || true; fi
+    for c in $(compgen -c python3 | grep -E '^python3(\.[0-9]+)?$' | sort -t. -k2,2nr -u); do
+      "$c" -c 'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 9))' 2>/dev/null && { py="$(command -v "$c")"; break; }
+    done
+  fi
+  [ -n "$py" ] || die "нужен Python ≥ 3.9 с venv для certbot"
+  rm -rf "$LIB/certbot"
+  "$py" -m venv "$LIB/certbot" || die "не удалось создать окружение для certbot"
+  "$LIB/certbot/bin/pip" install -q --disable-pip-version-check 'certbot>=5.4' >/dev/null 2>&1 || die "certbot не установился"
+}
+
+cert_hooks() {  # порт 80 на время выпуска/продления: правило в нашей таблице nft и в ufw/firewalld, если они включены
+  install -d -m 755 "$ETC/tls/hooks"
+  cat > "$ETC/tls/hooks/pre.sh" <<'EOF'
+#!/bin/sh
+nft list table inet fleet >/dev/null 2>&1 && nft insert rule inet fleet input tcp dport 80 accept comment '"eskadra-acme"' 2>/dev/null
+if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw allow 80/tcp comment "eskadra acme" >/dev/null; fi
+if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --add-port=80/tcp; fi
+exit 0
+EOF
+  cat > "$ETC/tls/hooks/post.sh" <<'EOF'
+#!/bin/sh
+for h in $(nft -a list chain inet fleet input 2>/dev/null | sed -n 's/.*eskadra-acme.*# handle \([0-9]*\).*/\1/p'); do nft delete rule inet fleet input handle "$h"; done
+if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw delete allow 80/tcp >/dev/null 2>&1 || true; fi
+if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --remove-port=80/tcp || true; fi
+exit 0
+EOF
+  chmod 755 "$ETC/tls/hooks/pre.sh" "$ETC/tls/hooks/post.sh"
+}
+
+cert_timer() {  # продление дважды в сутки; новый сертификат — в каталог tls и перезапуск ядер, которые его используют
+  cat > "$UNITS/eskadra-certbot.service" <<EOF
+[Unit]
+Description=Eskadra: renew TLS certificates of inbounds
+[Service]
+Type=oneshot
+ExecStart=$CB --config-dir $LEDIR --work-dir $LEDIR/work --logs-dir /var/log/eskadra-letsencrypt renew -q
+EOF
+  cat > "$UNITS/eskadra-certbot.timer" <<'EOF'
+[Unit]
+Description=Eskadra: renew TLS certificates twice a day
+[Timer]
+OnCalendar=*-*-* 00,12:00:00
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now eskadra-certbot.timer >/dev/null 2>&1 || true
+}
+
+cmd_cert_deploy() {  # deploy-hook certbot: живой сертификат → /etc/eskadra/tls/<имя>, перезапуск ядер с этим сертификатом
+  local name="$1" live="$LEDIR/live/$1" d="$ETC/tls/$1" core
+  [ -s "$live/fullchain.pem" ] || die "нет сертификата $name"
+  install -d -m 750 "$d"
+  install -m 644 "$live/fullchain.pem" "$d/fullchain.pem.new" && mv "$d/fullchain.pem.new" "$d/fullchain.pem"
+  install -m 600 "$live/privkey.pem" "$d/privkey.pem.new" && mv "$d/privkey.pem.new" "$d/privkey.pem"
+  for core in xray sing-box; do
+    grep -qs "/tls/$name/" "$(cfg_of "$core")" && systemctl is-active --quiet "$(unit_of "$core")" && systemctl restart "$(unit_of "$core")" || true
+  done
+  echo "deployed $name"
+}
+
+cmd_cert_issue() {  # cert-issue <имя> ip|domain <значение>: выпуск, если сертификата нет или он скоро истекает
+  local name="$1" kind="$2" value="$3" args=() holder
+  case "$kind" in
+    ip) python3 -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1])' "$value" 2>/dev/null || die "bad ip" ;;
+    domain) [[ "$value" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "bad domain" ;;
+    *) die "kind: ip|domain" ;;
+  esac
+  if [ -s "$ETC/tls/$name/fullchain.pem" ] && openssl x509 -in "$ETC/tls/$name/fullchain.pem" -noout -checkend 172800 >/dev/null 2>&1; then
+    echo "cert $name: действует до $(openssl x509 -in "$ETC/tls/$name/fullchain.pem" -noout -enddate | cut -d= -f2)"; return 0
+  fi
+  holder="$(ss -ltnpH 'sport = :80' 2>/dev/null | head -1)"
+  [ -z "$holder" ] || die "порт 80 занят ($(echo "$holder" | grep -o 'users:(("[^"]*"' | cut -d'"' -f2)) — Let's Encrypt не сможет проверить сервер; освободите порт 80 или используйте загруженный сертификат"
+  ensure_certbot
+  cert_hooks
+  args=(certonly -q --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$name" --key-type ecdsa
+        --pre-hook "$ETC/tls/hooks/pre.sh" --post-hook "$ETC/tls/hooks/post.sh" --deploy-hook "/usr/local/sbin/fleet-core cert-deploy $name")
+  if [ "$kind" = ip ]; then args+=(--preferred-profile shortlived --ip-address "$value"); else args+=(-d "$value"); fi
+  cb "${args[@]}" || die "Let's Encrypt не выдал сертификат для $value (порт 80 должен быть открыт снаружи, в т. ч. в firewall хостера)"
+  if [ "$kind" = ip ]; then  # 6-дневный сертификат продлеваем за 3 дня
+    local rc="$LEDIR/renewal/$name.conf"
+    grep -q '^renew_before_expiry' "$rc" && sed -i 's/^renew_before_expiry.*/renew_before_expiry = 3 days/' "$rc" || sed -i '1a renew_before_expiry = 3 days' "$rc"
+  fi
+  [ -s "$ETC/tls/$name/fullchain.pem" ] || cmd_cert_deploy "$name" >/dev/null
+  cert_timer
+  echo "cert $name: выпущен Let's Encrypt для $value"
+}
+
+cmd_cert_set() {  # cert-set <имя> <fullchain> <privkey>: загруженный сертификат
+  local name="$1" crt="$2" key="$3" d="$ETC/tls/$1" a b
+  openssl x509 -in "$crt" -noout >/dev/null 2>&1 || die "это не сертификат PEM"
+  a="$(openssl x509 -in "$crt" -noout -pubkey | sha256sum)"; b="$(openssl pkey -in "$key" -pubout 2>/dev/null | sha256sum)"
+  [ "$a" = "$b" ] || die "ключ не подходит к сертификату"
+  install -d -m 750 "$d"
+  if cmp -s "$crt" "$d/fullchain.pem" && cmp -s "$key" "$d/privkey.pem"; then echo "cert $name: без изменений"; return 0; fi
+  install -m 644 "$crt" "$d/fullchain.pem.new" && mv "$d/fullchain.pem.new" "$d/fullchain.pem"
+  install -m 600 "$key" "$d/privkey.pem.new" && mv "$d/privkey.pem.new" "$d/privkey.pem"
+  echo "cert $name: установлен, действует до $(openssl x509 -in "$d/fullchain.pem" -noout -enddate | cut -d= -f2)"
+}
+
 case "${1:-}" in
   install) cmd_install "${2:?}" "${3:?}" "${4:?}" ;;
   rollback) cmd_rollback "${2:?}" ;;
@@ -208,5 +348,8 @@ case "${1:-}" in
   x25519)  cmd_x25519 ;;
   stats)   cmd_stats ;;
   tls)     cmd_tls "${2:?}" ;;
+  cert-issue)  cmd_cert_issue "${2:?}" "${3:?}" "${4:?}" ;;
+  cert-set)    cmd_cert_set "${2:?}" "${3:?}" "${4:?}" ;;
+  cert-deploy) cmd_cert_deploy "${2:?}" ;;
   *) die "usage: fleet-core install|apply|status|stop|x25519|stats|tls" ;;
 esac

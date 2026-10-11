@@ -5,6 +5,7 @@ import { randomInt } from 'node:crypto';
 import type { Ctx, UserRow } from './ctx.js';
 import { getSetting, setSetting } from './db.js';
 import { effectiveLimits, json, period, Vpn, type Profile } from './vpn.js';
+import { singboxOutbound } from './protocols.js';
 import { pushAllowedIp } from './access.js';
 import { audit } from './lib/audit.js';
 
@@ -19,17 +20,10 @@ export function ensureSubPort(ctx: Ctx): number {
 }
 
 function singboxConfig(vpn: Vpn, u: UserRow, profiles: Profile[]) {
-  const outs = profiles.map((p) => {
-    const t = p.template;
-    const sni = json<string[]>(t.sni, [])[0] ?? '';
-    const secret = vpn.cred(u.id, p.credKey);
-    if (t.protocol === 'hysteria2')
-      return { type: 'hysteria2', tag: p.name, server: p.host, server_port: p.port, password: secret, tls: { enabled: true, server_name: sni, insecure: true } };
-    return {
-      type: 'vless', tag: p.name, server: p.host, server_port: p.port, uuid: secret, flow: 'xtls-rprx-vision',
-      tls: { enabled: true, server_name: sni, utls: { enabled: true, fingerprint: t.fingerprint }, reality: { enabled: true, public_key: p.inbound.public_key, short_id: p.inbound.short_id } },
-    };
-  });
+  // протоколы и транспорты, которых нет в sing-box (MTProto, XHTTP), в JSON не попадают — они есть в ссылках
+  const outs = profiles
+    .map((p) => singboxOutbound(vpn.spec(p.template), vpn.cred(u.id, p.credKey), { host: p.host, port: p.port, name: p.name, serverId: p.inbound.server_id, inbound: p.inbound }))
+    .filter((o): o is Record<string, unknown> & { tag: string } => !!o);
   const tags = outs.map((o) => o.tag);
   return {
     outbounds: [
@@ -87,7 +81,8 @@ export class SubService {
       const ua = String(req.headers['user-agent'] ?? '').toLowerCase();
       const fmt = req.query.fmt ?? (/sing-box|hiddify|karing/.test(ua) ? 'singbox' : 'base64');
       if (fmt === 'singbox') return reply.type('application/json').send(JSON.stringify(singboxConfig(vpn, u, profiles), null, 2));
-      const links = profiles.map((p) => vpn.link(u, p)).join('\n');
+      // MTProto (tg://) VPN-клиенты не понимают — он выдаётся отдельной ссылкой в карточке пользователя
+      const links = profiles.filter((p) => vpn.spec(p.template).protocol !== 'mtproto').map((p) => vpn.link(u, p)).join('\n');
       if (fmt === 'raw') return reply.type('text/plain').send(links);
       return reply.type('text/plain').send(Buffer.from(links).toString('base64'));
     });

@@ -13,7 +13,7 @@ staged() {  # принимаем только файлы из staging
   [[ "$1" != *..* ]] || deny path
   [ -f "$1" ] || deny "no such staged file"
 }
-core_ok() { [[ "$1" == xray || "$1" == sing-box ]] || deny core; }
+core_ok() { [[ "$1" == xray || "$1" == sing-box || "$1" == telemt ]] || deny core; }
 
 case "${1:-}" in
   ping)          echo pong ;;
@@ -55,6 +55,10 @@ case "${1:-}" in
   xray-x25519)   exec /usr/local/sbin/fleet-core x25519 ;;
   xray-stats)    exec /usr/local/sbin/fleet-core stats ;;
   singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;
+  tls-issue)     name_ok "${2:?name}"; exec /usr/local/sbin/fleet-core cert-issue "$2" "${3:?ip|domain}" "${4:?value}" ;;
+  tls-set)       name_ok "${2:?name}"; name_ok "${3:?crt}"; name_ok "${4:?key}"; staged "$STAGING/$3"; staged "$STAGING/$4"
+                 exec /usr/local/sbin/fleet-core cert-set "$2" "$STAGING/$3" "$STAGING/$4" ;;
+  tls-deploy)    name_ok "${2:?name}"; exec /usr/local/sbin/fleet-core cert-deploy "$2" ;;
   # уже установленный 3x-ui: inbounds Эскадры живут в его Xray (stdin — JSON с действием)
   xui)           exec python3 /usr/local/sbin/fleet-xui ;;
   xui-remove)    exec /usr/local/sbin/fleetctl xui-remove ;;

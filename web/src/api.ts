@@ -70,7 +70,9 @@ export interface ServerDetail {
 }
 
 export interface Template {
-  id: string; name: string; core: string; protocol: 'vless-reality' | 'hysteria2'; port: number; sni: string[]; fingerprint: string;
+  id: string; name: string; core: string; protocol: 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'mtproto'; port: number; sni: string[]; fingerprint: string;
+  spec: { protocol: 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'mtproto'; security: 'reality' | 'tls' | 'none'; transport: 'tcp' | 'ws' | 'grpc' | 'xhttp' | 'httpupgrade'; [k: string]: unknown };
+  hasCustomCert: boolean;
   ech: boolean; node_ids: string[]; entry_id: string | null; entry_port: number | null; revision: number; applied_revision: number;
   inbounds: Array<{ id: string; server_id: string; kind: string; port: number; proto: string; state: string; error: string | null }>;
 }

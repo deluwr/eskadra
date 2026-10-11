@@ -2,17 +2,62 @@ import { useEffect, useState } from 'react';
 import { api, type Job, type Server, type Template } from '../api';
 import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, useAsync, usePoll, ask } from '../ui';
 
-interface Draft {
-  id: string | null; name: string; protocol: 'vless-reality' | 'hysteria2'; port: string; sni: string; fingerprint: string;
-  ech: boolean; nodeIds: string[]; entryId: string; entryPort: string;
+type Protocol = 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'mtproto';
+type Security = 'reality' | 'tls' | 'none';
+type Transport = 'tcp' | 'ws' | 'grpc' | 'xhttp' | 'httpupgrade';
+type CertMode = 'ip' | 'domain' | 'custom' | 'self';
+
+/** Что поддерживает протокол (как в protocols.ts на сервере). */
+const PROTO: Record<Protocol, { name: string; hint: string; core: string; sec: Security[]; tr: Transport[]; udp?: boolean; relay: boolean; cert: CertMode[]; port: string }> = {
+  vless: { name: 'VLESS', hint: 'основной вариант: REALITY без своего сертификата, или TLS', core: 'Xray', sec: ['reality', 'tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
+  vmess: { name: 'VMess', hint: 'для старых клиентов; обычно поверх WebSocket + TLS', core: 'Xray', sec: ['tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
+  trojan: { name: 'Trojan', hint: 'похож на обычный HTTPS; TLS или REALITY', core: 'Xray', sec: ['tls', 'reality'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
+  shadowsocks: { name: 'Shadowsocks-2022', hint: 'простой и быстрый, без TLS', core: 'Xray', sec: ['none'], tr: ['tcp'], relay: true, cert: [], port: '8388' },
+  hysteria2: { name: 'Hysteria2', hint: 'QUIC (UDP), быстрый на плохих сетях', core: 'sing-box', sec: ['tls'], tr: [], udp: true, relay: false, cert: ['self', 'ip', 'domain', 'custom'], port: '8444' },
+  mtproto: { name: 'MTProto (Telegram)', hint: 'прокси только для Telegram, маскировка под HTTPS (fake-TLS)', core: 'telemt', sec: ['none'], tr: [], relay: false, cert: [], port: '443' },
+};
+const SEC_LABEL: Record<Security, string> = { reality: 'REALITY', tls: 'TLS', none: 'без шифрования' };
+const TR_LABEL: Record<Transport, string> = { tcp: 'TCP', ws: 'WebSocket', grpc: 'gRPC', xhttp: 'XHTTP', httpupgrade: 'HTTPUpgrade' };
+const CERT_LABEL: Record<CertMode, string> = {
+  ip: 'Let\'s Encrypt на IP сервера (рекомендуется)', domain: 'Свой домен на каждом сервере', custom: 'Загрузить свой (общий домен или wildcard)', self: 'Самоподписанный (без домена, с привязкой отпечатка)',
+};
+
+interface Settings {
+  security: Security; transport: Transport; flow: string; path: string; host: string; serviceName: string; xhttpMode: string;
+  alpn: string[]; certMode: CertMode; domain: string; domains: Record<string, string>; ssMethod: string; hy2Obfs: string; mtDomain: string; sniffing: boolean;
 }
 
-const empty: Draft = { id: null, name: '', protocol: 'vless-reality', port: '8443', sni: 'www.apple.com', fingerprint: 'chrome', ech: false, nodeIds: [], entryId: '', entryPort: '9443' };
+interface Draft {
+  id: string | null; name: string; protocol: Protocol; port: string; sni: string; fingerprint: string;
+  ech: boolean; nodeIds: string[]; entryId: string; entryPort: string; st: Settings;
+  certPem: string; keyPem: string;
+}
+
+const defaults = (p: Protocol): Settings => ({
+  security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
+  xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
+  hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
+});
+
+const empty = (p: Protocol = 'vless'): Draft => ({
+  id: null, name: '', protocol: p, port: PROTO[p].port, sni: 'www.apple.com', fingerprint: 'chrome', ech: false, nodeIds: [], entryId: '', entryPort: '9443',
+  st: defaults(p), certPem: '', keyPem: '',
+});
 
 const toDraft = (t: Template): Draft => ({
-  id: t.id, name: t.name, protocol: t.protocol, port: String(t.port), sni: t.sni.join('\n'), fingerprint: t.fingerprint, ech: t.ech,
+  id: t.id, name: t.name, protocol: t.spec.protocol, port: String(t.port), sni: t.sni.join(' '), fingerprint: t.fingerprint, ech: t.ech,
   nodeIds: t.node_ids, entryId: t.entry_id ?? '', entryPort: String(t.entry_port ?? 9443),
+  st: { ...defaults(t.spec.protocol), ...t.spec } as Settings, certPem: '', keyPem: '',
 });
+
+/** Краткое описание шаблона для списка: «VLESS · REALITY · TCP». */
+const describe = (t: Template) => {
+  const sp = t.spec;
+  const parts = [PROTO[sp.protocol]?.name ?? sp.protocol];
+  if (PROTO[sp.protocol]?.sec.length > 1 || sp.security === 'tls') parts.push(SEC_LABEL[sp.security]);
+  if (PROTO[sp.protocol]?.tr.length > 1) parts.push(TR_LABEL[sp.transport]);
+  return parts.join(' · ');
+};
 
 export function ConfigsPage() {
   const { data: templates, reload } = usePoll(() => api.get<Template[]>('/api/v1/templates'), 20_000);
@@ -28,20 +73,20 @@ export function ConfigsPage() {
   return (
     <>
       <div className="page-head">
-        <div><h1>Конфигурации</h1><p>Шаблоны inbound: рендер под каждый узел, проверка на узле, canary и поэтапный выкат с автооткатом</p></div>
-        <button className="btn pri" onClick={() => { setDraft({ ...empty }); setJobId(null); }}>Новый шаблон</button>
+        <div><h1>Конфигурации</h1><p>Протоколы и порты, по которым подключаются пользователи</p></div>
+        <button className="btn pri" onClick={() => { setDraft(empty()); setJobId(null); }}>Новая конфигурация</button>
       </div>
       <div className="split">
         <section className="card narrow" style={{ padding: 10, flex: '1 1 280px' }} aria-label="Шаблоны">
-          <div className="k" style={{ padding: '6px 8px' }}>Шаблоны · {templates?.length ?? 0}</div>
+          <div className="k" style={{ padding: '6px 8px' }}>Конфигурации · {templates?.length ?? 0}</div>
           {templates?.map((t) => (
             <button key={t.id} className={`tpl ${draft?.id === t.id ? 'on' : ''}`} onClick={() => { setDraft(toDraft(t)); setJobId(null); }}>
               <span className="flex" style={{ justifyContent: 'space-between', width: '100%' }}><b className="small">{t.name}</b><Tag>{t.core}</Tag></span>
-              <span className="k mono">{t.protocol === 'hysteria2' ? 'Hysteria2 · QUIC' : 'VLESS · REALITY · Vision'} · :{t.port}{t.entry_id ? ` · вход :${t.entry_port}` : ''}</span>
+              <span className="k mono">{describe(t)} · :{t.port}{t.entry_id ? ` · вход :${t.entry_port}` : ''}</span>
               <span className="k">{t.inbounds.filter((i) => i.state === 'active').length} активно · ревизия {t.revision}{t.applied_revision < t.revision ? ' · не выкачена' : ''}</span>
             </button>
           ))}
-          {!templates?.length && <p className="k" style={{ padding: 8 }}>Шаблонов пока нет.</p>}
+          {!templates?.length && <p className="k" style={{ padding: 8 }}>Конфигураций пока нет.</p>}
         </section>
         <div className="wide stack" style={{ gap: 20 }}>
           {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current}
@@ -141,58 +186,121 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
   const [d, setD] = useState(draft);
   const { busy, error, run } = useAsync();
   const managed = servers.filter((s) => s.sudo_mode === 'restricted');
+  const info = PROTO[d.protocol];
+  const st = d.st;
+  const setSt = (patch: Partial<Settings>) => setD({ ...d, st: { ...st, ...patch } });
+  const tls = st.security === 'tls' || d.protocol === 'hysteria2';
+  const usedIds = [...d.nodeIds, ...(d.entryId ? [d.entryId] : [])];
   const body = () => ({
-    name: d.name, protocol: d.protocol, port: Number(d.port), sni: d.sni.split(/\s+/).filter(Boolean), fingerprint: d.fingerprint, ech: d.ech,
+    name: d.name, protocol: d.protocol, port: Number(d.port), sni: d.sni.split(/[\s,]+/).filter(Boolean), fingerprint: d.fingerprint, ech: d.ech,
     nodeIds: d.nodeIds, entryId: d.entryId || null, entryPort: d.entryId ? Number(d.entryPort) : null,
+    settings: {
+      security: st.security, transport: st.transport, flow: st.transport === 'tcp' && st.security !== 'none' && d.protocol === 'vless' ? st.flow : '',
+      path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
+      domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
+      ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
+    },
+    ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
-  const save = () => run(async () => {
+  const saveT = async () => {
     const t = d.id ? await api.put<Template>(`/api/v1/templates/${d.id}`, body()) : await api.post<Template>('/api/v1/templates', body());
     onSaved(t);
     return t;
-  });
+  };
+  const save = () => run(saveT);
   const rollout = () => run(async () => {
-    const t = d.id ? await api.put<Template>(`/api/v1/templates/${d.id}`, body()) : await api.post<Template>('/api/v1/templates', body());
-    onSaved(t);
+    const t = await saveT();
     const r = await api.post<{ jobId: number }>(`/api/v1/templates/${t.id}/rollout`);
     onRollout(r.jobId);
   });
   const toggleNode = (id: string) => setD({ ...d, nodeIds: d.nodeIds.includes(id) ? d.nodeIds.filter((x) => x !== id) : [...d.nodeIds, id] });
   const stateOf = (sid: string, kind: string) => current?.inbounds.find((i) => i.server_id === sid && i.kind === kind);
+  const pickProtocol = (p: Protocol) => setD({ ...d, protocol: p, port: PROTO[p].port, st: defaults(p), entryId: PROTO[p].relay ? d.entryId : '' });
 
   return (
     <section className="card pad stack" style={{ gap: 18 }}>
       <div className="flex" style={{ justifyContent: 'space-between' }}>
-        <div><h2>{d.id ? d.name : 'Новый шаблон'}</h2>{current && <span className="k">ревизия {current.revision}, выкачена {current.applied_revision || '—'}</span>}</div>
-        {d.id && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask('Снять шаблон со всех узлов и удалить?')) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); onDeleted(); }); }}>Удалить</button>}
-      </div>
-      <div className="stack" style={{ gap: 8 }}>
-        <span className="k">Протокол и ядро</span>
-        <Seg value={d.protocol} label="Протокол" onChange={(v) => !d.id && setD({ ...d, protocol: v, port: v === 'hysteria2' ? '8444' : d.port })}
-          options={[['vless-reality', 'VLESS · REALITY (Xray)'], ['hysteria2', 'Hysteria2 (sing-box)']]} />
-        {d.id && <span className="k">Протокол существующего шаблона не меняется — создайте новый.</span>}
-      </div>
-      <div className="grid g3">
-        <label className="fld">Имя<input className="inp mono" value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} placeholder="reality-vision" /></label>
-        <label className="fld">Порт{d.protocol === 'hysteria2' ? ' (UDP)' : ' (TCP)'}<input className="inp mono" value={d.port} onChange={(e) => setD({ ...d, port: e.target.value })} /><span className="k">Откроется на узлах сам после проверки</span></label>
-        <label className="fld">Отпечаток клиента<select className="inp" value={d.fingerprint} onChange={(e) => setD({ ...d, fingerprint: e.target.value })}>{['chrome', 'firefox', 'safari', 'edge', 'random'].map((f) => <option key={f}>{f}</option>)}</select></label>
-      </div>
-      <label className="fld">{d.protocol === 'hysteria2' ? 'SNI сертификата' : 'Пул SNI (serverNames) — сайт для маскировки, по одному в строке'}
-        <textarea className="inp mono" rows={3} value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} /></label>
-      <div className="flex" style={{ justifyContent: 'space-between', background: 'var(--surface2)', borderRadius: 10, padding: '12px 14px' }}>
-        <div className="row-text"><b>ECH</b><span className="k">Опционально на подключение. Профиль с ECH попадает в подписку только клиентам с поддержкой.</span></div>
-        <Switch label="ECH" on={d.ech} onChange={(v) => setD({ ...d, ech: v })} />
+        <div><h2>{d.id ? d.name : 'Новая конфигурация'}</h2>{current && <span className="k">ревизия {current.revision}, выкачена {current.applied_revision || '—'}</span>}</div>
+        {d.id && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask('Снять конфигурацию со всех серверов и удалить?')) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); onDeleted(); }); }}>Удалить</button>}
       </div>
 
+      <div className="grid g3">
+        <label className="fld"><span>Протокол <Info>{Object.values(PROTO).map((x) => <span key={x.name}><b>{x.name}</b> — {x.hint} ({x.core}).<br /></span>)}Протокол существующей конфигурации не меняется — создайте новую.</Info></span>
+          <select className="inp" value={d.protocol} disabled={!!d.id} onChange={(e) => pickProtocol(e.target.value as Protocol)}>
+            {(Object.keys(PROTO) as Protocol[]).map((p) => <option key={p} value={p}>{PROTO[p].name}</option>)}
+          </select>
+        </label>
+        <label className="fld">Имя<input className="inp mono" value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} placeholder={`${d.protocol}-${st.security === 'none' ? 'plain' : st.security}`} /></label>
+        <label className="fld"><span>Порт ({info.udp ? 'UDP' : 'TCP'}) <Info>Откроется на серверах сам после проверки: не SSH, не занят, в диапазоне группы.{d.protocol === 'mtproto' ? ' Для MTProto лучше 443 — так соединение больше похоже на обычный HTTPS.' : ''}</Info></span>
+          <input className="inp mono" value={d.port} onChange={(e) => setD({ ...d, port: e.target.value })} inputMode="numeric" />
+        </label>
+      </div>
+
+      {/* защита: REALITY / TLS / нет */}
+      {info.sec.length > 1 && (
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="k">Защита <Info>REALITY — маскировка под чужой сайт, свой сертификат не нужен. TLS — свой сертификат (Let's Encrypt на IP сервера, домен или загруженный). Без шифрования — только для особых случаев (например, за CDN).</Info></span>
+          <Seg value={st.security} label="Защита" onChange={(v) => setSt({ security: v, flow: v === 'none' ? '' : st.flow, transport: v === 'reality' && !['tcp', 'grpc', 'xhttp'].includes(st.transport) ? 'tcp' : st.transport })}
+            options={info.sec.map((x) => [x, SEC_LABEL[x]] as [Security, string])} />
+        </div>
+      )}
+      {st.security === 'reality' && info.sec.includes('reality') && (
+        <label className="fld"><span>Сайт маскировки (SNI) <Info>Чужой сайт с TLS 1.3, под который маскируется сервер: www.apple.com, dl.google.com, www.cloudflare.com, www.samsung.com. Можно несколько через пробел. www.microsoft.com с REALITY не работает.</Info></span>
+          <input className="inp mono" value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="www.apple.com" />
+        </label>
+      )}
+      {tls && info.cert.length > 0 && (
+        <div className="stack" style={{ gap: 8 }}>
+          <label className="fld"><span>Сертификат <Info>Let's Encrypt на IP выпускается на каждом сервере сам и продлевается автоматически (порт 80 на время выпуска). Для домена — A-запись домена должна указывать на сервер. Загруженный сертификат (например, wildcard) раздаётся на все серверы конфигурации.</Info></span>
+            <select className="inp" value={st.certMode} onChange={(e) => setSt({ certMode: e.target.value as CertMode })}>
+              {info.cert.map((m) => <option key={m} value={m}>{CERT_LABEL[m]}</option>)}
+            </select>
+          </label>
+          {st.certMode === 'domain' && (
+            <div className="grid g2">
+              {usedIds.length ? usedIds.map((id) => (
+                <label key={id} className="fld">Домен для {servers.find((x) => x.id === id)?.name ?? id}
+                  <input className="inp mono" value={st.domains[id] ?? ''} onChange={(e) => setSt({ domains: { ...st.domains, [id]: e.target.value.trim() } })} placeholder="de.example.com" />
+                </label>
+              )) : <span className="k">Сначала выберите серверы ниже.</span>}
+            </div>
+          )}
+          {st.certMode === 'custom' && (
+            <div className="stack" style={{ gap: 8 }}>
+              <label className="fld">Домен в сертификате (клиенты проверяют его)<input className="inp mono" value={st.domain} onChange={(e) => setSt({ domain: e.target.value.trim() })} placeholder="vpn.example.com" /></label>
+              {current?.hasCustomCert && !d.certPem && <span className="k">Сертификат загружен. Чтобы заменить — вставьте новый.</span>}
+              <div className="grid g2">
+                <label className="fld">Сертификат (fullchain.pem)<textarea className="inp mono" rows={4} value={d.certPem} onChange={(e) => setD({ ...d, certPem: e.target.value })} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} /></label>
+                <label className="fld">Ключ (privkey.pem)<textarea className="inp mono" rows={4} value={d.keyPem} onChange={(e) => setD({ ...d, keyPem: e.target.value })} placeholder="-----BEGIN PRIVATE KEY-----" spellCheck={false} /></label>
+              </div>
+            </div>
+          )}
+          {st.certMode === 'self' && (
+            <label className="fld">Имя в сертификате (SNI)<input className="inp mono" value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="hy.example" /></label>
+          )}
+        </div>
+      )}
+      {d.protocol === 'shadowsocks' && (
+        <label className="fld">Шифрование<select className="inp" value={st.ssMethod} onChange={(e) => setSt({ ssMethod: e.target.value })}>
+          {['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305'].map((m) => <option key={m}>{m}</option>)}
+        </select></label>
+      )}
+      {d.protocol === 'mtproto' && (
+        <label className="fld"><span>Домен маскировки <Info>Сайт, под HTTPS которого маскируется прокси (fake-TLS). Неопознанные подключения перенаправляются на него. На одном сервере может быть одна конфигурация MTProto.</Info></span>
+          <input className="inp mono" value={st.mtDomain} onChange={(e) => setSt({ mtDomain: e.target.value.trim() })} placeholder="www.apple.com" />
+        </label>
+      )}
+
       <div className="stack" style={{ gap: 8 }}>
-        <h3>Узлы — напрямую</h3>
-        {!managed.length && <span className="k">Нет узлов с установленным nodekit.</span>}
+        <h3>Серверы</h3>
+        {!managed.length && <span className="k">Нет подключённых серверов.</span>}
         <div className="flex">
           {managed.map((s) => {
-            const st = stateOf(s.id, 'direct');
+            const sti = stateOf(s.id, 'direct');
             return (
               <label key={s.id} className="cb tag" style={{ minHeight: 36, padding: '0 12px' }}>
                 <input type="checkbox" checked={d.nodeIds.includes(s.id)} onChange={() => toggleNode(s.id)} />
-                {s.name}{st && <span className={`tag ${st.state === 'active' ? 'ok' : st.state === 'error' ? 'fail' : 'warn'}`} style={{ padding: '0 6px' }}>{st.state}</span>}
+                {s.name}{sti && <span className={`tag ${sti.state === 'active' ? 'ok' : sti.state === 'error' ? 'fail' : 'warn'}`} style={{ padding: '0 6px' }}>{sti.state}</span>}
               </label>
             );
           })}
@@ -200,12 +308,11 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
         {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}: {i.error}</div>)}
       </div>
 
-      {d.protocol === 'vless-reality' && (
+      {info.relay && (
         <div className="stack" style={{ gap: 8 }}>
-          <h3>Универсальный вход (необязательно)</h3>
-          <span className="k">Пользователь подключается к входу, а тот ведёт на выбранный узел: «DE · через вход», «Авто · через вход».</span>
+          <h3>Вход <Info>Необязательно. Пользователь подключается к входу, а тот пересылает трафик на выбранный сервер: в подписке появятся «DE · через вход» и «Авто · через вход».</Info></h3>
           <div className="flex">
-            <select className="inp" style={{ width: 'auto' }} value={d.entryId} onChange={(e) => setD({ ...d, entryId: e.target.value })} aria-label="Узел входа">
+            <select className="inp" style={{ width: 'auto' }} value={d.entryId} onChange={(e) => setD({ ...d, entryId: e.target.value })} aria-label="Сервер-вход">
               <option value="">без входа</option>
               {managed.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
@@ -215,12 +322,57 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
         </div>
       )}
 
-      <div className="stack" style={{ gap: 6 }}>
-        <span className="k">Стратегия: canary (первый узел) → остальные → вход. Перед каждым: проверка конфига на узле, открытие порта, внешняя проба. Ошибка — откат и остановка.</span>
-        <div className="flex">
-          <button className="btn pri" disabled={busy || !d.name || (!d.nodeIds.length && !d.entryId)} onClick={() => void rollout()}>Сохранить и выкатить</button>
-          <button className="btn" disabled={busy || !d.name} onClick={() => void save()}>Сохранить черновик</button>
-        </div>
+      {(info.tr.length > 0 || d.protocol === 'hysteria2') && (
+        <details className="stack">
+          <summary className="k" style={{ cursor: 'pointer' }}>Дополнительно</summary>
+          <div className="stack" style={{ gap: 14, paddingTop: 12 }}>
+            {info.tr.length > 1 && (
+              <div className="stack" style={{ gap: 8 }}>
+                <span className="k">Транспорт <Info>TCP — по умолчанию и быстрее всего. WebSocket, gRPC, HTTPUpgrade — если сервер за CDN или прокси. XHTTP — новый транспорт Xray (только VLESS, в sing-box-подписке не поддерживается).</Info></span>
+                <Seg value={st.transport} label="Транспорт" onChange={(v) => setSt({ transport: v })}
+                  options={info.tr.filter((x) => st.security !== 'reality' || ['tcp', 'grpc', 'xhttp'].includes(x)).map((x) => [x, TR_LABEL[x]] as [Transport, string])} />
+              </div>
+            )}
+            {['ws', 'httpupgrade', 'xhttp'].includes(st.transport) && (
+              <div className="grid g3">
+                <label className="fld">Путь<input className="inp mono" value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" /></label>
+                <label className="fld">Host (необязательно)<input className="inp mono" value={st.host} onChange={(e) => setSt({ host: e.target.value.trim() })} /></label>
+                {st.transport === 'xhttp' && <label className="fld">Режим XHTTP<select className="inp" value={st.xhttpMode} onChange={(e) => setSt({ xhttpMode: e.target.value })}>{['auto', 'packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>}
+              </div>
+            )}
+            {st.transport === 'grpc' && <label className="fld">Имя сервиса gRPC<input className="inp mono" value={st.serviceName} onChange={(e) => setSt({ serviceName: e.target.value.trim() })} /></label>}
+            <div className="grid g3">
+              {d.protocol === 'vless' && st.transport === 'tcp' && st.security !== 'none' && (
+                <label className="fld">Flow<select className="inp" value={st.flow} onChange={(e) => setSt({ flow: e.target.value })}><option value="xtls-rprx-vision">xtls-rprx-vision</option><option value="">нет</option></select></label>
+              )}
+              {st.security !== 'none' && d.protocol !== 'hysteria2' && (
+                <label className="fld">Отпечаток клиента (uTLS)<select className="inp" value={d.fingerprint} onChange={(e) => setD({ ...d, fingerprint: e.target.value })}>{['chrome', 'firefox', 'safari', 'edge', 'random'].map((f) => <option key={f}>{f}</option>)}</select></label>
+              )}
+              {st.security === 'tls' && d.protocol !== 'hysteria2' && (
+                <span className="fld">ALPN
+                  <span className="flex">{['h2', 'http/1.1'].map((a) => <label key={a} className="cb small"><input type="checkbox" checked={st.alpn.includes(a)} onChange={() => setSt({ alpn: st.alpn.includes(a) ? st.alpn.filter((x) => x !== a) : [...st.alpn, a] })} />{a}</label>)}</span>
+                </span>
+              )}
+              {d.protocol === 'hysteria2' && <label className="fld"><span>Пароль obfs (salamander) <Info>Дополнительно маскирует QUIC. Пусто — без obfs. Клиенты должны поддерживать obfs.</Info></span><input className="inp mono" value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} /></label>}
+            </div>
+            {d.protocol !== 'hysteria2' && (
+              <div className="flex" style={{ justifyContent: 'space-between' }}>
+                <span className="small">Sniffing <Info>Ядро определяет домен назначения по трафику — нужно для маршрутизации по доменам. Обычно включено.</Info></span>
+                <Switch label="Sniffing" on={st.sniffing} onChange={(v) => setSt({ sniffing: v })} />
+              </div>
+            )}
+            <div className="flex" style={{ justifyContent: 'space-between' }}>
+              <span className="small">ECH <Info>Encrypted Client Hello — скрывает имя сайта в рукопожатии. Опционально; профиль с ECH получают только клиенты с поддержкой.</Info></span>
+              <Switch label="ECH" on={d.ech} onChange={(v) => setD({ ...d, ech: v })} />
+            </div>
+          </div>
+        </details>
+      )}
+
+      <div className="flex">
+        <button className="btn pri" disabled={busy || !d.name || (!d.nodeIds.length && !d.entryId)} onClick={() => void rollout()}>Сохранить и выкатить</button>
+        <button className="btn" disabled={busy || !d.name} onClick={() => void save()}>Сохранить черновик</button>
+        <Info>Выкат идёт по одному серверу: проверка конфига на сервере, открытие порта, проверка снаружи. Ошибка — откат и остановка.</Info>
       </div>
       <ErrorBox error={error} />
     </section>

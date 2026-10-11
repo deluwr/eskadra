@@ -4,6 +4,7 @@ import { coreMode, foreignCore, panelPorts, type Ctx, type InboundRow, type Node
 import { getSetting } from './db.js';
 import { json, Vpn } from './vpn.js';
 import { releaseFor, type Core } from './releases.js';
+import { certName, PROTOCOLS, protoOf } from './protocols.js';
 
 const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
 import { buildKitBundle, kitVersion } from './nodekit.js';
@@ -39,6 +40,8 @@ function inRange(port: number, spec: string): boolean {
 }
 
 export class Ops {
+  /** журнал текущего выката (для сообщений из ensureInbound, например о выпуске сертификата) */
+  lastLog: ((l: string) => void) | null = null;
   readonly vpn: Vpn;
   constructor(readonly ctx: Ctx) { this.vpn = new Vpn(ctx); }
 
@@ -185,7 +188,8 @@ export class Ops {
   /** Создать запись inbound и ключи на узле (REALITY x25519 / самоподписанный TLS для Hysteria2). */
   async ensureInbound(t: TemplateRow, s: ServerRow, kind: 'direct' | 'relay', n: NodeSession): Promise<InboundRow> {
     const port = kind === 'relay' ? t.entry_port! : t.port;
-    const proto: 'tcp' | 'udp' = t.protocol === 'hysteria2' ? 'udp' : 'tcp';
+    const sp = this.vpn.spec(t);
+    const proto = protoOf(sp.protocol);
     let ib = this.vpn.inbounds('template_id = ? AND server_id = ? AND kind = ?', t.id, s.id, kind)[0];
     if (!ib) {
       const id = 'ib-' + randomBytes(4).toString('hex');
@@ -196,14 +200,35 @@ export class Ops {
       this.ctx.db.prepare('UPDATE inbounds SET port = ? WHERE id = ?').run(port, ib.id);
       ib.port = port;
     }
-    if (t.protocol === 'vless-reality' && !ib.private_key_sealed) {
+    if (sp.security === 'reality' && !ib.private_key_sealed) {
       const out = coreMode(s) === 'xui' ? String(await this.xui(s, n, 'x25519')) : await n.must(['xray-x25519']);
       const priv = out.match(/^private=(\S+)/m)?.[1];
       const pub = out.match(/^public=(\S+)/m)?.[1];
       if (!priv || !pub) throw new Error('не удалось получить ключи REALITY с узла');
       this.ctx.db.prepare('UPDATE inbounds SET private_key_sealed = ?, public_key = ? WHERE id = ?').run(this.ctx.seal(priv), pub, ib.id);
     }
-    if (t.protocol === 'hysteria2' && !ib.tls_pin) {
+    // Shadowsocks-2022: ключ сервера (общий на inbound) — в public_key, он нужен и клиентам
+    if (sp.protocol === 'shadowsocks' && !ib.public_key) {
+      const key = randomBytes(sp.ssMethod === '2022-blake3-aes-128-gcm' ? 16 : 32).toString('base64');
+      this.ctx.db.prepare('UPDATE inbounds SET public_key = ? WHERE id = ?').run(key, ib.id);
+    }
+    // TLS: сертификат на узле (Let's Encrypt на IP или домен узла, либо загруженный)
+    if ((sp.security === 'tls' || sp.protocol === 'hysteria2') && sp.certMode !== 'self') {
+      const name = certName(sp, t.id, s.id, s.host);
+      if (!name) throw new Error(`${s.name}: нет сертификата для TLS — ${sp.certMode === 'ip' ? 'адрес сервера не IP' : 'не указан домен сервера'}`);
+      if (sp.certMode === 'custom') {
+        const c = getSetting<{ fullchain: string; privkey: string } | null>(this.ctx.db, `cert.${t.id}`, null);
+        if (!c) throw new Error('загрузите сертификат и ключ в настройках конфигурации');
+        await n.stage(`${name}.crt`, c.fullchain);
+        await n.stage(`${name}.key`, this.ctx.open(c.privkey));
+        await n.must(['tls-set', name, `${name}.crt`, `${name}.key`]);
+      } else {
+        const value = sp.certMode === 'ip' ? s.host : sp.domains[s.id]!;
+        const out = await n.must(['tls-issue', name, sp.certMode, value], { timeoutMs: 600_000 });
+        if (out.trim()) this.lastLog?.(`${s.name}: ${out.trim().split('\n').pop()}`);
+      }
+    }
+    if (sp.protocol === 'hysteria2' && sp.certMode === 'self' && !ib.tls_pin) {
       const sni = json<string[]>(t.sni, [])[0] ?? 'localhost';
       const out = await n.must(['singbox-tls', sni]);
       const pin = out.match(/^pin=([0-9a-f]{64})/m)?.[1];
@@ -232,16 +257,16 @@ export class Ops {
         }
       }
     }
-    for (const core of ['xray', 'sing-box'] as const) {
+    for (const core of ['xray', 'sing-box', 'telemt'] as const) {
       if (core === 'xray' && xuiMode) continue;
-      const cfg = core === 'xray' ? this.vpn.renderXray(s) : this.vpn.renderSingbox(s);
+      const cfg = core === 'xray' ? this.vpn.renderXray(s) : core === 'sing-box' ? this.vpn.renderSingbox(s) : this.vpn.renderTelemt(s);
       if (!cfg) {
         if (cores[core]) { await n.op(['core-stop', core]); log(`${core}: inbounds нет, ядро остановлено`); }
         continue;
       }
       await this.ensureCore(s, n, core, log);
-      const name = `${core}-${Date.now()}.json`;
-      await n.stage(name, JSON.stringify(cfg, null, 2));
+      const name = `${core}-${Date.now()}.${core === 'telemt' ? 'toml' : 'json'}`;
+      await n.stage(name, typeof cfg === 'string' ? cfg : JSON.stringify(cfg, null, 2));
       const out = await n.must(['core-apply', core, name], { timeoutMs: 60_000 });
       log(`${core}: ${out.trim()}`);
     }
@@ -259,7 +284,9 @@ export class Ops {
     for (const [i, { s, kind }] of plan.entries()) {
       if (s.sudo_mode !== 'restricted') throw new Error(`${s.name}: сначала установите nodekit`);
       const port = kind === 'relay' ? t.entry_port! : t.port;
-      const proto = t.protocol === 'hysteria2' ? 'udp' : 'tcp';
+      const sp = this.vpn.spec(t);
+      const core = PROTOCOLS[sp.protocol].core;
+      const proto = protoOf(sp.protocol);
       const bad = this.lintPort(s, port, proto, t.id);
       if (bad) throw new Error(`${s.name}: ${bad}`);
       if (kind === 'relay' && coreMode(s) === 'xui')
@@ -269,8 +296,8 @@ export class Ops {
       try {
         await this.ctx.onNode(s, async (n) => {
           await this.ensureKit(s, n, log);
-          if (t.protocol === 'vless-reality') await this.ensureCore(s, n, 'xray', log);
-          else await this.ensureCore(s, n, 'sing-box', log);
+          await this.ensureCore(s, n, core, log);
+          this.lastLog = log;
           ib = await this.ensureInbound(t, s, kind, n);
           this.ctx.db.prepare(`UPDATE inbounds SET state = 'deploying', error = NULL WHERE id = ?`).run(ib.id);
           await n.must(['port-open', proto, port]);
@@ -284,7 +311,7 @@ export class Ops {
             }
             if (!up) throw new Error(`3x-ui не поднял порт ${port} за 30 с — проверьте журнал Xray в 3x-ui`);
           } else {
-            const st = await n.op(['core-status', t.protocol === 'hysteria2' ? 'sing-box' : 'xray']);
+            const st = await n.op(['core-status', core]);
             if (!new RegExp(`:${port}\\b`).test(st.stdout)) throw new Error(`после применения порт ${port} не слушается`);
           }
         });

@@ -46,14 +46,17 @@ export function coreMode(s: ServerRow): 'own' | 'xui' {
 }
 
 /** Чужие ядра того же типа, что не дают запустить своё (конфликт за порты и ресурсы). */
-export function foreignCore(s: ServerRow, core: 'xray' | 'sing-box'): ExternalCore | undefined {
+export function foreignCore(s: ServerRow, core: 'xray' | 'sing-box' | 'telemt'): ExternalCore | undefined {
   const ext = JSON.parse(s.external_cores || '[]') as ExternalCore[];
+  if (core === 'telemt') return ext.find((e) => ['telemt', 'mtg', 'mtproxy'].includes(e.name) && e.active === 'active');
   const names = core === 'xray' ? ['xray', 'v2ray', 'marzban-node', 'amnezia-xray', '3x-ui'] : ['sing-box', 'hysteria-server'];
   return ext.find((e) => names.includes(e.name) && e.active === 'active') ?? ext.find((e) => e.name.startsWith('docker:') && new RegExp(core === 'xray' ? 'xray|marzban|x-ui' : 'sing-box|hiddify', 'i').test(e.name));
 }
 
 export interface TemplateRow {
-  id: string; name: string; core: 'xray' | 'sing-box'; protocol: 'vless-reality' | 'hysteria2'; port: number;
+  id: string; name: string; core: 'xray' | 'sing-box' | 'telemt';
+  protocol: 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'mtproto' | 'vless-reality'; port: number;
+  /** настройки протокола (JSON, см. protocols.ts Spec) */ settings: string;
   sni: string; fingerprint: string; ech: number; node_ids: string; entry_id: string | null; entry_port: number | null;
   revision: number; applied_revision: number; created_at: string; updated_at: string;
 }

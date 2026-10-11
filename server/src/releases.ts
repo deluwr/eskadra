@@ -1,15 +1,19 @@
 import { createHash } from 'node:crypto';
 
-export type Core = 'xray' | 'sing-box';
+export type Core = 'xray' | 'sing-box' | 'telemt';
 export interface Release { version: string; sha256: string; asset: string }
 export interface ReleaseInfo { version: string; published: string; prerelease: boolean }
 
-const REPO: Record<Core, string> = { xray: 'XTLS/Xray-core', 'sing-box': 'SagerNet/sing-box' };
+const REPO: Record<Core, string> = { xray: 'XTLS/Xray-core', 'sing-box': 'SagerNet/sing-box', telemt: 'telemt/telemt' };
+/** у telemt теги без «v» */
+const tagOf = (core: Core, v: string) => (core === 'telemt' ? v.replace(/^v/, '') : `v${v.replace(/^v/, '')}`);
 const cache = new Map<string, { at: number; value: unknown }>();
 const TTL = 6 * 3600_000;
 
 function assetName(core: Core, version: string, arch: 'amd64' | 'arm64') {
   if (core === 'xray') return arch === 'amd64' ? 'Xray-linux-64.zip' : 'Xray-linux-arm64-v8a.zip';
+  // статическая сборка (musl) — без зависимости от glibc узла
+  if (core === 'telemt') return `telemt-${arch === 'amd64' ? 'x86_64' : 'aarch64'}-linux-musl.tar.gz`;
   return `sing-box-${version}-linux-${arch}.tar.gz`;
 }
 
@@ -58,7 +62,7 @@ export async function releaseFor(core: Core, version: string | 'latest', arch: '
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TTL) return hit.value as Release;
   const data = await gh<{ tag_name: string; assets: Array<{ name: string; digest?: string; browser_download_url: string }> }>(
-    version === 'latest' ? `${REPO[core]}/releases/latest` : `${REPO[core]}/releases/tags/v${version.replace(/^v/, '')}`,
+    version === 'latest' ? `${REPO[core]}/releases/latest` : `${REPO[core]}/releases/tags/${tagOf(core, version)}`,
   );
   const v = data.tag_name.replace(/^v/, '');
   const asset = assetName(core, v, arch);

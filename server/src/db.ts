@@ -245,6 +245,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE servers ADD COLUMN mgmt_sni TEXT;
   ALTER TABLE servers ADD COLUMN mgmt_local_port INTEGER;
   `,
+  `
+  ALTER TABLE templates ADD COLUMN settings TEXT NOT NULL DEFAULT '{}';
+  UPDATE templates SET protocol = 'vless', settings = '{"security":"reality","transport":"tcp","flow":"xtls-rprx-vision"}' WHERE protocol = 'vless-reality';
+  `,
 ];
 
 export type Db = DatabaseSync;

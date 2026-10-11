@@ -288,7 +288,7 @@ async function configs() {
     const srv = await api<any[]>('GET', 'api/v1/servers');
     const nameOf = (sid: string) => srv.find((s) => s.id === sid)?.name ?? sid;
     title('Конфигурации');
-    list.forEach((t, i) => p(`  ${C.acc}${pad(i + 1 + ')', 4)}${C.x} ${pad(C.b + t.name + C.x, 20)} ${pad(t.protocol === 'hysteria2' ? 'Hysteria2' : 'VLESS·REALITY', 15)} :${pad(String(t.port), 6)} ${t.inbounds.filter((x: any) => x.state === 'active').length} активно · ревизия ${t.revision}${t.applied_revision < t.revision ? tag(' · не выкачена', 'warn') : ''}`));
+    list.forEach((t, i) => p(`  ${C.acc}${pad(i + 1 + ')', 4)}${C.x} ${pad(C.b + t.name + C.x, 20)} ${pad(String(t.spec?.protocol ?? t.protocol).toUpperCase() + (t.spec?.security && t.spec.security !== 'none' ? '·' + t.spec.security.toUpperCase() : ''), 15)} :${pad(String(t.port), 6)} ${t.inbounds.filter((x: any) => x.state === 'active').length} активно · ревизия ${t.revision}${t.applied_revision < t.revision ? tag(' · не выкачена', 'warn') : ''}`));
     if (!list.length) p(`  ${C.dim}шаблонов нет — создайте в веб-панели (раздел «Конфигурации»)${C.x}`);
     p(`  ${C.dim}0)  Назад${C.x}`);
     const a = await ask('Выберите:');

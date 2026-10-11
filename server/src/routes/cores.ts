@@ -7,8 +7,8 @@ import { Ops, startJob } from '../ops.js';
 import { cmpVersion, listReleases, type Core } from '../releases.js';
 import { json } from '../vpn.js';
 
-const CORES: Core[] = ['xray', 'sing-box'];
-const coreParam = z.enum(['xray', 'sing-box']);
+const CORES: Core[] = ['xray', 'sing-box', 'telemt'];
+const coreParam = z.enum(['xray', 'sing-box', 'telemt']);
 const versionBody = z.object({ version: z.string().regex(/^(latest|v?\d+\.\d+\.\d+([-.][A-Za-z0-9.]+)?)$/).default('latest') });
 
 export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
