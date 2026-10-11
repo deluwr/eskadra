@@ -31,7 +31,7 @@ function fixture() {
   const n = {
     op: async (a: (string | number)[]) => {
       if (a[0] === 'version') return ok(kitVersion());
-      if (a[0] === 'exit-probe') { const x = Object.keys(alive).find((k) => probePort('t', k) === a[1])!; return ok(alive[x] ? 'rtt_ms=180\n' : 'rtt_ms=fail\n'); }
+      if (a[0] === 'exit-probe') { const x = Object.keys(alive).find((k) => probePort('t', k) === a[1])!; return ok(alive[x] ? `rtt_ms=180\n${Number(a[2]) > 0 ? 'mbps=50\n' : ''}` : 'rtt_ms=fail\nmbps=fail\n'); }
       if (a[0] === 'xray-bo') { xray.override = a[2] === 'clear' ? null : String(a[2]); return ok('ok'); }
       if (a[0] === 'xray-bi') { const sel = xray.override ?? (alive.pl ? 'to-t-pl' : 'to-t-fi'); return ok(`  - Selecting Override:\n    1   ${xray.override ?? ''}\n  - Selects:\n    1   ${sel}\n`); }
       return ok('');
@@ -42,25 +42,42 @@ function fixture() {
   return { ctx, db, alive, xray, ops: new Ops(ctx), tpl: () => db.prepare(`SELECT * FROM templates WHERE id = 't'`).get() as never };
 }
 
-test('«Авто» по порядку: упал первый — переключение, вернулся — возврат; выбор сверяется с входом', async () => {
+test('«Авто» по порядку: порядок держит сам вход, панель не закрепляет выход и видит реальный', async () => {
   const f = fixture();
+  f.xray.override = 'to-t-fi';   // закрепление от старой версии — снимается
   let r = await f.ops.checkExits(f.tpl(), () => undefined);
-  assert.equal(f.xray.override, 'to-t-pl');
+  assert.equal(f.xray.override, null);
+  assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-pl');
 
-  f.alive.pl = false;   // остановили ядро на pl
+  f.alive.pl = false;   // остановили ядро на pl — вход сам ушёл на fi
   r = await f.ops.checkExits(f.tpl(), () => undefined);
-  assert.equal(f.xray.override, 'to-t-fi');
+  assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-fi');
   assert.deepEqual(r?.switched, { from: 'pl', to: 'fi' });
   assert.equal(r?.results.find((x) => x.exitId === 'pl')?.ok, false, 'неактивный выход не «отвечает»');
 
-  f.alive.pl = true;    // запустили снова
+  f.alive.pl = true;    // запустили снова — вход вернулся сам
   r = await f.ops.checkExits(f.tpl(), () => undefined);
-  assert.equal(f.xray.override, 'to-t-pl', 'вернулись на первый по порядку');
-  assert.deepEqual(r?.switched, { from: 'fi', to: 'pl' });
-
-  // вход перезапустился и «забыл» выбор — панель на следующей проверке назначает его снова
-  f.xray.override = null;
-  await f.ops.checkExits(f.tpl(), () => undefined);
-  assert.equal(f.xray.override, 'to-t-pl');
   assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-pl');
+  assert.deepEqual(r?.switched, { from: 'fi', to: 'pl' });
+});
+
+test('«Авто» по качеству: выбор назначается входу и восстанавливается, если вход его «забыл»', async () => {
+  const f = fixture();
+  f.db.prepare(`UPDATE templates SET settings = '{"security":"reality","autoMode":"smart","maxRttMs":500,"minMbps":0.5}' WHERE id = 't'`).run();
+  await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.ok(f.xray.override, 'выход назначен');
+  const chosen = f.xray.override;
+  f.xray.override = null;   // вход перезапустился
+  await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.equal(f.xray.override, chosen);
+});
+
+test('рендер входа «по порядку»: веса по порядку выходов и частое наблюдение', async () => {
+  const f = fixture();
+  f.db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, public_key, short_id) VALUES ('ib-r', 't', 'relay', 'relay', 9443, 'tcp', 'active', 'P', 'a')`).run();
+  const { Vpn } = await import('./vpn.js');
+  const x = new Vpn(f.ctx).renderXray(f.ctx.server('relay')) as any;
+  const bal = x.routing.balancers.find((b: any) => b.tag === 'bal-t');
+  assert.deepEqual(bal.strategy.settings.costs.map((c: any) => [c.match, c.value]), [['to-t-pl', 1], ['to-t-fi', 100]]);
+  assert.equal(x.burstObservatory.pingConfig.interval, '5s');
 });

@@ -412,8 +412,11 @@ export class Ops {
     const order = sp.autoMode === 'order';
     await this.ctx.onNode(entry, async (n) => {
       await this.ensureKit(entry, n, log);   // проба выходов появилась в nodekit 0.10 — старый nodekit обновляем сам
-      const before = await this.balancerState(n, t.id);
-      if (before) actualBefore = before.override || before.selected;
+      // «откуда» — по прошлой проверке: вход переключается сам и раньше, чем панель на него посмотрит
+      if (!getSetting<string | null>(this.ctx.db, `auto.actual.${t.id}`, null)) {
+        const before = await this.balancerState(n, t.id);
+        if (before) actualBefore = before.override || before.selected;
+      }
       for (const x of targets) {
         const r = await n.op(['exit-probe', probePort(t.id, x.id), order ? 0 : sp.testMB * 1_000_000], { timeoutMs: order ? 60_000 : 120_000 });
         const rtt = Number(r.stdout.match(/^rtt_ms=(\d+)/m)?.[1] ?? NaN);
@@ -430,8 +433,9 @@ export class Ops {
       const cur = prev ? results.find((r) => `to-${t.id}-${r.exitId}` === prev) : undefined;
       // по порядку — первый отвечающий выход (вернулся вышестоящий — возвращаемся к нему);
       // по качеству — текущий, пока проходит пороги (без лишних переключений), иначе лучший подходящий; никто — Xray сам
-      const first = results.find((r) => r.ok);
-      if (sp.autoMode === 'order') next = first ? `to-${t.id}-${first.exitId}` : null;
+      // по порядку выбирает сам вход (веса и наблюдение Xray, переключение за секунды) — панель не закрепляет выход,
+      // а только снимает старое закрепление и смотрит, через какой выход реально идёт трафик
+      if (sp.autoMode === 'order') next = null;
       else next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
       // сверяемся с входом на каждой проверке, а не только при смене: выбор мог сброситься перезапуском Xray
       const st = await this.setOverride(n, t.id, next);
@@ -443,7 +447,7 @@ export class Ops {
     setSetting(this.ctx.db, `auto.checked.${t.id}`, new Date().toISOString());
     const nameOf = (tag: string | null) => (tag ? targets.find((x) => tag === `to-${t.id}-${x.id}`)?.name ?? tag : null);
     // уведомляем о реальной смене выхода, через который идёт трафик
-    return { results, switched: actualAfter && actualAfter !== actualBefore ? { from: nameOf(actualBefore), to: nameOf(actualAfter) } : !next && prev ? { from: nameOf(prev), to: null } : null };
+    return { results, switched: actualAfter && actualAfter !== actualBefore ? { from: nameOf(actualBefore), to: nameOf(actualAfter) } : !next && prev && sp.autoMode !== 'order' ? { from: nameOf(prev), to: null } : null };
   }
 
   /** Выкат шаблона: canary → остальные direct-узлы → вход. Ошибка — откат inbound и остановка. */

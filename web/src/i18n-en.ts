@@ -868,8 +868,6 @@ export const EN: Record<string, string> = {
   "через": "via",
   "Xray выбирает по наименьшей задержке.": "Xray picks the lowest latency.",
   "Выход не закреплён:": "No exit pinned:",
-  "По порядку: трафик идёт через первый отвечающий выход. Проверка каждую минуту.": "In order: traffic goes through the first exit that responds. Checked every minute.",
-  "Трафик идёт через первый выход в списке. Не ответил (таймаут) — через следующий; первый снова отвечает — трафик возвращается к нему. Проверка каждую минуту, без замера скорости.": "Traffic goes through the first exit in the list. If it doesn't respond (timeout) — through the next one; once the first responds again, traffic returns to it. Checked every minute, no speed test.",
   "ни один выход не отвечает.": "no exit responds.",
   "отвечает": "responds",
   "Let's Encrypt продлевает сам сервер: таймер дважды в сутки, сертификат на IP — за 3 дня до конца, на домен — за 30. Панель проверяет сроки каждые 3 часа и пишет в бот, если продление не удалось или срок подходит к концу. Для продления нужен открытый снаружи порт 80.": "The server renews Let's Encrypt itself: a timer twice a day, an IP certificate 3 days before expiry, a domain one 30 days before. The panel checks expiry every 3 hours and notifies the bot if renewal fails or expiry is near. Renewal needs port 80 open from outside.",
@@ -1006,4 +1004,6 @@ export const EN: Record<string, string> = {
   "назначен, вход ещё не переключился": "assigned, entry hasn't switched yet",
   "неактивен": "inactive",
   "неактивен — нет связи": "inactive — no connection",
+  "Трафик идёт через первый выход в списке. Не отвечает — вход сам переводит трафик на следующий примерно за 10 секунд; первый снова отвечает — трафик возвращается к нему. Вход проверяет выходы каждые 5 секунд, без замера скорости.": "Traffic goes through the first exit in the list. If it stops responding, the entry itself moves traffic to the next one in about 10 seconds; once the first responds again, traffic returns to it. The entry checks exits every 5 seconds, with no speed test.",
+  "По порядку: трафик идёт через первый отвечающий выход. Переключает сам вход за ~10 секунд; таблица обновляется раз в минуту.": "In order: traffic goes through the first exit that responds. The entry switches by itself in ~10 seconds; the table refreshes once a minute.",
 };

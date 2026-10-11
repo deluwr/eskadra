@@ -149,6 +149,7 @@ export class Vpn {
     const balancers: object[] = [];
     const observed: string[] = [];   // префиксы outbound'ов выходов, за которыми следит Xray (умный «Авто»)
     let observeRtt = 0;
+    let fastObserve = false;   // есть «по порядку» — вход проверяет выходы часто (≈ 8 с на переключение)
 
     for (const ib of ibs) {
       const t = this.template(ib.template_id)!;
@@ -188,10 +189,16 @@ export class Vpn {
             // если все выше порога — первый выход (fallback). Скорость меряет панель и переключает через API (ops.checkExits)
             observed.push(`to-${t.id}-`);
             observeRtt = Math.max(observeRtt, sp.maxRttMs);
+            const order = sp.autoMode === 'order';
+            if (order) fastObserve = true;
             balancers.push({
               tag: `bal-${t.id}`, selector: [`to-${t.id}-`], fallbackTag: `to-${t.id}-${targets[0]!.id}`,
-              // по порядку порогов нет: Xray лишь обходит недоступные выходы, выбор делает панель (ops.checkExits)
-              strategy: { type: 'leastLoad', settings: { expected: 1, ...(sp.autoMode === 'smart' ? { maxRTT: `${sp.maxRttMs}ms` } : {}), tolerance: 0.01 } },
+              // по порядку порядок держит сам вход: вес выхода растёт в 100 раз с каждой позицией, неотвечающий выход
+              // наблюдение исключает за секунды — трафик уходит на следующий и возвращается без участия панели
+              strategy: { type: 'leastLoad', settings: {
+                expected: 1, tolerance: 0.01,
+                ...(order ? { costs: targets.map((x, i) => ({ regexp: false, match: `to-${t.id}-${x.id}`, value: 100 ** i })) } : { maxRTT: `${sp.maxRttMs}ms` }),
+              } },
             });
           } else {
             balancers.push({ tag: `bal-${t.id}`, selector: [`to-${t.id}-`], strategy: { type: 'random' } });
@@ -213,7 +220,10 @@ export class Vpn {
       ...(observed.length ? {
         burstObservatory: {
           subjectSelector: observed,
-          pingConfig: { destination: 'https://www.gstatic.com/generate_204', interval: '1m', sampling: 3, timeout: `${Math.max(5, Math.ceil(observeRtt * 5 / 1000))}s` },
+          // «по порядку»: проверка каждые 5 с (≈ 8 с до переключения, ~5 КБ на выход за проверку); иначе раз в минуту
+          pingConfig: fastObserve
+            ? { destination: 'https://www.gstatic.com/generate_204', interval: '5s', sampling: 2, timeout: '3s' }
+            : { destination: 'https://www.gstatic.com/generate_204', interval: '1m', sampling: 3, timeout: `${Math.max(5, Math.ceil(observeRtt * 5 / 1000))}s` },
         },
       } : {}),
       stats: {},
