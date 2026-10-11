@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api, ApiError, setOtpProvider } from './api';
-import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync } from './ui';
+import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync, Addr } from './ui';
 import { OverviewPage } from './pages/Overview';
 import { ServersPage } from './pages/Servers';
 import { ServerDetailPage } from './pages/ServerDetail';
@@ -30,6 +30,7 @@ export function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [route, setRoute] = useState<Route>(parseHash);
   const [theme, setTheme] = useState<Theme>(readTheme);
+  const [ver, setVer] = useState<Ver | null>(null);
   const [otpAsk, setOtpAsk] = useState<((code: string | null) => void) | null>(null);
   const [confirmAsk, setConfirmAsk] = useState<{ text: string; done: (ok: boolean) => void } | null>(null);
 
@@ -51,6 +52,8 @@ export function App() {
   }, []);
 
   const refreshAuth = useCallback(() => api.get<AuthState>('/api/v1/auth/state').then(setAuth), []);
+  // версия и наличие обновления — при входе в панель
+  useEffect(() => { if (auth?.loggedIn) api.get<Ver>('/api/v1/version').then(setVer).catch(() => undefined); }, [auth?.loggedIn]);
   useEffect(() => {
     void refreshAuth();
     const onHash = () => setRoute(parseHash());
@@ -74,12 +77,12 @@ export function App() {
       <aside className="side">
         <a className="brand" href="#/overview">
           <span className="brand-mark">{Icon.logo()}</span>
-          <span className="brand-text"><span className="brand-name">Эскадра</span><span className="k">управление узлами</span></span>
+          <span className="brand-text"><span className="brand-name">Эскадра</span><span className="k mono">{ver ? ver.version : '…'}</span></span>
         </a>
         {nav.map(([id, label, icon]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{icon}{label}</a>)}
         <div className="side-sep" />
         {nav2.map(([id, label, icon]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{icon}{label}</a>)}
-        <ExecutorFoot />
+        <ExecutorFoot ver={ver} owner={auth.role === 'owner'} />
       </aside>
       <div className="main">
         <header className="topbar">
@@ -124,30 +127,68 @@ export function App() {
   );
 }
 
-function ExecutorFoot() {
+type Ver = { version: string; latest: string | null; updateAvailable: boolean };
+
+function ExecutorFoot({ ver, owner }: { ver: Ver | null; owner: boolean }) {
   const [ips, setIps] = useState<string[] | null>(null);
-  const [ver, setVer] = useState<{ version: string; latest: string | null; updateAvailable: boolean } | null>(null);
-  useEffect(() => {
-    api.get<{ executorIps: string[] }>('/api/v1/settings').then((s) => setIps(s.executorIps)).catch(() => undefined);
-    // наличие обновления проверяется при открытии панели
-    api.get<{ version: string; latest: string | null; updateAvailable: boolean }>('/api/v1/version').then(setVer).catch(() => undefined);
-  }, []);
+  const [open, setOpen] = useState(false);
+  useEffect(() => { api.get<{ executorIps: string[] }>('/api/v1/settings').then((s) => setIps(s.executorIps)).catch(() => undefined); }, []);
   return (
     <div className="side-foot">
       <span className="k">Исполнитель</span>
-      <span className="mono small">{ips?.length ? ips.join(', ') : 'не задан'}</span>
-      {ver && (
-        <span className="flex" style={{ gap: 6, marginTop: 6 }}>
-          <span className="k">Эскадра <span className="mono">{ver.version}</span></span>
-          {ver.updateAvailable && (
-            <span className="flex" style={{ gap: 2 }}>
-              <span className="tag ok">есть {ver.latest}</span>
-              <Info label="Как обновить">Обновление ставится на главном сервере под root: <code>eskadra update</code> (или пункт «Обновить» в меню <code>eskadra</code>). Данные и настройки сохраняются.<br /><CopyButton text="eskadra update" label="Скопировать команду" /></Info>
-            </span>
-          )}
-        </span>
+      <span className="small"><Addr value={ips?.length ? ips.join(', ') : null} empty="не задан" /></span>
+      {ver?.updateAvailable && (
+        <div className="upd">
+          <span className="small">{`Доступна версия ${ver.latest}`}</span>
+          {owner ? <button className="btn sm pri" onClick={() => setOpen(true)}>Обновить</button> : <span className="k">Обновляет владелец</span>}
+        </div>
       )}
+      {open && ver && <UpdateModal ver={ver} onClose={() => setOpen(false)} />}
     </div>
+  );
+}
+
+interface UpdState { helper: boolean; pending: boolean; running: boolean; exit: number | null; log: string[]; at: string | null }
+
+/** Обновление панели: запрос root-помощнику, журнал в реальном времени, перезагрузка страницы на новой версии. */
+function UpdateModal({ ver, onClose }: { ver: Ver; onClose: () => void }) {
+  const [st, setSt] = useState<UpdState | null>(null);
+  const [started, setStarted] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const { busy, error, run } = useAsync();
+  useEffect(() => {
+    if (!started) { void api.get<UpdState>('/api/v1/update/status').then(setSt).catch(() => undefined); return; }
+    const t = setInterval(() => {
+      api.get<UpdState>('/api/v1/update/status').then((x) => { setSt(x); setRestarting(false); }).catch(() => setRestarting(true));
+      // панель перезапустилась на новой версии — перезагружаем страницу
+      api.get<Ver>('/api/v1/version').then((v) => { if (v.version !== ver.version) location.reload(); }).catch(() => undefined);
+    }, 2000);
+    return () => clearInterval(t);
+  }, [started, ver.version]);
+  const failed = st?.exit !== null && st?.exit !== undefined && st.exit !== 0 && started;
+  return (
+    <Modal title={`Обновление до ${ver.latest}`} onClose={onClose}>
+      {!started ? (
+        <>
+          <p className="small">{`Панель скачает и установит ${ver.latest} на главном сервере и перезапустится.`} Данные, настройки и узлы не затрагиваются; пользователи VPN связь не теряют.</p>
+          {st && !st.helper && <div className="alert warn small">Кнопке нужен помощник обновления, его ставит обновление из консоли. Один раз выполните на главном сервере:<br /><code>eskadra update</code><br />Дальше обновлять можно этой кнопкой.<br /><CopyButton text="eskadra update" label="Скопировать команду" /></div>}
+          <ErrorBox error={error} />
+          <div className="flex">
+            <button className="btn pri" disabled={busy || (st !== null && !st.helper)} onClick={() => void run(async () => { await api.post('/api/v1/update', { version: ver.latest ?? 'latest' }); setStarted(true); })}>Обновить сейчас</button>
+            <button className="btn ghost" onClick={onClose}>Отмена</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <span className="flex small" style={{ gap: 8 }}>
+            {failed ? <span style={{ color: 'var(--fail)' }}>Обновление не удалось — журнал ниже. Панель осталась на прежней версии.</span>
+              : <><span className="spin" aria-hidden="true" />{restarting ? 'Панель перезапускается…' : st?.pending ? 'Ждём помощник обновления…' : 'Идёт обновление…'}</>}
+          </span>
+          <pre className="code" style={{ maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{st?.log.join('\n') || '…'}</pre>
+          <div className="flex"><button className="btn ghost" onClick={onClose}>{failed ? 'Закрыть' : 'Свернуть'}</button></div>
+        </>
+      )}
+    </Modal>
   );
 }
 

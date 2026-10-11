@@ -1,6 +1,7 @@
 import { api, ago, fmtBytes, fmtTime, type Server } from '../api';
-import { ErrorBox, Level, StagePip, Tag, roleLabel, usePoll } from '../ui';
+import { ErrorBox, Info, Level, StageHelp, StagePip, Tag, roleLabel, usePoll, Addr } from '../ui';
 import { RouteMap, exitView } from '../RouteMap';
+import { HostStatsPanel } from '../HostStats';
 
 type Health = { rtt_ms: number | null; mbps: number | null; ok: number; error: string | null };
 interface Route { id: string; name: string; entryId: string; autoMode: string; selected: string | null; exits: Array<{ id: string; health: Health | null }> }
@@ -11,7 +12,6 @@ interface Overview {
   trafficBytes: number;
   lastBackup: { created_at: string; status: string; detail: string | null } | null;
   attention: Array<{ level: 'fail' | 'warn' | 'info'; title: string; detail: string; serverId?: string }>;
-  recent: Array<{ id: number; ts: string; actor: string; action: string; target: string | null }>;
   routes: Route[];
 }
 
@@ -77,14 +77,19 @@ export function OverviewPage() {
           </section>
 
           <section className="card">
+            <div className="card-head"><h2>Главный сервер <Info>Хост, где работает панель (он же исполнитель, если панель ходит на узлы отсюда). Обновляется каждые 3 секунды.</Info></h2><span className="k">вживую</span></div>
+            <div style={{ padding: '0 20px 18px' }}><HostStatsPanel url="/api/v1/stats/main" /></div>
+          </section>
+
+          <section className="card">
             <div className="card-head"><h2>Узлы</h2><a href="#/servers">Все серверы</a></div>
             <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
               <table>
-                <thead><tr><th>Узел</th><th>Роль</th><th>Этап</th><th>Защита</th><th>Связь</th></tr></thead>
+                <thead><tr><th>Узел</th><th>Роль</th><th>Этап <Info label="Что значат этапы"><StageHelp /></Info></th><th>Защита</th><th>Связь</th></tr></thead>
                 <tbody>
                   {d.servers.map((s) => (
                     <tr key={s.id} className="clickable" onClick={() => (location.hash = `#/server/${s.id}`)}>
-                      <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k mono">{s.host}</div></td>
+                      <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k"><Addr value={s.host} /></div></td>
                       <td>{roleLabel(s)}</td>
                       <td><StagePip stage={s.stage} /></td>
                       <td><Level value={s.protection_current} /></td>
@@ -97,14 +102,6 @@ export function OverviewPage() {
             </div>
           </section>
 
-          <section className="card">
-            <div className="card-head"><h2>Последние операции</h2><a href="#/audit">Журнал аудита</a></div>
-            <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
-              <table><tbody>
-                {d.recent.map((r) => <tr key={r.id}><td className="mono k nowrap">{fmtTime(r.ts)}</td><td>{r.actor}</td><td className="mono small">{r.action}</td><td className="mono small">{r.target ?? ''}</td></tr>)}
-              </tbody></table>
-            </div>
-          </section>
         </>
       )}
     </>

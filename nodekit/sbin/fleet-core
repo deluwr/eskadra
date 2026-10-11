@@ -207,6 +207,17 @@ cmd_probe() {  # probe <локальный SOCKS-порт выхода> <бай�
   if [[ "$s" =~ ^[0-9.]+$ ]] && [ "${s%%.*}" != "0" ]; then echo "mbps=$(awk -v b="$s" 'BEGIN{printf "%.1f", b*8/1000000}')"; else echo "mbps=fail"; fi
 }
 
+cmd_hoststat() {  # сырые счётчики хоста для живой статистики панели (разбирает и считает скорости панель)
+  echo "@stat"; head -1 /proc/stat
+  echo "@meminfo"; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo
+  echo "@netdev"; tail -n +3 /proc/net/dev
+  echo "@uptime"; cat /proc/uptime
+  echo "@loadavg"; cat /proc/loadavg
+  echo "@nproc"; nproc 2>/dev/null || echo 1
+  echo "@df"; df -PB1 / 2>/dev/null | tail -1
+  echo "@ip"; ip -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}'
+}
+
 cmd_bo() {  # bo <балансировщик> <outbound|clear>: переключить выбор балансировщика Xray на лету (без перезапуска)
   local bin; bin="$(bin_of xray)"
   [ -x "$bin" ] || die "xray not installed"
@@ -400,6 +411,7 @@ case "${1:-}" in
            systemctl enable --now "$(unit_of "$2")" >/dev/null 2>&1 || die "$2 не запустился: $(systemctl status "$(unit_of "$2")" 2>&1 | tail -3)"
            sleep 1; systemctl is-active --quiet "$(unit_of "$2")" || die "$2 не запустился: $(journalctl -u "$(unit_of "$2")" -n 3 --no-pager 2>/dev/null)"; echo started ;;
   x25519)  cmd_x25519 ;;
+  hoststat) cmd_hoststat ;;
   probe)   cmd_probe "${2:?}" "${3:?}" ;;
   bo)      cmd_bo "${2:?}" "${3:?}" ;;
   stats)   cmd_stats ;;

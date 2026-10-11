@@ -223,8 +223,27 @@ PathChanged=$DATA/selfnode/request.json
 [Install]
 WantedBy=multi-user.target
 EOF
+# Помощник обновления: кнопка «Обновить» в панели кладёт запрос, root-юнит запускает eskadra update
+install -d -m 750 -o eskadra -g eskadra "$DATA/update"
+cat > /etc/systemd/system/eskadra-update.service <<EOF
+[Unit]
+Description=Eskadra: update requested from the panel
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/eskadra update-apply
+TimeoutStartSec=1800
+EOF
+cat > /etc/systemd/system/eskadra-update.path <<EOF
+[Unit]
+Description=Eskadra: watch update requests
+[Path]
+PathChanged=$DATA/update/request.json
+[Install]
+WantedBy=multi-user.target
+EOF
 systemctl daemon-reload
 systemctl enable --now eskadra-selfnode.path >/dev/null 2>&1 || warn "не удалось включить eskadra-selfnode.path"
+systemctl enable --now eskadra-update.path >/dev/null 2>&1 || warn "не удалось включить eskadra-update.path"
 
 cli() { runuser -u eskadra -- env $(grep -v '^#' "$ENVF" | xargs) "$PREFIX/node/bin/node" "$PREFIX/app/server/dist/cli.js" "$@"; }
 envget() { grep -E "^$1=" "$ENVF" | tail -1 | cut -d= -f2- || true; }

@@ -20,8 +20,11 @@ import { Backups } from './backup.js';
 import { SubService } from './subsvc.js';
 import { Workers } from './workers.js';
 import { Mgmt } from './mgmt.js';
+import { applyStagedRestore } from './restorelib.js';
 
 fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+// восстановление из бэкапа, подготовленное в панели: подмена данных до открытия базы
+applyStagedRestore(config.dataDir, (m) => console.log(m));
 const db = openDb(config.dataDir);
 const ctx = new Ctx(db, new Sealer(loadOrCreateMasterKey(config.dataDir)));
 

@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { HostStatsPanel } from '../HostStats';
 import { api, ago, fmtTime, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
-import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, Switch, Tag, roleLabel, useAsync, usePoll, ask, toast, LEVEL_LABEL } from '../ui';
+import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, StageHelp, Switch, Tag, roleLabel, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
 
@@ -19,9 +20,9 @@ export function ServerDetailPage({ id }: { id: string }) {
       <div className="page-head">
         <div className="stack" style={{ gap: 6 }}>
           <a href="#/servers" className="k">← Серверы</a>
-          <h1><ServerName id={s.id} name={s.name} onSaved={reload} /> <StagePip stage={s.stage} /></h1>
+          <h1><ServerName id={s.id} name={s.name} onSaved={reload} /> <StagePip stage={s.stage} /><Info label="Что значат этапы"><StageHelp /></Info></h1>
           <span className="k">
-            <span className="mono">{s.host}</span> · {roleLabel(s)} · защита <Level value={s.protection_current} />
+            <Addr value={s.host} /> · {roleLabel(s)} · защита <Level value={s.protection_current} />
             <Info label="Подробности о сервере">
               SSH-порт {s.ssh_port} · группа {s.group_name} · {s.os_info?.pretty ?? 'ОС не определена'}<br />
               Канал: {s.mgmt_mode === 'tunnel' ? `туннель, порт ${s.mgmt.port}` : s.mgmt_mode === 'local' ? 'локально (это главный сервер)' : 'напрямую'}<br />
@@ -389,7 +390,7 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
       <div className="row">
         <div className="row-text"><b>Админские адреса</b><span className="k">Пускаются по SSH на уровне P3. Если адрес неизвестен — «Временно открыть SSH» на вкладке «Аварийный доступ».</span></div>
         <div className="flex">
-          {s.admin_ips.map((a) => <span key={a} className="tag mono">{a} <button className="link" aria-label={`убрать ${a}`} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/admin-ips`, { ip: a, remove: true }); onChange(); })}>×</button></span>)}
+          {s.admin_ips.map((a) => <span key={a} className="tag"><Addr value={a} /> <button className="link" aria-label={`убрать ${a}`} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/admin-ips`, { ip: a, remove: true }); onChange(); })}>×</button></span>)}
           <input className="inp mono" style={{ width: 170 }} value={ip} onChange={(e) => setIp(e.target.value)} placeholder="198.51.100.20" aria-label="Новый админский адрес" />
           <button className="btn" disabled={busy || !ip} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/admin-ips`, { ip }); setIp(''); onChange(); })}>Добавить</button>
         </div>
@@ -602,6 +603,7 @@ function HostTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         </div>
         {st && <pre className="code">{st.output}{'\nfirewall: ' + st.fwState}{'\n\nxray:\n' + st.xray}{'\nsing-box:\n' + st.singbox}</pre>}
       </section>
+      {s.sudo_mode === 'restricted' && <section className="card pad stack"><h2>Нагрузка <span className="k" style={{ fontWeight: 400 }}>вживую</span></h2><HostStatsPanel url={`/api/v1/servers/${s.id}/stats`} pollMs={s.mgmt_mode === 'local' ? 3000 : 5000} /></section>}
       <CoresCard d={d} onChange={onChange} />
       <CertsCard s={s} onChange={onChange} />
       <section className="card pad stack">

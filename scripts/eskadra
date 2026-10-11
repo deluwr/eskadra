@@ -445,6 +445,21 @@ cmd_update() {
   ESKADRA_REPO="$repo" ESKADRA_VERSION="${1:-latest}" bash <(curl -fsSL "https://raw.githubusercontent.com/$repo/main/scripts/install.sh")
 }
 
+# Root-помощник обновления (юнит eskadra-update.path): кнопка «Обновить» в панели кладёт запрос с версией,
+# помощник запускает обычное обновление и пишет журнал, который панель показывает. От панели — только версия.
+cmd_update_apply() {
+  local dir="$DATA/update" req ver code=0
+  req="$dir/request.json"
+  [ -f "$req" ] || return 0
+  ver="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","latest"))' "$req" 2>/dev/null || echo latest)"
+  rm -f "$req"
+  [[ "$ver" =~ ^(latest|v?[0-9]+\.[0-9]+\.[0-9]+)$ ]] || ver=latest
+  : > "$dir/log"; chown eskadra:eskadra "$dir/log"; chmod 640 "$dir/log"
+  echo "start $(date -Is) $ver" >> "$dir/log"
+  ( cmd_update "$ver" ) >> "$dir/log" 2>&1 || code=$?
+  echo "exit=$code" >> "$dir/log"
+}
+
 # ───────────────────────── главный сервер как узел ─────────────────────────
 
 # Root-помощник (юнит eskadra-selfnode.path): панель работает без root и просит доступ к своему же хосту.
@@ -527,11 +542,11 @@ cmd_uninstall() {  # cmd_uninstall [--purge]
     yes_no "  Удалить программу? Данные в $DATA и настройки в $ETC сохранятся." || return 0
   fi
   # по одному юниту: «disable --now a b» падает целиком, если одного юнита нет, и панель оставалась запущенной
-  for unit in eskadra.service eskadra-certbot.timer eskadra-certbot.service eskadra-selfnode.path eskadra-selfnode.service; do
+  for unit in eskadra.service eskadra-certbot.timer eskadra-certbot.service eskadra-selfnode.path eskadra-selfnode.service eskadra-update.path eskadra-update.service; do
     systemctl disable --now "$unit" >/dev/null 2>&1 || systemctl stop "$unit" >/dev/null 2>&1 || true
   done
   pkill -u eskadra >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-certbot.* /etc/systemd/system/eskadra-selfnode.*
+  rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-certbot.* /etc/systemd/system/eskadra-selfnode.* /etc/systemd/system/eskadra-update.*
   systemctl daemon-reload
   if [ "$purge" = --purge ]; then
     legacy_le_drop
@@ -627,6 +642,7 @@ case "${1:-menu}" in
   cert-deploy) cmd_cert_deploy ;;
   cert-migrate) cmd_cert_migrate ;;
   self-node-apply) cmd_self_node_apply ;;
+  update-apply) cmd_update_apply ;;
   conflicts) cmd_conflicts ;;
   reset-password) cmd_reset_password "${2:-}" ;;
   disable-2fa) [ -n "${2:-}" ] || die "eskadra disable-2fa <логин>"; cli disable-2fa "$2" ;;

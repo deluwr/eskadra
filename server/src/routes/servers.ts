@@ -17,6 +17,7 @@ import { Ops, startJob } from '../ops.js';
 import { json } from '../vpn.js';
 import { CHECKLIST, renderPlan } from '../firewall.js';
 import { certProblems } from '../certs.js';
+import { localRaw, parseHostStat } from '../hoststats.js';
 
 const sshUtils = ssh2.utils;
 /** entry — вход (к нему подключаются пользователи, он же пересылает на выходы); exit — выход в интернет. relay/control — старые значения. */
@@ -51,7 +52,7 @@ export function stageOf(r: ServerRow): number {
   return 0;
 }
 
-const createBody = z.object({
+export const createBody = z.object({
   name: z.string().trim().min(1).max(64).regex(/^[\p{L}0-9 ._-]+$/u),
   host: z.string().trim().min(1).max(253).regex(/^[a-zA-Z0-9.:-]+$/),
   sshPort: z.coerce.number().int().min(1).max(65535).default(22),
@@ -82,6 +83,29 @@ const patchBody = z.object({
 
 const RANK: Record<Role, number> = { operator: 1, admin: 2, owner: 3 };
 
+/**
+ * Новый сервер (панель и бот): ключ панели, запись, канал управления. С одноразовым доступом (auth) панель
+ * сразу настраивает узел сама (jobId задачи); без него — ручной сниппет.
+ */
+export function createServer(ctx: Ctx, body: z.infer<typeof createBody>, actor: string): { id: string; jobId: number | null } {
+  const { db } = ctx;
+  // для туннеля адрес исполнителя не обязателен: узел пускает панель по ключу туннеля (§5.8)
+  if (!ctx.executorIps().length && body.mgmtMode === 'direct') throw new HttpError(400, 'Сначала задайте адрес исполнителя в настройках (executor.ips)');
+  if (db.prepare('SELECT 1 FROM servers WHERE host = ? AND ssh_port = ?').get(body.host, body.sshPort))
+    throw new HttpError(409, 'сервер с таким адресом и портом уже есть');
+  db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(body.group);
+  const id = 'srv-' + randomToken(4).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+  const keys = sshUtils.generateKeyPairSync('ed25519', { comment: `fleet-panel/${id}` });
+  // по умолчанию обычная защита; уровень повышается в карточке сервера
+  db.prepare(
+    `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed)
+     VALUES (?, ?, ?, ?, ?, ?, 'P1', 1, ?, ?)`,
+  ).run(id, body.name, body.host, body.sshPort, body.role, body.group, keys.public.trim(), ctx.seal(keys.private));
+  if (body.mgmtMode === 'tunnel') ctx.updateServer(id, { mgmt_mode: 'tunnel', ...credsFields(ctx, newTunnel(ctx.servers().map((x) => x.mgmt_local_port ?? 0))) });
+  audit(db, actor, 'server.create', id, { host: body.host, port: body.sshPort, role: body.role, mgmt: body.mgmtMode, auto: !!body.auth });
+  return { id, jobId: body.auth ? startOnboarding(ctx, id, actor, body.auth) : null };
+}
+
 export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   const { db } = ctx;
   const ops = new Ops(ctx);
@@ -103,25 +127,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.post('/api/v1/servers', { preHandler: guard(ctx, 'admin') }, async (req) => {
     const body = createBody.parse(req.body);
-    const ips = ctx.executorIps();
-    // для туннеля адрес исполнителя не обязателен: узел пускает панель по ключу туннеля (§5.8)
-    if (!ips.length && body.mgmtMode === 'direct') throw new HttpError(400, 'Сначала задайте адрес исполнителя в настройках (executor.ips)');
-    if (db.prepare('SELECT 1 FROM servers WHERE host = ? AND ssh_port = ?').get(body.host, body.sshPort))
-      throw new HttpError(409, 'сервер с таким адресом и портом уже есть');
-    db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(body.group);
-    const id = 'srv-' + randomToken(4).toLowerCase().replace(/[^a-z0-9]/g, 'x');
-    const keys = sshUtils.generateKeyPairSync('ed25519', { comment: `fleet-panel/${id}` });
-    // главный сервер — P1 по умолчанию (защита опциональна), ноды — цель P3 сразу (§7.11.2)
-    const target = 'P1';   // по умолчанию обычная защита; уровень повышается в карточке сервера
-    db.prepare(
-      `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, body.name, body.host, body.sshPort, body.role, body.group, target, 1, keys.public.trim(), ctx.seal(keys.private));
-    if (body.mgmtMode === 'tunnel') ctx.updateServer(id, { mgmt_mode: 'tunnel', ...tunnelFields() });
-    audit(db, who(req), 'server.create', id, { host: body.host, port: body.sshPort, role: body.role, mgmt: body.mgmtMode, auto: !!body.auth });
+    const { id, jobId } = createServer(ctx, body, who(req));
     const r = ctx.server(id);
-    // с одноразовым доступом панель настраивает узел сама; без него — ручной сниппет
-    const jobId = body.auth ? startOnboarding(ctx, id, who(req), body.auth) : null;
     return { server: publicView(ctx, r), jobId, snippet: body.auth ? null : await snippetFor(r) };
   });
 
@@ -248,6 +255,23 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     });
     audit(db, who(req), rebuild ? 'server.host_key_repinned' : 'server.host_key_pinned', r.id, { fingerprint });
     return { ok: true, rebuild };
+  });
+
+  // Живая статистика: главный сервер — локально; узел — счётчики hoststat по SSH (окно раскрыто — опрос раз в несколько секунд)
+  app.get('/api/v1/stats/main', async () => parseHostStat('main', localRaw()));
+
+  app.get<{ Params: { id: string } }>('/api/v1/servers/:id/stats', async (req) => {
+    const r = ctx.server(req.params.id);
+    if (r.mgmt_mode === 'local') return parseHostStat('main', localRaw());   // главный сервер как узел — это этот же хост
+    if (r.sudo_mode !== 'restricted') throw new HttpError(409, 'сервер ещё не настроен');
+    const ops = new Ops(ctx);
+    const raw = await ctx.onNode(r, async (n) => {
+      let res = await n.op(['host-stat']);
+      if (res.code !== 0) { await ops.ensureKit(r, n, () => undefined); res = await n.op(['host-stat']); }   // старый nodekit — обновляем
+      if (res.code !== 0) throw new HttpError(502, (res.stderr || res.stdout).trim() || 'узел не отдал статистику');
+      return res.stdout;
+    });
+    return parseHostStat(r.id, raw);
   });
 
   // TLS-сертификаты узла: проверить сроки или продлить сейчас (узел продлевает и сам, по таймеру)

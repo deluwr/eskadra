@@ -8,6 +8,8 @@ import { effectiveLimits, json, period, Vpn, type Profile } from './vpn.js';
 import { singboxOutbound } from './protocols.js';
 import { pushAllowedIp } from './access.js';
 import { audit } from './lib/audit.js';
+import { renderSubPage, wantsPage } from './subpage.js';
+import { subBase } from './routes/users.js';
 
 /** Порт подписок: случайный при первом запуске, а не известный по умолчанию (§4.3). */
 export function ensureSubPort(ctx: Ctx): number {
@@ -78,6 +80,22 @@ export class SubService {
         `upload=${t?.up ?? 0}; download=${t?.down ?? 0}; total=${lim.trafficGb ? Math.round(lim.trafficGb * 1024 ** 3) : 0}; expire=${lim.expireAt ? Math.floor(Date.parse(lim.expireAt) / 1000) : 0}`);
       reply.header('profile-update-interval', '12');
       reply.header('profile-title', 'base64:' + Buffer.from('Эскадра').toString('base64'));
+      // ссылку открыли в браузере — страница с QR, сроком, лимитами и ссылками; приложения получают подписку как обычно
+      if (!req.query.fmt && wantsPage(req.headers.accept, req.headers['user-agent'])) {
+        const base = subBase(this.ctx);
+        const names = new Set<string>();
+        for (const p of profiles) {
+          names.add(this.ctx.server(p.inbound.server_id).name);
+          if (p.mode === 'via' && p.targetName !== 'auto') names.add(p.targetName);
+        }
+        reply.header('cache-control', 'no-store');
+        return reply.type('text/html; charset=utf-8').send(renderSubPage({
+          lang: getSetting<string>(this.ctx.db, 'ui.lang', 'ru') === 'en' ? 'en' : 'ru',
+          name: u.name, active: u.status === 'active', subUrl: `${base ?? `${tls ? 'https' : 'http'}://${req.headers.host ?? ''}`}/s/${u.sub_token}`,
+          expireAt: lim.expireAt, usedBytes: (t?.up ?? 0) + (t?.down ?? 0), limitGb: lim.trafficGb, devices: lim.devices,
+          nodes: [...names], links: profiles.map((p) => ({ name: p.name, uri: vpn.link(u, p) })),
+        }));
+      }
       const ua = String(req.headers['user-agent'] ?? '').toLowerCase();
       const fmt = req.query.fmt ?? (/sing-box|hiddify|karing/.test(ua) ? 'singbox' : 'base64');
       if (fmt === 'singbox') return reply.type('application/json').send(JSON.stringify(singboxConfig(vpn, u, profiles), null, 2));

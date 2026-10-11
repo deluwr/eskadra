@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { ErrorBox, Info, Switch, useAsync, usePoll, toast } from '../ui';
+import { ErrorBox, Icon, Info, Switch, useAsync, usePoll, toast, Addr } from '../ui';
 
 interface S {
   executorIps: string[];
@@ -28,16 +28,20 @@ export function SettingsPage() {
 function Executor({ s, onSaved }: { s: S; onSaved: () => void }) {
   const [ips, setIps] = useState(s.executorIps.join('\n'));
   const [detected, setDetected] = useState<string | null>(null);
+  const [shown, setShown] = useState(false);
   const { busy, error, run } = useAsync();
   return (
     <section className="card pad stack">
       <h2>Адреса исполнителя (executor.ips)</h2>
       <p className="small muted">С этих адресов панель ходит на узлы по SSH. Они попадают в <code>from=</code> ключа панели и в защищённый набор firewall. Меняйте по схеме «добавить → проверить → убрать старый» (§7.10).</p>
-      <textarea className="inp mono" rows={3} value={ips} onChange={(e) => setIps(e.target.value)} placeholder="по одному IP в строке" />
+      <div className="addr" style={{ alignItems: 'flex-start' }}>
+        <textarea className={`inp mono addr-v ${shown ? '' : 'blur'}`} rows={3} value={ips} onFocus={() => setShown(true)} onChange={(e) => setIps(e.target.value)} placeholder="по одному IP в строке" />
+        <button type="button" className="addr-eye" aria-label={shown ? 'Скрыть адреса' : 'Показать адреса'} aria-pressed={shown} onClick={() => setShown((v) => !v)}>{shown ? Icon.eyeOff : Icon.eye}</button>
+      </div>
       <div className="flex">
         <button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/executor', { ips: ips.split(/[\s,]+/).filter(Boolean) }); toast('Адреса исполнителя сохранены'); onSaved(); })}>Сохранить</button>
         <button className="btn" disabled={busy} onClick={() => void run(async () => setDetected((await api.post<{ ip: string }>('/api/v1/settings/executor/detect')).ip))}>Определить мой внешний IP</button>
-        {detected && <span className="small">Внешний IP: <code>{detected}</code> {!ips.includes(detected) && <button className="link" onClick={() => setIps((v) => (v ? v + '\n' : '') + detected)}>добавить</button>}</span>}
+        {detected && <span className="small">Внешний IP: <Addr value={detected} /> {!ips.includes(detected) && <button className="link" onClick={() => setIps((v) => (v ? v + '\n' : '') + detected)}>добавить</button>}</span>}
       </div>
       <ErrorBox error={error} />
     </section>
@@ -136,13 +140,13 @@ function BackupCard({ s }: { s: S }) {
   return (
     <section className="card pad stack">
       <h2>Бэкапы</h2>
-      <p className="small muted">Копия (база и мастер-ключ) шифруется age на публичные ключи ниже и уходит ботом двум админам-получателям. Приватный ключ age храните офлайн: без него копию не расшифровать. Восстановление: <code>npm run restore -w server -- файл.age ключ.txt</code>.</p>
+      <p className="small muted">Копия (база и мастер-ключ) шифруется age на публичные ключи ниже и уходит ботом двум админам-получателям. Приватный ключ age храните офлайн: без него копию не расшифровать. Восстановление — в разделе «Бэкапы»: загрузите копию и приватный ключ age.</p>
       <label className="fld">Публичные ключи age получателей (age1…, по одному в строке)<textarea className="inp mono" rows={3} value={v.recipients} onChange={(e) => setV({ ...v, recipients: e.target.value })} /></label>
       <div className="flex">
         <label className="fld">Ежедневно в (UTC)<input className="inp mono" style={{ width: 120 }} value={v.time} onChange={(e) => setV({ ...v, time: e.target.value })} /></label>
         <span className="flex small" style={{ marginTop: 22 }}><Switch label="Включено" on={v.enabled} onChange={(x) => setV({ ...v, enabled: x })} />по расписанию</span>
       </div>
-      <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/backup', { recipients: v.recipients.split(/\s+/).filter(Boolean), time: v.time, enabled: v.enabled }); toast('Настройки бэкапов сохранены'); })}>Сохранить</button><a href="#/backups">История бэкапов</a></div>
+      <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/backup', { recipients: v.recipients.split(/\s+/).filter(Boolean), time: v.time, enabled: v.enabled }); toast('Настройки сохранены'); })}>Сохранить</button><a href="#/backups">История бэкапов</a></div>
       <ErrorBox error={error} />
     </section>
   );

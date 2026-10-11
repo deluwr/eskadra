@@ -12,10 +12,14 @@ import { newTotpSecret, otpauthUri, verifyTotp } from '../lib/totp.js';
 import { audit, verifyAuditChain } from '../lib/audit.js';
 import { COOKIE } from './auth.js';
 import { publicView, stageOf } from './servers.js';
-import { Vpn, period } from '../vpn.js';
+import { Vpn, json, period } from '../vpn.js';
 import type { Backups } from '../backup.js';
 import type { Bot } from '../bot.js';
 import { attentionOf } from '../attention.js';
+import { requestUpdate, updateHelperInstalled, updateStatus } from '../update.js';
+import { armRestore, decryptBackup, stageRestore } from '../restorelib.js';
+import { config } from '../config.js';
+import { NOTIFY } from '../botadmin.js';
 import type { SubService } from '../subsvc.js';
 
 async function detectEgressIp(): Promise<string> {
@@ -160,6 +164,17 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     return { ok: true };
   });
 
+  // Какие уведомления присылать мне в Telegram (то же, что /notify в боте)
+  app.get('/api/v1/me/notify', async (req) => ({
+    categories: NOTIFY,
+    off: json<string[]>((db.prepare('SELECT notify_off FROM admins WHERE id = ?').get(req.admin!.id) as { notify_off: string }).notify_off, []),
+  }));
+  app.put('/api/v1/me/notify', async (req) => {
+    const { off } = z.object({ off: z.array(z.enum(Object.keys(NOTIFY) as [string, ...string[]])).max(20) }).parse(req.body);
+    db.prepare('UPDATE admins SET notify_off = ? WHERE id = ?').run(JSON.stringify([...new Set(off)]), req.admin!.id);
+    return { categories: NOTIFY, off };
+  });
+
   app.post('/api/v1/me/2fa/setup', async (req) => {
     const secret = newTotpSecret();
     db.prepare('UPDATE admins SET totp_sealed = ?, totp_enabled = 0 WHERE id = ?').run(ctx.seal(secret), req.admin!.id);
@@ -211,6 +226,19 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     bot: { configured: !!getSetting(db, 'bot.token', '') },
     backup: deps.backups.settings(),
   }));
+
+  // ───── обновление панели из интерфейса (root-помощник eskadra-update.path) ─────
+  app.get('/api/v1/update/status', async () => updateStatus());
+
+  app.post('/api/v1/update', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const { version } = z.object({ version: z.string().regex(/^(latest|v?\d+\.\d+\.\d+)$/).default('latest') }).parse(req.body ?? {});
+    if (!updateHelperInstalled()) throw new HttpError(409, 'помощник обновления не установлен: один раз обновите панель командой eskadra update на главном сервере — дальше кнопка будет работать');
+    const st = updateStatus();
+    if (st.running || st.pending) throw new HttpError(409, 'обновление уже идёт');
+    requestUpdate(version);
+    audit(db, who(req), 'panel.update', undefined, { version });
+    return { ok: true };
+  });
 
   /** Язык панели: интерфейс у каждого свой (в браузере), а имена профилей в подписках — по этой настройке. */
   app.put('/api/v1/settings/lang', { preHandler: guard(ctx, 'admin') }, async (req) => {
@@ -303,6 +331,24 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   // ───── бэкапы ─────
   app.get('/api/v1/backups', async () => db.prepare('SELECT * FROM backups ORDER BY id DESC LIMIT 50').all());
   app.post('/api/v1/backups/run', { preHandler: guard(ctx, 'admin') }, async (req) => deps.backups.run('manual', who(req)));
+
+  // Восстановление из бэкапа в панели: загрузить копию и приватный ключ age → проверить → подтвердить → перезапуск
+  app.post('/api/v1/backups/restore/check', { preHandler: guard(ctx, 'owner', { otp: true }), bodyLimit: 400 * 1024 * 1024 }, async (req) => {
+    const b = z.object({ file: z.string().min(10), identity: z.string().min(20).max(4000) }).parse(req.body);
+    let r;
+    try { r = await decryptBackup(Buffer.from(b.file, 'base64'), b.identity); } catch (e) { throw new HttpError(400, (e as Error).message); }
+    const summary = stageRestore(config.dataDir, r.manifest, r.files);
+    audit(db, who(req), 'backup.restore_check', undefined, { created: summary.created });
+    return summary;
+  });
+
+  app.post('/api/v1/backups/restore/apply', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req, reply) => {
+    try { armRestore(config.dataDir); } catch (e) { throw new HttpError(409, (e as Error).message); }
+    audit(db, who(req), 'backup.restore_apply');
+    await reply.send({ ok: true });
+    // перезапуск: systemd поднимает панель снова (Restart=on-failure), при старте данные подменяются копией
+    setTimeout(() => process.exit(75), 500);
+  });
 
   // ───── аудит ─────
   app.get('/api/v1/audit', async () => ({

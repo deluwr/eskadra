@@ -10,7 +10,7 @@ import { audit } from '../lib/audit.js';
 import { effectiveLimits, json, period, Vpn } from '../vpn.js';
 import { pushAllowedIp, revokeAllowedIp } from '../access.js';
 
-const userBody = z.object({
+export const userBody = z.object({
   name: z.string().trim().min(1).max(48).regex(/^[\p{L}0-9 ._-]+$/u),
   tgId: z.string().regex(/^\d{3,20}$/).nullable().default(null),
   limitGroup: z.string().default('default'),
@@ -30,6 +30,24 @@ export function subBase(ctx: Ctx): string | null {
   const scheme = config.subTls ? 'https' : getSetting<string>(ctx.db, 'sub.scheme', 'http');
   if (!host || !port) return null;
   return `${scheme}://${host.includes(':') ? `[${host}]` : host}:${port}`;
+}
+
+/** Создать (id = null) или изменить пользователя — панель и бот. */
+export function saveUser(ctx: Ctx, id: string | null, b: z.infer<typeof userBody>): string {
+  const { db } = ctx;
+  if (b.nodeIds) for (const n of b.nodeIds) ctx.server(n);
+  if (!db.prepare('SELECT 1 FROM limit_groups WHERE name = ?').get(b.limitGroup)) throw new HttpError(400, 'нет такой группы лимитов');
+  const vals = [b.name, b.tgId, b.limitGroup, b.trafficLimitGb, b.expireAt, b.deviceLimit, b.overAction, JSON.stringify(b.modes),
+    b.nodeIds ? JSON.stringify(b.nodeIds) : null, b.wlMode, b.status];
+  if (id) {
+    db.prepare(`UPDATE users SET name=?, tg_id=?, limit_group=?, traffic_limit_gb=?, expire_at=?, device_limit=?, over_action=?, modes=?, node_ids=?, wl_mode=?, status=?,
+      disabled_reason = CASE WHEN ? = 'active' THEN NULL ELSE disabled_reason END WHERE id=?`).run(...vals, b.status, id);
+    return id;
+  }
+  const nid = 'u-' + randomBytes(4).toString('hex');
+  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, wl_mode, status, id, sub_token, knock_token)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18));
+  return nid;
 }
 
 export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
@@ -60,21 +78,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     };
   };
 
-  const save = (id: string | null, b: z.infer<typeof userBody>) => {
-    if (b.nodeIds) for (const n of b.nodeIds) ctx.server(n);
-    if (!db.prepare('SELECT 1 FROM limit_groups WHERE name = ?').get(b.limitGroup)) throw new HttpError(400, 'нет такой группы лимитов');
-    const vals = [b.name, b.tgId, b.limitGroup, b.trafficLimitGb, b.expireAt, b.deviceLimit, b.overAction, JSON.stringify(b.modes),
-      b.nodeIds ? JSON.stringify(b.nodeIds) : null, b.wlMode, b.status];
-    if (id) {
-      db.prepare(`UPDATE users SET name=?, tg_id=?, limit_group=?, traffic_limit_gb=?, expire_at=?, device_limit=?, over_action=?, modes=?, node_ids=?, wl_mode=?, status=?,
-        disabled_reason = CASE WHEN ? = 'active' THEN NULL ELSE disabled_reason END WHERE id=?`).run(...vals, b.status, id);
-      return id;
-    }
-    const nid = 'u-' + randomBytes(4).toString('hex');
-    db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, wl_mode, status, id, sub_token, knock_token)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18));
-    return nid;
-  };
+  const save = (id: string | null, b: z.infer<typeof userBody>) => saveUser(ctx, id, b);
 
   app.get('/api/v1/users', async () => vpn.users().map(view));
 

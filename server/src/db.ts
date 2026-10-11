@@ -264,6 +264,9 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE servers ADD COLUMN tls_state TEXT;
   `,
+  `
+  ALTER TABLE admins ADD COLUMN notify_off TEXT NOT NULL DEFAULT '[]';
+  `,
 ];
 
 export type Db = DatabaseSync;

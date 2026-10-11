@@ -5,10 +5,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { gunzipSync } from 'node:zlib';
-import { Decrypter } from 'age-encryption';
-import { tarUnpack } from './lib/tar.js';
-import { sha256hex } from './lib/crypto.js';
+import { decryptBackup } from './restorelib.js';
 import { config } from './config.js';
 
 const [file, keyFile, outDir = config.dataDir] = process.argv.slice(2);
@@ -16,22 +13,11 @@ if (!file || !keyFile) {
   console.error('usage: restore <backup.tar.gz.age> <age-identity-file> [data-dir]');
   process.exit(2);
 }
-const identity = fs.readFileSync(keyFile, 'utf8').split('\n').find((l) => l.startsWith('AGE-SECRET-KEY-'))?.trim();
-if (!identity) { console.error('в файле ключа нет AGE-SECRET-KEY-'); process.exit(1); }
-const d = new Decrypter();
-d.addIdentity(identity);
-const files = tarUnpack(gunzipSync(Buffer.from(await d.decrypt(fs.readFileSync(file)))));
-const manifest = JSON.parse(files.find((f) => f.name === 'manifest.json')!.data.toString()) as {
-  created: string; contents: Array<{ file: string; sha256: string }>;
-};
-for (const c of manifest.contents) {
-  const f = files.find((x) => x.name === c.file);
-  if (!f || sha256hex(f.data) !== c.sha256) { console.error(`повреждён файл ${c.file}`); process.exit(1); }
-}
+const { manifest, files } = await decryptBackup(fs.readFileSync(file), fs.readFileSync(keyFile, 'utf8')).catch((e: Error) => { console.error(e.message); process.exit(1); });
 fs.mkdirSync(outDir, { recursive: true });
 for (const name of ['fleet.db', 'master.key']) {
   const dest = path.join(outDir, name);
   if (fs.existsSync(dest)) fs.renameSync(dest, `${dest}.before-restore-${Date.now()}`);
-  fs.writeFileSync(dest, files.find((f) => f.name === name)!.data, { mode: 0o600 });
+  fs.writeFileSync(dest, files.get(name)!, { mode: 0o600 });
 }
 console.log(`восстановлено из копии ${manifest.created} в ${outDir}. Запустите панель; при смене IP см. §7.10.`);

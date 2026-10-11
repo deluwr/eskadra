@@ -49,13 +49,13 @@ export class Workers {
         seen.add(p.key);
         if (notified[p.key]) continue;
         notified[p.key] = new Date().toISOString();
-        void this.bot.notifyAdmins(`${p.level === 'fail' ? '⛔' : '⚠️'} ${p.title}. ${p.detail}`);
+        void this.bot.notifyAdmins(`${p.level === 'fail' ? '⛔' : '⚠️'} ${p.title}. ${p.detail}`, undefined, 'certs');
       }
       const gone = Object.keys(notified).filter((k) => k.startsWith(`${s.id}:`) && !seen.has(k));
       for (const k of gone) delete notified[k];
       // «всё в порядке» — только когда у узла не осталось проблем с сертификатами (иначе предупреждение просто сменилось)
       if (gone.length && ![...seen].some((k) => k.startsWith(`${s.id}:`)))
-        void this.bot.notifyAdmins(`✅ ${s.name}: сертификаты в порядке${gone.some((k) => !/:(renew|timer)$/.test(k)) ? ` (${[...new Set(gone.filter((k) => !/:(renew|timer)$/.test(k)).map((k) => certLabel(k.split(':')[1]!, tplName)))].join(', ')})` : ''}`);
+        void this.bot.notifyAdmins(`✅ ${s.name}: сертификаты в порядке${gone.some((k) => !/:(renew|timer)$/.test(k)) ? ` (${[...new Set(gone.filter((k) => !/:(renew|timer)$/.test(k)).map((k) => certLabel(k.split(':')[1]!, tplName)))].join(', ')})` : ''}`, undefined, 'certs');
     }
     setSetting(this.ctx.db, 'certs.notified', notified);
   }
@@ -72,7 +72,7 @@ export class Workers {
         return v && cmpVersion(v, latest!) < 0;
       });
       if (outdated.length && notified[core] !== latest) {
-        void this.bot.notifyAdmins(`⬆️ Доступен ${core} ${latest}. Устарел на: ${outdated.map((s) => s.name).join(', ')}. Обновить: Конфигурации → Ядра.`);
+        void this.bot.notifyAdmins(`⬆️ Доступен ${core} ${latest}. Устарел на: ${outdated.map((s) => s.name).join(', ')}. Обновить: Конфигурации → Ядра.`, undefined, 'cores');
         notified[core] = latest;
       }
     }
@@ -110,7 +110,10 @@ export class Workers {
       try {
         const r = await this.ctx.onNode(s, (n) => n.op(['ping'], { timeoutMs: 15_000 }));
         if (r.stdout.trim() !== 'pong') throw new Error('no pong');
-        if (s.fail_since) audit(this.ctx.db, 'system', 'server.recovered', s.id, { downMin: Math.round(minutesSince(s.fail_since)) });
+        if (s.fail_since) {
+          audit(this.ctx.db, 'system', 'server.recovered', s.id, { downMin: Math.round(minutesSince(s.fail_since)) });
+          void this.bot.notifyAdmins(`✅ ${s.name} снова на связи (не отвечал ${Math.max(1, Math.round(minutesSince(s.fail_since)))} мин)`, undefined, 'down');
+        }
         this.ctx.updateServer(s.id, { last_seen_at: new Date().toISOString(), fail_since: null });
         // таймер подтверждения firewall истёк без подтверждения → узел сам откатил правила
         if (s.fw_mode === 'pending' && s.fw_pending_until && Date.parse(s.fw_pending_until) < Date.now() - 15_000) {
@@ -121,7 +124,7 @@ export class Workers {
         const since = s.fail_since ?? new Date().toISOString();
         if (!s.fail_since) {
           this.ctx.updateServer(s.id, { fail_since: since });
-          void this.bot.notifyAdmins(`⚠️ ${s.name} не отвечает панели`);
+          void this.bot.notifyAdmins(`⚠️ ${s.name} не отвечает панели`, undefined, 'down');
         }
         if (s.checklist_passed_at && minutesSince(since) > threshold) {
           this.ctx.updateServer(s.id, { checklist_passed_at: null, checklist: '{}' });
@@ -213,10 +216,10 @@ export class Workers {
       if (lim.expireAt && Date.parse(lim.expireAt) < Date.now()) reason = 'истёк срок';
       else if (lim.trafficGb && used > lim.trafficGb * 1024 ** 3) reason = 'исчерпан трафик';
       if (!reason) continue;
-      if (u.over_action === 'notify') { void this.bot.notifyAdmins(`ℹ️ ${u.name}: ${reason}`); continue; }
+      if (u.over_action === 'notify') { void this.bot.notifyAdmins(`ℹ️ ${u.name}: ${reason}`, undefined, 'users'); continue; }
       this.ctx.db.prepare(`UPDATE users SET status = 'disabled', disabled_reason = ? WHERE id = ?`).run(reason, u.id);
       audit(this.ctx.db, 'system', 'user.disabled', u.id, { reason });
-      void this.bot.notifyAdmins(`⛔ ${u.name} отключён: ${reason}`);
+      void this.bot.notifyAdmins(`⛔ ${u.name} отключён: ${reason}`, undefined, 'users');
       changed = true;
     }
     if (changed) this.ops.vpn.markDirty();
@@ -239,7 +242,7 @@ export class Workers {
             : sp.autoMode === 'order' ? `«${t.name}»: ни один выход не отвечает`
             : `«${t.name}»: ни один выход не проходит пороги (задержка ≤ ${sp.maxRttMs} мс, скорость ≥ ${sp.minMbps} Мбит/с) — выбор по наименьшей задержке`;
           this.log.info(msg);
-          void this.bot.notifyAdmins(msg, [[{ text: 'Выходы «Авто»', callback_data: 'ex' }]]);
+          void this.bot.notifyAdmins(msg, [[{ text: 'Выходы «Авто»', callback_data: 'ex' }]], 'auto');
         }
       } catch (e) {
         this.log.warn(`проверка выходов ${t.name}: ${(e as Error).message}`);

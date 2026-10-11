@@ -9,24 +9,20 @@ import { activeBotProxy } from './botproxy.js';
 import { attentionOf } from './attention.js';
 import { audit } from './lib/audit.js';
 import { Ops } from './ops.js';
+import { AdminFlows, cb, esc, helpText, subMessage, type AdminRow, type Button, type Kb, type NotifyCat, type Screen } from './botadmin.js';
+import { json } from './vpn.js';
 
 const PART = 45 * 1024 * 1024;
 const BIND_TTL = 15 * 60_000;
 
-type Button = { text: string; callback_data?: string; url?: string };
-type Kb = Button[][];
-interface Screen { text: string; kb?: Kb }
-interface AdminRow { id: number; username: string; role: 'owner' | 'admin' | 'operator' }
 interface Bind { kind: 'admin' | 'user'; id: string; exp: number; boundTo?: string }
 interface TgUpdate {
   update_id: number;
-  message?: { chat: { id: number; type: string }; from?: { id: number }; text?: string };
+  message?: { message_id: number; chat: { id: number; type: string }; from?: { id: number }; text?: string };
   callback_query?: { id: string; from: { id: number }; data?: string; message?: { message_id: number; chat: { id: number; type: string } } };
 }
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} ГБ`;
-const cb = (text: string, data: string): Button => ({ text, callback_data: data });
 
 /**
  * Telegram-бот (§14): long polling — входящий порт не нужен. Отвечает только в личных чатах и только тем, чей
@@ -40,8 +36,16 @@ export class Bot {
   private me: string | null = null;
   private binds = new Map<string, Bind>();
   onBackupRequest: (() => Promise<string>) | null = null;
+  private readonly flows: AdminFlows;
+  private adminCommandsSet = new Set<string>();
 
-  constructor(private readonly ctx: Ctx, private readonly log: FastifyBaseLogger) {}
+  constructor(private readonly ctx: Ctx, private readonly log: FastifyBaseLogger) {
+    this.flows = new AdminFlows(ctx, {
+      show: (c, sc, m) => this.show(c, sc, m),
+      send: (c, t, kb) => this.send(c, t, kb),
+      drop: (c, m) => this.api('deleteMessage', { chat_id: c, message_id: m }).then(() => undefined, () => undefined),
+    });
+  }
 
   token(): string | null {
     const sealed = getSetting<string>(this.ctx.db, 'bot.token', '');
@@ -103,10 +107,14 @@ export class Bot {
     await this.api('editMessageText', { ...body, message_id: messageId }).catch((e: Error) => { if (!/not modified/.test(e.message)) throw e; });
   }
 
-  async notifyAdmins(text: string, kb?: Kb) {
+  /** Уведомление админам; cat — категория, которую админ может выключить у себя (/notify). Пользователям не шлётся. */
+  async notifyAdmins(text: string, kb?: Kb, cat?: NotifyCat) {
     if (!this.token()) return;
-    const ids = this.ctx.db.prepare(`SELECT tg_id FROM admins WHERE tg_id IS NOT NULL`).all() as Array<{ tg_id: string }>;
-    for (const a of ids) await this.send(a.tg_id, esc(text), kb).catch(() => undefined);
+    const ids = this.ctx.db.prepare(`SELECT tg_id, notify_off FROM admins WHERE tg_id IS NOT NULL`).all() as Array<{ tg_id: string; notify_off: string }>;
+    for (const a of ids) {
+      if (cat && json<string[]>(a.notify_off, []).includes(cat)) continue;
+      await this.send(a.tg_id, esc(text), kb).catch(() => undefined);
+    }
   }
 
   /** Отправить зашифрованный бэкап всем админам-получателям; большие файлы — частями. */
@@ -174,7 +182,8 @@ export class Bot {
   start() {
     if (this.running || !this.token()) return;
     this.running = true;
-    void this.api('setMyCommands', { commands: [{ command: 'menu', description: 'Меню' }] }).catch(() => undefined);
+    // общий список команд — без админских: незнакомец не узнаёт, чем управляет бот
+    void this.api('setMyCommands', { commands: [{ command: 'menu', description: 'Меню' }, { command: 'help', description: 'Справка' }] }).catch(() => undefined);
     void this.loop();
   }
 
@@ -194,7 +203,7 @@ export class Bot {
         for (const u of updates) {
           this.offset = u.update_id + 1;
           const job = u.message?.text && u.message.chat.type === 'private'
-            ? this.onMessage(String(u.message.chat.id), String(u.message.from?.id ?? ''), u.message.text)
+            ? this.onMessage(String(u.message.chat.id), String(u.message.from?.id ?? ''), u.message.text, u.message.message_id)
             : u.callback_query ? this.onCallback(u.callback_query) : null;
           await job?.catch((e) => this.log.warn(`bot: ${(e as Error).message}`));
         }
@@ -212,14 +221,40 @@ export class Bot {
     return { admin, user };
   }
 
-  private async onMessage(chatId: string, fromId: string, text: string) {
+  private async onMessage(chatId: string, fromId: string, text: string, messageId: number) {
     const [head, arg] = text.trim().split(/\s+/);
     const cmd = head!.replace(/@.*$/, '').toLowerCase();
     if (cmd === '/start' && arg) await this.send(chatId, this.bind(arg, fromId));
     const { admin, user } = this.who(fromId);
-    // незнакомцу — только его ID для привязки вручную; ничего о панели
-    if (!admin && !user) return this.send(chatId, `Ваш Telegram ID: <code>${fromId}</code>`);
-    return this.show(chatId, admin ? this.adminMenu() : this.userMenu(user!));
+    // незнакомцу — только его ID для привязки; ничего о панели, серверах и командах
+    if (!admin && !user) return this.send(chatId, `Ваш Telegram ID: <code>${fromId}</code>\nПередайте его тому, кто выдаёт вам доступ.`);
+    if (admin) {
+      void this.adminCommands(chatId);
+      if (await this.flows.onText(chatId, admin, text, messageId)) return;
+      if (cmd === '/help') return this.show(chatId, { text: helpText('admin', admin.role), kb: [[cb('Меню', 'm')]] });
+      if (!user || !['/sub', '/links'].includes(cmd)) return this.show(chatId, this.adminMenu());
+    }
+    if (cmd === '/help') return this.send(chatId, helpText('user'));
+    if (cmd === '/sub') return this.send(chatId, subMessage(this.ctx, user!));
+    if (cmd === '/links') return this.show(chatId, this.linksScreen(user!));
+    return this.show(chatId, this.userMenu(user!));
+  }
+
+  /** Админу — полный список команд в его чате (у остальных видны только /menu и /help). */
+  private async adminCommands(chatId: string) {
+    if (this.adminCommandsSet.has(chatId)) return;
+    this.adminCommandsSet.add(chatId);
+    await this.api('setMyCommands', {
+      scope: { type: 'chat', chat_id: Number(chatId) },
+      commands: [['menu', 'Меню'], ['users', 'Пользователи'], ['adduser', 'Добавить пользователя'], ['servers', 'Серверы'], ['addserver', 'Подключить сервер'], ['notify', 'Уведомления'], ['help', 'Справка'], ['cancel', 'Прервать ввод']]
+        .map(([command, description]) => ({ command, description })),
+    }).catch(() => this.adminCommandsSet.delete(chatId));
+  }
+
+  private linksScreen(u: UserRow): Screen {
+    const ps = new Vpn(this.ctx).profiles(u);
+    if (!ps.length) return { text: 'Профилей пока нет.', kb: [[cb('‹ Меню', 'm')]] };
+    return { text: 'Выберите профиль — пришлю ссылку для импорта:', kb: [...ps.slice(0, 40).map((p, i) => [cb(p.name, `l:${i}`)]), [cb('‹ Меню', 'm')]] };
   }
 
   private async onCallback(q: NonNullable<TgUpdate['callback_query']>) {
@@ -228,17 +263,19 @@ export class Bot {
     const chatId = String(chat.id);
     const mid = q.message!.message_id;
     const { admin, user } = this.who(String(q.from.id));
-    const [act, arg] = q.data.split(':');
+    const [act0, ...args] = q.data.split(':');
+    const act = act0 === 'srv' ? 'sl' : act0!;   // старые кнопки «Серверы»
+    const arg = args[0];
     const toast = (text?: string) => this.api('answerCallbackQuery', { callback_query_id: q.id, ...(text ? { text } : {}) }).catch(() => undefined);
     if (!admin && !user) {
       await toast('Нет доступа');
       return this.show(chatId, { text: 'Доступ к этому чату отозван.' }, mid);
     }
     if (admin) {
+      if (await this.flows.onButton(chatId, mid, admin, act, args, toast)) return;
       const canBackup = admin.role !== 'operator';
       switch (act) {
         case 'm': await toast(); return this.show(chatId, this.adminMenu(), mid);
-        case 'srv': await toast(); return this.show(chatId, this.serversScreen(), mid);
         case 'att': await toast(); return this.show(chatId, this.attentionScreen(), mid);
         case 'ex': await toast(); return this.show(chatId, this.exitsScreen(), mid);
         case 'exc': {
@@ -274,13 +311,7 @@ export class Bot {
         case 'knock':
           await toast();
           return this.show(chatId, { text: base ? `Откройте ссылку с телефона <b>без VPN</b> — так сервер узнает ваш адрес:\n${esc(`${base}/k/${user.knock_token}`)}` : 'Подписки пока не настроены.', kb: [[cb('‹ Меню', 'm')]] }, mid);
-        case 'lk': {
-          await toast();
-          const vpn = new Vpn(this.ctx);
-          const ps = vpn.profiles(user);
-          if (!ps.length) return this.show(chatId, { text: 'Профилей пока нет.', kb: [[cb('‹ Меню', 'm')]] }, mid);
-          return this.show(chatId, { text: 'Выберите профиль — пришлю ссылку для импорта:', kb: [...ps.slice(0, 40).map((p, i) => [cb(p.name, `l:${i}`)]), [cb('‹ Меню', 'm')]] }, mid);
-        }
+        case 'lk': await toast(); return this.show(chatId, this.linksScreen(user), mid);
         case 'l': {
           const vpn = new Vpn(this.ctx);
           const p = vpn.profiles(user)[Number(arg)];
@@ -304,16 +335,12 @@ export class Bot {
     return {
       text: `${head}\n${att.length ? `Требует внимания: <b>${att.length}</b>` : 'Всё в порядке.'}`,
       kb: [
-        [cb('Серверы', 'srv'), cb(att.length ? `Внимание · ${att.length}` : 'Внимание', 'att')],
-        [cb('Выходы «Авто»', 'ex'), cb('Бэкап', 'bk')],
-        [cb('Обновить', 'm')],
+        [cb('Серверы', 'sl'), cb('Пользователи', 'ul:0')],
+        [cb(att.length ? `Внимание · ${att.length}` : 'Внимание', 'att'), cb('Выходы «Авто»', 'ex')],
+        [cb('Бэкап', 'bk'), cb('Уведомления', 'nt')],
+        [cb('Справка', 'h'), cb('Обновить', 'm')],
       ],
     };
-  }
-
-  private serversScreen(): Screen {
-    const lines = this.ctx.servers().map((s) => `${s.fail_since ? '🔴' : s.last_seen_at ? '🟢' : '⚪️'} <b>${esc(s.name)}</b> — ${s.role === 'entry' ? 'вход' : 'выход'}${s.fail_since ? `, нет связи с ${esc(s.fail_since.slice(0, 16).replace('T', ' '))}` : ''}`);
-    return { text: lines.join('\n') || 'Серверов пока нет.', kb: [[cb('‹ Меню', 'm'), cb('Обновить', 'srv')]] };
   }
 
   private attentionScreen(): Screen {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, fmtBytes, fmtTime, type Server, type User } from '../api';
-import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll, ask, Info, QrButton } from '../ui';
+import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll, ask, Info, QrButton, Addr } from '../ui';
 
 interface Form {
   name: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
@@ -170,7 +170,7 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
         <span className="k">{f.wlMode === 'exact' ? 'Для домашних: меньше всего чужих адресов проходит фильтр.' : f.wlMode === 'prefix' ? 'Для мобильных, у которых IP меняется внутри пула оператора.' : 'Самый широкий режим (/16): пропускает и чужие адреса той же сети.'}</span>
         {user?.allowedIps.map((a) => (
           <div key={a.id} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}>
-            <span><span className="mono small">{a.cidr}</span> <span className="k">· {a.source} · до {fmtTime(a.expires_at)}</span></span>
+            <span><span className="small"><Addr value={a.cidr} /></span> <span className="k">· {a.source} · до {fmtTime(a.expires_at)}</span></span>
             <button className="btn ghost sm" disabled={busy} onClick={() => void run(async () => onSaved(await api.del<User>(`/api/v1/users/${user.id}/allowed-ips/${a.id}`)))}>Отозвать</button>
           </div>
         ))}

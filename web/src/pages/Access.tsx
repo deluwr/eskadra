@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, fmtTime } from '../api';
-import { CopyButton, ErrorBox, Switch, Tag, TgBind, toast, useAsync, usePoll, ask } from '../ui';
+import { CopyButton, ErrorBox, Switch, Tag, TgBind, toast, useAsync, usePoll, ask, Addr } from '../ui';
 import type { AuthState } from '../App';
 
 interface Admin { id: number; username: string; role: string; totp_enabled: number; tg_id: string | null; backup_recipient: number; last_login_at: string | null }
@@ -37,6 +37,7 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
     <>
       <div className="page-head"><div><h1>Права и роли</h1><p>Кто управляет эскадрой и что ему разрешено. Права проверяет сервер панели, бот — только клиент</p></div></div>
       <MySecurity auth={auth} onChange={onChange} />
+      <MyNotify />
       <section className="card">
         <div className="card-head"><h2>Администраторы</h2><span className="k">Личный флот: реселлеров нет</span></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
@@ -114,9 +115,33 @@ function MySecurity({ auth, onChange }: { auth: AuthState; onChange: () => void 
       </section>
       <section className="card pad narrow stack">
         <h2>Сессии</h2>
-        {sessions?.map((s) => <div key={s.id} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}><span className="row-text"><span className="small">{s.ip ?? '?'} · с {fmtTime(s.created_at)}</span><span className="k">истекает {fmtTime(s.expires_at)}</span></span>{s.current && <Tag kind="ok">текущая</Tag>}</div>)}
+        {sessions?.map((s) => <div key={s.id} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}><span className="row-text"><span className="small"><Addr value={s.ip} empty="?" /> · с {fmtTime(s.created_at)}</span><span className="k">истекает {fmtTime(s.expires_at)}</span></span>{s.current && <Tag kind="ok">текущая</Tag>}</div>)}
         <div><button className="btn" disabled={busy} onClick={() => void run(async () => { await api.post('/api/v1/me/sessions/revoke-others'); void reload(); })}>Завершить остальные сессии</button></div>
       </section>
     </div>
+  );
+}
+
+/** Какие уведомления присылать мне в Telegram — то же, что команда /notify в боте. */
+function MyNotify() {
+  const { data, setData } = usePoll(() => api.get<{ categories: Record<string, string>; off: string[] }>('/api/v1/me/notify'), null);
+  const { busy, error, run } = useAsync();
+  if (!data) return null;
+  const toggle = (k: string, on: boolean) => run(async () => {
+    const off = on ? data.off.filter((x) => x !== k) : [...data.off, k];
+    setData(await api.put('/api/v1/me/notify', { off }));
+    toast(on ? `«${data.categories[k]}» — включено` : `«${data.categories[k]}» — выключено`);
+  });
+  return (
+    <section className="card pad stack">
+      <h2>Мои уведомления в Telegram</h2>
+      <p className="small muted">Что бот присылает вам. Пользователям VPN такие сообщения не приходят. То же настраивается в боте командой /notify.</p>
+      <div className="grid g3">
+        {Object.entries(data.categories).map(([k, label]) => (
+          <span key={k} className="flex" style={{ justifyContent: 'space-between' }}><span className="small">{label}</span><Switch label={label} on={!data.off.includes(k)} disabled={busy} onChange={(v) => void toggle(k, v)} /></span>
+        ))}
+      </div>
+      <ErrorBox error={error} />
+    </section>
   );
 }

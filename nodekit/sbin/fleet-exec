@@ -56,6 +56,7 @@ case "${1:-}" in
   xray-x25519)   exec /usr/local/sbin/fleet-core x25519 ;;
   xray-stats)    exec /usr/local/sbin/fleet-core stats ;;
   singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;
+  host-stat)     exec /usr/local/sbin/fleet-core hoststat ;;
   exit-probe)    exec /usr/local/sbin/fleet-core probe "${2:?port}" "${3:?bytes}" ;;
   xray-bo)       name_ok "${2:?balancer}"; name_ok "${3:?tag|clear}"; exec /usr/local/sbin/fleet-core bo "$2" "$3" ;;
   tls-issue)     name_ok "${2:?name}"; exec /usr/local/sbin/fleet-core cert-issue "$2" "${3:?ip|domain}" "${4:?value}" ;;
