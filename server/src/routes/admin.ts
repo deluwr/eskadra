@@ -2,6 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { isIP } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { Ops } from '../ops.js';
+import { botProxyOptions, botProxySetting, saveBotProxy } from '../botproxy.js';
 import { versionInfo } from '../version.js';
 import { Ctx, guard, HttpError } from '../ctx.js';
 import { getSetting, setSetting } from '../db.js';
@@ -238,6 +240,28 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     audit(db, who(req), 'settings.general', undefined, b);
     return b;
   });
+
+  // ───── прокси бота: если api.telegram.org с главного сервера недоступен ─────
+  app.get('/api/v1/settings/bot-proxy', async () => ({ ...botProxySetting(ctx), options: botProxyOptions(ctx) }));
+
+  app.put('/api/v1/settings/bot-proxy', { preHandler: guard(ctx, 'admin') }, async (req) => {
+    const b = z.object({ enabled: z.boolean(), serverId: z.string().default(''), templateId: z.string().default('') }).parse(req.body);
+    if (b.enabled && !botProxyOptions(ctx).some((o) => o.serverId === b.serverId && o.templateId === b.templateId))
+      throw new HttpError(400, 'выберите конфигурацию: активную, на протоколе Xray, на сервере флота');
+    const prev = botProxySetting(ctx);
+    const st = saveBotProxy(ctx, b);
+    // служебный клиент бота появляется (или пропадает) в inbound выбранного сервера — переприменяем его сразу
+    const ops = new Ops(ctx);
+    for (const id of new Set([prev.serverId, st.serverId].filter(Boolean))) {
+      const s = ctx.servers().find((x) => x.id === id);
+      if (s && s.sudo_mode === 'restricted') await ctx.onNode(s, (n) => ops.applyServer(ctx.server(s.id), n, () => undefined));
+    }
+    await ctx.mgmt?.ensure().catch(() => undefined);
+    audit(db, who(req), 'bot.proxy', undefined, b);
+    return { ...st, probe: await deps.bot.probe() };
+  });
+
+  app.post('/api/v1/settings/bot-proxy/test', { preHandler: guard(ctx, 'admin') }, async () => deps.bot.probe());
 
   app.put('/api/v1/settings/bot', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
     const { token } = z.object({ token: z.string().regex(/^\d+:[A-Za-z0-9_-]{30,}$/, 'неверный формат токена').nullable() }).parse(req.body);

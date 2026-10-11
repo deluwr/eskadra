@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Ctx, InboundRow, ServerRow, TemplateRow, UserRow } from './ctx.js';
 import { getSetting } from './db.js';
+import { activeBotProxy, botCredKey } from './botproxy.js';
 import { certName, link as protoLink, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
@@ -201,6 +202,10 @@ export class Vpn {
         clients.push(xrayClient(sp, this.cred(u.id, `t:${t.id}`), `${u.id}.d-${t.id}`));
     if (t.entry_id && t.entry_id !== server.id)
       clients.push(xrayClient(sp, this.svcCred(`relay:${t.id}:${t.entry_id}:${server.id}`), `svc.relay-${t.entry_id}-${t.id}`));
+    // Telegram-бот панели ходит через эту конфигурацию (прокси бота, botproxy.ts)
+    const bot = activeBotProxy(this.ctx);
+    if (bot && bot.template.id === t.id && bot.server.id === server.id)
+      clients.push(xrayClient(sp, this.svcCred(botCredKey(t.id, server.id)), 'svc.bot'));
     return clients;
   }
 

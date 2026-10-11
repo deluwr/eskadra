@@ -15,6 +15,7 @@ import zlib from 'node:zlib';
 import { getSetting, setSetting } from './db.js';
 import type { Ctx, ServerRow } from './ctx.js';
 import { releaseFor } from './releases.js';
+import { botProxyClientPart } from './botproxy.js';
 
 /** Сайты для маскировки REALITY: TLS 1.3 + HTTP/2. Проверены с Xray 26.3: с www.microsoft.com рукопожатие REALITY не проходит. */
 export const MGMT_SNIS = ['www.apple.com', 'dl.google.com', 'www.cloudflare.com', 'www.samsung.com'];
@@ -61,15 +62,18 @@ export function nodeConfig(t: TunnelCreds, sshPort: number): object {
 
 export interface TunnelNode { id: string; host: string; sshPort: number; creds: TunnelCreds }
 
-/** Конфиг Xray-клиента на главном сервере: локальный порт узла → VLESS-REALITY к узлу. */
-export function clientConfig(nodes: TunnelNode[]): object {
+export interface ClientExtra { inbound: object; outbound: object; rule: object }
+
+/** Конфиг Xray-клиента на главном сервере: локальный порт узла → VLESS-REALITY к узлу; extra — прокси бота. */
+export function clientConfig(nodes: TunnelNode[], extra?: ClientExtra | null): object {
   return {
     log: { loglevel: 'warning' },
-    inbounds: nodes.map((n) => ({
+    inbounds: [...(extra ? [extra.inbound] : []), ...nodes.map((n) => ({
       tag: `in-${n.id}`, listen: '127.0.0.1', port: n.creds.localPort, protocol: 'dokodemo-door',
       settings: { address: '127.0.0.1', port: n.sshPort, network: 'tcp' },
-    })),
+    }))],
     outbounds: [
+      ...(extra ? [extra.outbound] : []),
       ...nodes.map((n) => ({
         tag: `out-${n.id}`, protocol: 'vless',
         settings: { vnext: [{ address: n.host, port: n.creds.port, users: [{ id: n.creds.uuid, encryption: 'none', flow: 'xtls-rprx-vision' }] }] },
@@ -80,7 +84,7 @@ export function clientConfig(nodes: TunnelNode[]): object {
       })),
       { tag: 'block', protocol: 'blackhole' },
     ],
-    routing: { rules: nodes.map((n) => ({ type: 'field', inboundTag: [`in-${n.id}`], outboundTag: `out-${n.id}` })) },
+    routing: { rules: [...(extra ? [extra.rule] : []), ...nodes.map((n) => ({ type: 'field', inboundTag: [`in-${n.id}`], outboundTag: `out-${n.id}` }))] },
   };
 }
 
@@ -194,11 +198,12 @@ export class Mgmt {
 
   private async ensureNow(): Promise<void> {
     const nodes = this.nodes();
-    if (!nodes.length) { this.stop(); return; }
+    const extra = botProxyClientPart(this.ctx);
+    if (!nodes.length && !extra) { this.stop(); return; }
     try {
       const pin = await this.pin();
       await this.ensureBinary(pin);
-      const cfg = JSON.stringify(clientConfig(nodes), null, 2);
+      const cfg = JSON.stringify(clientConfig(nodes, extra), null, 2);
       const hash = createHash('sha256').update(cfg).digest('hex');
       if (this.child && this.child.exitCode === null && hash === this.runningHash) return;
       this.stop();
@@ -219,7 +224,7 @@ export class Mgmt {
       });
       this.child = child;
       this.runningHash = hash;
-      await waitListen(nodes[0]!.creds.localPort, 5000);
+      await waitListen(nodes[0]?.creds.localPort ?? (extra!.inbound as { port: number }).port, 5000);
       if (child.exitCode !== null) throw new Error(this.lastError ?? 'Xray туннелей не запустился');
       this.lastError = null;
     } catch (e) {

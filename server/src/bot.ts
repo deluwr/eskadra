@@ -3,6 +3,8 @@ import type { Ctx, UserRow } from './ctx.js';
 import { getSetting } from './db.js';
 import { Vpn } from './vpn.js';
 import { subBase } from './routes/users.js';
+import { ProxyAgent, type Dispatcher } from 'undici';
+import { activeBotProxy } from './botproxy.js';
 
 const PART = 45 * 1024 * 1024;
 
@@ -23,10 +25,35 @@ export class Bot {
     return sealed ? this.ctx.open(sealed) : null;
   }
 
+  private agent: { port: number; d: Dispatcher } | null = null;
+
+  /** Через прокси бота (если включён): HTTP-прокси Xray-клиента на 127.0.0.1. */
+  private async dispatcher(): Promise<Dispatcher | undefined> {
+    const p = activeBotProxy(this.ctx);
+    if (!p) return undefined;
+    await this.ctx.mgmt?.ensure();
+    if (this.agent?.port !== p.setting.port) this.agent = { port: p.setting.port, d: new ProxyAgent(`http://127.0.0.1:${p.setting.port}`) };
+    return this.agent.d;
+  }
+
+  /** Проверка доступа к Telegram: напрямую и (если включён) через прокси. */
+  async probe(): Promise<{ direct: string; proxy: string | null }> {
+    const ping = async (d?: Dispatcher) => {
+      try {
+        const r = await fetch('https://api.telegram.org/', { ...(d ? { dispatcher: d } : {}), signal: AbortSignal.timeout(10_000) } as RequestInit);
+        return `доступен (HTTP ${r.status})`;
+      } catch (e) { return `недоступен: ${((e as Error).cause as Error | undefined)?.message ?? (e as Error).message}`; }
+    };
+    const d = await this.dispatcher().catch(() => undefined);
+    return { direct: await ping(), proxy: activeBotProxy(this.ctx) ? (d ? await ping(d) : 'прокси не запустился') : null };
+  }
+
   private async api(method: string, body: Record<string, unknown> | FormData, signal?: AbortSignal) {
     const t = this.token();
     if (!t) throw new Error('токен бота не задан');
+    const dispatcher = await this.dispatcher();
     const res = await fetch(`https://api.telegram.org/bot${t}/${method}`, {
+      ...(dispatcher ? { dispatcher } : {}),
       method: 'POST',
       ...(body instanceof FormData ? { body } : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
       signal: signal ?? AbortSignal.timeout(60_000),

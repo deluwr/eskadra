@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { ErrorBox, Switch, useAsync, usePoll } from '../ui';
+import { ErrorBox, Info, Switch, useAsync, usePoll } from '../ui';
 
 interface S {
   executorIps: string[];
@@ -79,7 +79,55 @@ function BotCard({ s, onSaved }: { s: S; onSaved: () => void }) {
       </div>
       {info && <div className="alert ok">{info}</div>}
       <ErrorBox error={error} />
+      <BotProxy />
     </section>
+  );
+}
+
+interface BotProxyState {
+  enabled: boolean; serverId: string; templateId: string;
+  options: Array<{ serverId: string; serverName: string; templateId: string; templateName: string; protocol: string }>;
+}
+
+/** Прокси бота: если api.telegram.org с главного сервера заблокирован, бот ходит через одну из конфигураций флота. */
+function BotProxy() {
+  const { data, reload } = usePoll(() => api.get<BotProxyState>('/api/v1/settings/bot-proxy'), null);
+  const [probe, setProbe] = useState<{ direct: string; proxy: string | null } | null>(null);
+  const { busy, error, run } = useAsync();
+  if (!data) return null;
+  const sel = data.serverId && data.templateId ? `${data.serverId}|${data.templateId}` : '';
+  const save = (enabled: boolean, value = sel) => run(async () => {
+    const [serverId = '', templateId = ''] = value.split('|');
+    const r = await api.put<{ probe: { direct: string; proxy: string | null } }>('/api/v1/settings/bot-proxy', { enabled, serverId, templateId });
+    setProbe(r.probe);
+    void reload();
+  });
+  return (
+    <div className="stack" style={{ borderTop: '1px solid var(--line)', paddingTop: 14 }}>
+      <div className="flex" style={{ justifyContent: 'space-between' }}>
+        <span><b>Через прокси</b> <Info>Если с главного сервера Telegram недоступен (например, сервер в РФ), бот будет ходить через выбранную конфигурацию на одном из ваших серверов. Панель сама добавит в неё служебный клиент для бота.</Info></span>
+        <Switch label="Бот через прокси" on={data.enabled} disabled={busy || (!data.enabled && !sel && !data.options.length)}
+          onChange={(v) => void save(v, sel || (data.options[0] ? `${data.options[0].serverId}|${data.options[0].templateId}` : ''))} />
+      </div>
+      {data.options.length ? (
+        <label className="fld">Конфигурация для бота
+          <select className="inp" value={sel} disabled={busy} onChange={(e) => void save(data.enabled, e.target.value)}>
+            {!sel && <option value="">выберите…</option>}
+            {data.options.map((o) => <option key={`${o.serverId}|${o.templateId}`} value={`${o.serverId}|${o.templateId}`}>{o.serverName} · {o.templateName} ({o.protocol})</option>)}
+          </select>
+        </label>
+      ) : <span className="k">Нет подходящих конфигураций: нужна выкаченная конфигурация на протоколе Xray (VLESS, VMess, Trojan, Shadowsocks) на сервере флота.</span>}
+      <div className="flex">
+        <button className="btn sm" disabled={busy} onClick={() => void run(async () => setProbe(await api.post('/api/v1/settings/bot-proxy/test')))}>{busy ? 'Проверяю…' : 'Проверить доступ к Telegram'}</button>
+      </div>
+      {probe && (
+        <div className="stack" style={{ gap: 4 }}>
+          <span className="small">Напрямую: {probe.direct}</span>
+          {probe.proxy !== null && <span className="small">Через прокси: {probe.proxy}</span>}
+        </div>
+      )}
+      <ErrorBox error={error} />
+    </div>
   );
 }
 

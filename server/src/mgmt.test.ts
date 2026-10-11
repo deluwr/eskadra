@@ -149,3 +149,24 @@ test('user cores block local and private destinations', () => {
   for (const n of ['127.0.0.0/8', '::1/128', '10.0.0.0/8', '169.254.0.0/16']) assert.ok(x.routing.rules[block].ip.includes(n), n);
   assert.ok(PRIVATE_NETS.includes('127.0.0.0/8'));
 });
+
+test('bot proxy: service client on the chosen inbound, HTTP proxy in the main server client', async () => {
+  const { ctx, db } = fixture();
+  const { saveBotProxy, botProxyClientPart, botProxyOptions } = await import('./botproxy.js');
+  db.prepare(`UPDATE servers SET mgmt_mode = 'direct' WHERE id = 'n1'`).run();
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids, settings) VALUES ('t1', 'tr', 'xray', 'trojan', 8443, '["www.apple.com"]', '["n1"]', '{"security":"reality"}')`).run();
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, private_key_sealed, public_key, short_id) VALUES ('ib1', 't1', 'n1', 'direct', 8443, 'tcp', 'active', ?, 'PUB', 'aa11')`).run(ctx.seal('PRIV'));
+  assert.deepEqual(botProxyOptions(ctx).map((o) => `${o.serverId}/${o.templateId}`), ['n1/t1']);
+  assert.equal(botProxyClientPart(ctx), null, 'выключен — прокси нет');
+  saveBotProxy(ctx, { enabled: true, serverId: 'n1', templateId: 't1' });
+  const part = botProxyClientPart(ctx) as any;
+  assert.equal(part.inbound.protocol, 'http');
+  assert.equal(part.inbound.listen, '127.0.0.1');
+  assert.equal(part.outbound.protocol, 'trojan');
+  assert.equal(part.outbound.settings.servers[0].address, '203.0.113.7');
+  const x = new Vpn(ctx).renderXray(ctx.server('n1')) as any;
+  const bot = x.inbounds.find((i: any) => i.tag === 'in-ib1').settings.clients.find((c: any) => c.email === 'svc.bot');
+  assert.equal(bot.password, part.outbound.settings.servers[0].password, 'секрет бота совпадает на узле и в клиенте');
+  const cfg = clientConfig([], part) as any;
+  assert.deepEqual(cfg.routing.rules[0], { type: 'field', inboundTag: ['bot-in'], outboundTag: 'bot-out' });
+});

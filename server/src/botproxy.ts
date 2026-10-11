@@ -1,0 +1,72 @@
+/**
+ * Прокси для Telegram-бота (§4.5): если с главного сервера api.telegram.org недоступен, бот ходит через одну из
+ * конфигураций флота. Xray-клиент на главном сервере (тот же, что держит туннели управления, mgmt.ts) открывает
+ * HTTP-прокси на 127.0.0.1 и выводит его через выбранный inbound узла под служебным клиентом «svc.bot».
+ */
+import { randomInt } from 'node:crypto';
+import { getSetting, setSetting } from './db.js';
+import type { Ctx, ServerRow, TemplateRow } from './ctx.js';
+import { PROTOCOLS, specOf, xrayOutbound } from './protocols.js';
+import { Vpn } from './vpn.js';
+
+export interface BotProxySetting { enabled: boolean; serverId: string; templateId: string; port: number }
+
+const KEY = 'bot.proxy';
+
+export function botProxySetting(ctx: Ctx): BotProxySetting {
+  return getSetting<BotProxySetting>(ctx.db, KEY, { enabled: false, serverId: '', templateId: '', port: 0 });
+}
+
+export function saveBotProxy(ctx: Ctx, s: Omit<BotProxySetting, 'port'>): BotProxySetting {
+  const cur = botProxySetting(ctx);
+  let port = cur.port;
+  if (!port) do port = randomInt(40000, 50000); while (ctx.servers().some((x) => x.mgmt_local_port === port));
+  const next = { ...s, port };
+  setSetting(ctx.db, KEY, next);
+  return next;
+}
+
+/** Конфигурации, через которые может ходить бот: активные прямые inbounds протоколов Xray на узлах (не на самом главном сервере). */
+export function botProxyOptions(ctx: Ctx) {
+  const vpn = new Vpn(ctx);
+  const out: Array<{ serverId: string; serverName: string; templateId: string; templateName: string; protocol: string }> = [];
+  for (const t of vpn.templates()) {
+    const sp = specOf(t);
+    if (PROTOCOLS[sp.protocol].core !== 'xray') continue;
+    for (const ib of vpn.inbounds(`template_id = ? AND kind = 'direct' AND state = 'active'`, t.id)) {
+      const s = ctx.servers().find((x) => x.id === ib.server_id);
+      if (!s || s.mgmt_mode === 'local') continue;
+      out.push({ serverId: s.id, serverName: s.name, templateId: t.id, templateName: t.name, protocol: PROTOCOLS[sp.protocol].name });
+    }
+  }
+  return out;
+}
+
+/** Выбранная пара «сервер + конфигурация», если прокси включён и она ещё существует. */
+export function activeBotProxy(ctx: Ctx): { setting: BotProxySetting; server: ServerRow; template: TemplateRow } | null {
+  const st = botProxySetting(ctx);
+  if (!st.enabled || !st.port) return null;
+  const server = ctx.servers().find((s) => s.id === st.serverId);
+  const template = new Vpn(ctx).template(st.templateId);
+  if (!server || !template) return null;
+  return { setting: st, server, template };
+}
+
+/** Служебный секрет бота для выбранной конфигурации (клиент добавляется в inbound узла, vpn.directClients). */
+export const botCredKey = (templateId: string, serverId: string) => `bot:${templateId}:${serverId}`;
+
+/** Часть конфига Xray-клиента главного сервера: HTTP-прокси 127.0.0.1:<порт> → inbound узла. */
+export function botProxyClientPart(ctx: Ctx): { inbound: object; outbound: object; rule: object } | null {
+  const a = activeBotProxy(ctx);
+  if (!a) return null;
+  const vpn = new Vpn(ctx);
+  const ib = vpn.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct' AND state = 'active'`, a.template.id, a.server.id)[0];
+  if (!ib) return null;
+  const sp = specOf(a.template);
+  const secret = vpn.svcCred(botCredKey(a.template.id, a.server.id));
+  return {
+    inbound: { tag: 'bot-in', listen: '127.0.0.1', port: a.setting.port, protocol: 'http', settings: {} },
+    outbound: xrayOutbound(sp, ib, 'bot-out', a.server.host, secret, a.server.id),
+    rule: { type: 'field', inboundTag: ['bot-in'], outboundTag: 'bot-out' },
+  };
+}
