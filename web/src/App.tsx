@@ -41,7 +41,7 @@ export function App() {
     document.documentElement.dataset.theme = theme;
     void getComputedStyle(document.body).opacity;   // принудительный перерасчёт стилей
     requestAnimationFrame(() => off.remove());
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0B1019' : '#F3F5F8');
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0D1B26' : '#EEF3F6');
     try { localStorage.setItem('eskadra.theme', theme); } catch { /* приватный режим */ }
   }, [theme]);
 

@@ -1,5 +1,9 @@
 import { api, ago, fmtBytes, fmtTime, type Server } from '../api';
 import { ErrorBox, Level, StagePip, Tag, roleLabel, usePoll } from '../ui';
+import { RouteMap, exitView } from '../RouteMap';
+
+type Health = { rtt_ms: number | null; mbps: number | null; ok: number; error: string | null };
+interface Route { id: string; name: string; entryId: string; autoMode: string; selected: string | null; exits: Array<{ id: string; health: Health | null }> }
 
 interface Overview {
   servers: Server[];
@@ -8,60 +12,90 @@ interface Overview {
   lastBackup: { created_at: string; status: string; detail: string | null } | null;
   attention: Array<{ level: 'fail' | 'warn' | 'info'; title: string; detail: string; serverId?: string }>;
   recent: Array<{ id: number; ts: string; actor: string; action: string; target: string | null }>;
+  routes: Route[];
 }
+
+const MODE: Record<string, string> = { smart: 'по качеству', order: 'по порядку', random: 'случайно' };
 
 export function OverviewPage() {
   const { data: d, error } = usePoll(() => api.get<Overview>('/api/v1/overview'), 30_000);
-  const backupDetail = d?.lastBackup?.detail ? (JSON.parse(d.lastBackup.detail) as { delivered?: number; total?: number }) : null;
+  const byId = new Map(d?.servers.map((s) => [s.id, s]));
+  const inRoutes = new Set(d?.routes.flatMap((r) => [r.entryId, ...r.exits.map((x) => x.id)]));
+  const loose = d?.servers.filter((s) => !inRoutes.has(s.id)) ?? [];
   return (
     <>
-      <div className="page-head">
-        <div><h1>Обзор</h1><p>Состояние эскадры, что требует внимания и последние операции</p></div>
-        <div className="flex"><a className="btn" href="#/users">Новый пользователь</a><a className="btn pri" href="#/servers">Добавить сервер</a></div>
-      </div>
       <ErrorBox error={error} />
       {d && (
         <>
-          <div className="grid g4">
-            <div className="card stat"><span className="k">Узлы</span><b>{d.counts.servers}</b><span className="flex"><Tag kind="ok">{d.counts.online} на связи</Tag>{d.counts.servers - d.counts.online > 0 && <Tag kind="warn">{d.counts.servers - d.counts.online} без связи</Tag>}</span></div>
-            <div className="card stat"><span className="k">Пользователи</span><b>{d.counts.users}</b><span className="k">активны: {d.counts.activeUsers}</span></div>
-            <div className="card stat"><span className="k">Трафик за месяц</span><b>{fmtBytes(d.trafficBytes)}</b><span className="k">по всем узлам (Xray)</span></div>
-            <div className="card stat"><span className="k">Последний бэкап</span><b>{d.lastBackup ? fmtTime(d.lastBackup.created_at).slice(11) || '—' : '—'}</b>
-              <span className="flex">{d.lastBackup ? <Tag kind={d.lastBackup.status === 'ok' ? 'ok' : 'warn'}>{backupDetail?.total ? `доставлен ${backupDetail.delivered} из ${backupDetail.total}` : d.lastBackup.status}</Tag> : <a href="#/settings">настроить</a>}</span></div>
-          </div>
-
-          <div className="split">
-            <section className="card wide">
-              <div className="card-head"><h2>Узлы</h2><a href="#/servers">Все серверы</a></div>
-              <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
-                <table>
-                  <thead><tr><th>Узел</th><th>Роль</th><th>Этап</th><th>Защита</th><th>Связь</th></tr></thead>
-                  <tbody>
-                    {d.servers.map((s) => (
-                      <tr key={s.id} className="clickable" onClick={() => (location.hash = `#/server/${s.id}`)}>
-                        <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k mono">{s.host}</div></td>
-                        <td>{roleLabel(s)}</td>
-                        <td><StagePip stage={s.stage} /></td>
-                        <td><Level value={s.protection_current} /></td>
-                        <td>{s.fail_since ? <Tag kind="fail" dot>нет связи</Tag> : <Tag kind={s.last_seen_at ? 'ok' : undefined} dot>{ago(s.last_seen_at)}</Tag>}</td>
-                      </tr>
-                    ))}
-                    {!d.servers.length && <tr><td colSpan={5} className="empty">Серверов пока нет</td></tr>}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-            <section className="card narrow">
-              <div className="card-head"><h2>Требует внимания <Tag kind={d.attention.length ? 'warn' : 'ok'}>{d.attention.length}</Tag></h2></div>
-              {d.attention.map((a, i) => (
-                <div key={i} className="row" style={{ alignItems: 'flex-start', flexWrap: 'nowrap' }}>
-                  <Tag kind={a.level}>{a.level === 'info' ? 'i' : '!'}</Tag>
-                  <div className="row-text"><span style={{ fontWeight: 500 }}>{a.title}</span><span className="k">{a.detail} {a.serverId && <a href={`#/server/${a.serverId}`}>Открыть</a>}</span></div>
+          <section className="card">
+            <div className="route-head" style={{ padding: '20px 20px 0' }}>
+              <h1>{d.counts.servers ? `Флот в строю: ${d.counts.online} из ${d.counts.servers}` : 'Флот пока пуст'}</h1>
+              <div className="flex"><a className="btn" href="#/users">Новый пользователь</a><a className="btn pri" href="#/servers">Добавить сервер</a></div>
+            </div>
+            <p className="small muted" style={{ padding: '6px 20px 0' }}>
+              {`Пользователей: ${d.counts.users}, активны ${d.counts.activeUsers}`} · {`трафик за месяц ${fmtBytes(d.trafficBytes)}`} · {d.lastBackup ? `последний бэкап ${fmtTime(d.lastBackup.created_at)}` : <a href="#/settings">бэкапы не настроены</a>}
+            </p>
+            <div className="routes">
+              {d.routes.map((r) => {
+                const entry = byId.get(r.entryId);
+                return (
+                  <div key={r.id}>
+                    <div className="route-title"><b>{r.name}</b><span>«Авто» выбирает выход {MODE[r.autoMode] ?? r.autoMode}</span><a href="#/configs" style={{ marginLeft: 'auto' }}>Настроить</a></div>
+                    <RouteMap
+                      entry={<><b>{entry?.name ?? '?'}</b>{entry?.fail_since ? <span className="k" style={{ color: 'var(--fail)' }}>вход · нет связи</span> : <span className="k">{`вход · ${ago(entry?.last_seen_at ?? null)}`}</span>}</>}
+                      exits={r.exits.map((x) => {
+                        const s = byId.get(x.id);
+                        const lead = r.autoMode !== 'random' && (r.selected ? r.selected === x.id : r.exits.find((e) => e.health?.ok)?.id === x.id);
+                        return { id: x.id, name: s?.name ?? x.id, href: `#/server/${x.id}`, ...exitView(x.health, { lead, failSince: s?.fail_since, mode: r.autoMode, ago }) };
+                      })}
+                      ordered={r.autoMode === 'order'}
+                      empty="Выходов пока нет: выкатите конфигурацию на серверы-выходы."
+                    />
+                  </div>
+                );
+              })}
+              {!!loose.length && (
+                <div>
+                  <div className="route-title"><b>{d.routes.length ? 'Без входа' : 'Серверы'}</b><span>пользователи подключаются к ним напрямую</span></div>
+                  <div className="flex">{loose.map((s) => (
+                    <a key={s.id} className={`rm-exit ${s.fail_since ? 'fail' : 'ok'}`} href={`#/server/${s.id}`} style={{ padding: '0 14px', gap: 10, color: 'var(--text)', textDecoration: 'none' }}>
+                      <span className="rm-name">{s.name}</span><span className="rm-note">{s.fail_since ? 'нет связи' : ago(s.last_seen_at)}</span>
+                    </a>
+                  ))}</div>
                 </div>
-              ))}
-              {!d.attention.length && <div className="row k">Всё в порядке</div>}
-            </section>
-          </div>
+              )}
+              {!d.servers.length && <div className="empty">Добавьте первый сервер — здесь появится схема флота.</div>}
+            </div>
+            {!!d.attention.length && (
+              <div className="flex" style={{ padding: '0 20px 18px', gap: 8 }}>
+                {d.attention.map((a, i) => {
+                  const chip = <span className={`tag ${a.level}`} title={a.detail} style={{ fontWeight: 500, padding: '6px 10px' }}>{a.title}</span>;
+                  return a.serverId ? <a key={i} href={`#/server/${a.serverId}`} style={{ textDecoration: 'none' }}>{chip}</a> : <span key={i}>{chip}</span>;
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="card">
+            <div className="card-head"><h2>Узлы</h2><a href="#/servers">Все серверы</a></div>
+            <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
+              <table>
+                <thead><tr><th>Узел</th><th>Роль</th><th>Этап</th><th>Защита</th><th>Связь</th></tr></thead>
+                <tbody>
+                  {d.servers.map((s) => (
+                    <tr key={s.id} className="clickable" onClick={() => (location.hash = `#/server/${s.id}`)}>
+                      <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k mono">{s.host}</div></td>
+                      <td>{roleLabel(s)}</td>
+                      <td><StagePip stage={s.stage} /></td>
+                      <td><Level value={s.protection_current} /></td>
+                      <td>{s.fail_since ? <Tag kind="fail" dot>нет связи</Tag> : <Tag kind={s.last_seen_at ? 'ok' : undefined} dot>{ago(s.last_seen_at)}</Tag>}</td>
+                    </tr>
+                  ))}
+                  {!d.servers.length && <tr><td colSpan={5} className="empty">Серверов пока нет</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </section>
 
           <section className="card">
             <div className="card-head"><h2>Последние операции</h2><a href="#/audit">Журнал аудита</a></div>

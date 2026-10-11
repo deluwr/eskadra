@@ -1,29 +1,32 @@
-@import '@fontsource/ibm-plex-sans/400.css';
-@import '@fontsource/ibm-plex-sans/500.css';
-@import '@fontsource/ibm-plex-sans/600.css';
-@import '@fontsource/ibm-plex-sans/700.css';
+@import '@fontsource/onest/400.css';
+@import '@fontsource/onest/500.css';
+@import '@fontsource/onest/600.css';
+@import '@fontsource/onest/700.css';
 @import '@fontsource/ibm-plex-mono/400.css';
 @import '@fontsource/ibm-plex-mono/500.css';
 
+/* «Схема флота»: ночная морская карта, сигнальный янтарь — трафик, зелёный — в строю */
 :root, :root[data-theme='dark'] {
-  --bg: #0B1019; --side: #0E1520; --surface: #121A26; --surface2: #18222F; --line: #243142;
-  --text: #E7ECF3; --muted: #97A3B6; --accent: #E0AE52; --accent-ink: #1B1306; --accent-bg: rgba(224,174,82,.13);
-  --ok: #3CC48F; --ok-bg: rgba(60,196,143,.13); --warn: #F39A4B; --warn-bg: rgba(243,154,75,.14);
-  --fail: #F26A61; --fail-bg: rgba(242,106,97,.14); --info: #7AB1FF; --info-bg: rgba(122,177,255,.13);
-  --code: #080C13; --code-text: #D5DCE7;
+  --bg: #0D1B26; --side: #0F1F2B; --surface: #12232F; --surface2: #1B2F3D; --line: #21384A;
+  --text: #E4ECF2; --muted: #8FA3B4; --accent: #E8B04B; --accent-ink: #1D1404; --accent-bg: rgba(232,176,75,.13);
+  --ok: #4CC79A; --ok-bg: rgba(76,199,154,.13); --warn: #F39A4B; --warn-bg: rgba(243,154,75,.14);
+  --fail: #F0766B; --fail-bg: rgba(240,118,107,.14); --info: #7AB1FF; --info-bg: rgba(122,177,255,.13);
+  --rm-ok: #4CC79A;
+  --code: #08131B; --code-text: #D5DFE7;
   color-scheme: dark;
 }
 :root[data-theme='light'] {
-  --bg: #F3F5F8; --side: #FFFFFF; --surface: #FFFFFF; --surface2: #EEF1F5; --line: #DCE2EA;
-  --text: #131A25; --muted: #4F5D72; --accent: #8F5D00; --accent-ink: #FFFFFF; --accent-bg: rgba(143,93,0,.10);
-  --ok: #0F7A4D; --ok-bg: rgba(15,122,77,.10); --warn: #A4500A; --warn-bg: rgba(164,80,10,.10);
+  --bg: #EEF3F6; --side: #FFFFFF; --surface: #FFFFFF; --surface2: #E5EDF2; --line: #CCD9E2;
+  --text: #0F2230; --muted: #4A6070; --accent: #8A5800; --accent-ink: #FFFFFF; --accent-bg: rgba(138,88,0,.10);
+  --ok: #0E7A50; --ok-bg: rgba(14,122,80,.10); --warn: #A4500A; --warn-bg: rgba(164,80,10,.10);
   --fail: #B8322A; --fail-bg: rgba(184,50,42,.09); --info: #1F5FC4; --info-bg: rgba(31,95,196,.09);
-  --code: #141B26; --code-text: #E3E8F0;
+  --rm-ok: #0E7A50;
+  --code: #10202C; --code-text: #E3EBF1;
   color-scheme: light;
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 15px; line-height: 1.5; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Onest', system-ui, sans-serif; font-size: 15px; line-height: 1.5; }
 h1, h2, h3, p { margin: 0; }
 h1 { font-size: 26px; font-weight: 600; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 h2 { font-size: 16px; font-weight: 600; }
@@ -226,14 +229,6 @@ details.more > summary:hover { color: var(--text); }
 .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin 800ms linear infinite; display: inline-block; flex: none; }
 @keyframes spin { to { rotate: 360deg; } }
 
-/* порядок выходов «Авто» */
-.order { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; counter-reset: ord; }
-.order li { display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); counter-increment: ord; }
-.order li::before { content: counter(ord); width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 600; background: var(--surface2); color: var(--muted); flex: none; }
-.order li:first-child::before { background: var(--accent-bg); color: var(--accent); }
-.order li b { flex: 1; font-weight: 500; }
-.order .btn.icon { width: 32px; min-height: 32px; }
-
 @media (prefers-reduced-motion: reduce) { .toast, .spin { animation: none; } }
 
 /* узкий экран: меню — строкой сверху, а не во весь экран перед содержимым */
@@ -250,3 +245,46 @@ details.more > summary:hover { color: var(--text); }
   .topbar .who { display: none; }
 }
 .card.pad > .savebar { margin: 4px -20px -18px; }
+
+/* схема маршрута: вход → выходы */
+.rmap { display: grid; grid-template-columns: minmax(150px, 210px) minmax(40px, 1fr) minmax(280px, 420px); align-items: center; }
+.rm-entry { border: 1px solid var(--accent); background: var(--surface2); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rm-entry b { font-size: 15px; font-weight: 600; }
+.rm-entry.none { border-style: dashed; border-color: var(--line); background: transparent; }
+.rm-lines { width: 100%; height: var(--rm-h); overflow: visible; }
+.rm-line { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 5 5; }
+.rm-line.lead { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: none; }
+.rm-line.ok { stroke: var(--rm-ok); }
+.rm-line.fail { stroke: var(--fail); opacity: .45; stroke-dasharray: 2 6; }
+.rm-exits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.rm-exit { height: 48px; display: flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding-right: 4px; min-width: 0; }
+.rm-exit.lead { border-color: var(--accent); background: var(--surface2); }
+.rm-exit.fail { border-color: color-mix(in srgb, var(--fail) 45%, var(--line)); }
+.rm-exit.off { border-style: dashed; background: transparent; }
+.rm-exit.off .rm-name { color: var(--muted); font-weight: 400; }
+.rm-pick { flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 10px; padding: 0 12px; color: var(--text) !important; text-decoration: none !important; cursor: pointer; }
+.rm-pick input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex: none; }
+span.rm-pick { cursor: default; }
+.rm-n { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 600; background: var(--surface2); color: var(--muted); flex: none; }
+.rm-exit.lead .rm-n, .rm-exit:first-child .rm-n { background: var(--accent-bg); color: var(--accent); }
+.rm-name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rm-metric { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--muted); white-space: nowrap; margin-left: auto; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.rm-note { flex: none; }
+.rm-note { font-size: 12px; white-space: nowrap; color: var(--rm-ok); }
+.rm-metric + .rm-note { margin-left: 8px; }
+.rm-name + .rm-note { margin-left: auto; }
+.rm-exit.lead .rm-note { color: var(--accent); } .rm-exit.fail .rm-note { color: var(--fail); } .rm-exit.off .rm-note { color: var(--muted); }
+.rm-ord { display: flex; } .rm-ord .btn.icon { width: 30px; min-height: 30px; }
+.rm-empty { color: var(--muted); font-size: 13px; padding: 14px; border: 1px dashed var(--line); border-radius: 10px; }
+.rmap-wrap { container-type: inline-size; }
+@container (max-width: 760px) { .rmap { grid-template-columns: minmax(140px, 190px) minmax(28px, 1fr) minmax(220px, 300px); } .rm-metric { display: none; } }
+@container (max-width: 500px) {
+  .rmap { grid-template-columns: 1fr; gap: 10px; }
+  .rm-lines { display: none; }
+  .rm-exit { border-left-width: 3px; }
+}
+.route-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.route-head h1 { font-size: 24px; }
+.routes { display: flex; flex-direction: column; gap: 22px; padding: 18px 20px 20px; }
+.route-title { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
+.route-title b { color: var(--text); font-size: 14px; font-weight: 600; }

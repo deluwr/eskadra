@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, ago, type Job, type Server, type Template } from '../api';
-import { CopyBlock, ErrorBox, Icon, Info, Seg, Switch, Tag, toast, useAsync, usePoll, ask } from '../ui';
+import { RouteMap, exitView, type MapExit } from '../RouteMap';
+import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, toast, useAsync, usePoll, ask } from '../ui';
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
 /** Имя конфигурации: строчная латиница, цифры и дефис — регистр и пробелы исправляются сами, кириллица транслитерируется. */
@@ -21,6 +22,7 @@ const PROTO: Record<Protocol, { name: string; hint: string; core: string; sec: S
   hysteria2: { name: 'Hysteria2', hint: 'QUIC (UDP), быстрый на плохих сетях', core: 'sing-box', sec: ['tls'], tr: [], udp: true, relay: false, cert: ['self', 'ip', 'domain', 'custom'], port: '8444' },
   mtproto: { name: 'MTProto (Telegram)', hint: 'прокси только для Telegram, маскировка под HTTPS (fake-TLS)', core: 'telemt', sec: ['none'], tr: [], relay: false, cert: [], port: '443' },
 };
+const STATE_LABEL: Record<string, string> = { active: 'работает', error: 'ошибка', pending: 'выкатывается', deploying: 'выкатывается' };
 const SEC_LABEL: Record<Security, string> = { reality: 'REALITY', tls: 'TLS', none: 'без шифрования' };
 const TR_LABEL: Record<Transport, string> = { tcp: 'TCP', ws: 'WebSocket', grpc: 'gRPC', xhttp: 'XHTTP', httpupgrade: 'HTTPUpgrade' };
 const CERT_LABEL: Record<CertMode, string> = {
@@ -209,6 +211,7 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
   // выходы «Авто»: серверы конфигурации кроме входа — в заданном порядке (новые — в конце)
   const rank = (id: string) => (st.exitOrder.includes(id) ? st.exitOrder.indexOf(id) : st.exitOrder.length);
   const exits = managed.filter((s) => d.nodeIds.includes(s.id) && s.id !== d.entryId).sort((a, b) => rank(a.id) - rank(b.id));
+  const { data: health } = usePoll(() => (current?.entry_id ? api.get<Health>(`/api/v1/templates/${current.id}/health`) : Promise.resolve(null)), 60_000, [current?.id]);
   const move = (i: number, dir: -1 | 1) => {
     const ids = exits.map((s) => s.id);
     [ids[i], ids[i + dir]] = [ids[i + dir]!, ids[i]!];
@@ -242,6 +245,20 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
   const pending = !!current && current.applied_revision < current.revision;
   const toggleNode = (id: string) => setD({ ...d, nodeIds: d.nodeIds.includes(id) ? d.nodeIds.filter((x) => x !== id) : [...d.nodeIds, id] });
   const stateOf = (sid: string, kind: string) => current?.inbounds.find((i) => i.server_id === sid && i.kind === kind);
+  const relayState = d.entryId ? stateOf(d.entryId, 'relay') : undefined;
+  // схема: выбранные серверы (в порядке «Авто»), затем остальные — их можно включить кликом
+  const lead = health?.selected ?? (st.autoMode !== 'random' ? health?.rows.find((r) => r.ok)?.exit_id : undefined);
+  const mapExits: MapExit[] = [
+    ...exits.map((x): MapExit => {
+      const ib = stateOf(x.id, 'direct');
+      const h = health?.rows.find((r) => r.exit_id === x.id);
+      if (ib?.state === 'error') return { id: x.id, name: x.name, state: 'fail', note: 'ошибка выката' };
+      if (!ib || ib.state !== 'active') return { id: x.id, name: x.name, state: 'idle', note: ib ? 'выкатывается' : 'после выката' };
+      if (!d.entryId || x.fail_since) return { id: x.id, name: x.name, state: x.fail_since ? 'fail' : 'ok', note: x.fail_since ? 'нет связи' : 'работает' };
+      return { id: x.id, name: x.name, ...exitView(h, { lead: lead === x.id, mode: st.autoMode }) };
+    }),
+    ...managed.filter((s) => s.id !== d.entryId && !d.nodeIds.includes(s.id)).map((s): MapExit => ({ id: s.id, name: s.name, state: 'off', note: 'не используется' })),
+  ];
   const pickProtocol = (p: Protocol) => setD({ ...d, protocol: p, port: PROTO[p].port, st: defaults(p), entryId: PROTO[p].relay ? d.entryId : '' });
 
   return (
@@ -318,64 +335,51 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
         </label>
       )}
 
-      <div className="stack" style={{ gap: 8 }}>
-        <h3>Серверы</h3>
-        {!managed.length && <span className="k">Нет подключённых серверов.</span>}
-        <div className="flex">
-          {managed.map((s) => {
-            const sti = stateOf(s.id, 'direct');
-            return (
-              <label key={s.id} className="cb tag" style={{ minHeight: 36, padding: '0 12px' }}>
-                <input type="checkbox" checked={d.nodeIds.includes(s.id)} onChange={() => toggleNode(s.id)} />
-                {s.name}{sti && <span className={`tag ${sti.state === 'active' ? 'ok' : sti.state === 'error' ? 'fail' : 'warn'}`} style={{ padding: '0 6px' }}>{sti.state}</span>}
-              </label>
-            );
-          })}
-        </div>
+      <div className="stack" style={{ gap: 12 }}>
+        <h3>Связи <Info>Слева — откуда приходят пользователи: напрямую или через сервер-вход. Справа — серверы этой конфигурации: отметьте нужные. Со входом в подписке появятся профили «вход → сервер» для каждого выхода и «вход → авто».</Info></h3>
+        {!managed.length ? <span className="k">Нет подключённых серверов — добавьте их в разделе «Серверы».</span> : (
+          <RouteMap
+            entry={
+              <>
+                <span className="k">{d.entryId ? 'Вход' : 'Пользователи'}</span>
+                {info.relay ? (
+                  <select className="inp" value={d.entryId} onChange={(e) => setD({ ...d, entryId: e.target.value })} aria-label="Сервер-вход">
+                    <option value="">напрямую</option>
+                    {managed.map((s) => <option key={s.id} value={s.id}>через {s.name}</option>)}
+                  </select>
+                ) : <span className="small">напрямую <Info>{info.name} не пересылается через вход.</Info></span>}
+                {d.entryId && (
+                  <>
+                    <label className="flex small" style={{ gap: 8 }}>порт<input className="inp mono" style={{ width: 90, minHeight: 34 }} inputMode="numeric" value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} aria-label="Порт входа" />{relayState && <Tag kind={relayState.state === 'active' ? 'ok' : relayState.state === 'error' ? 'fail' : 'warn'}>{STATE_LABEL[relayState.state] ?? relayState.state}</Tag>}</label>
+                    <label className="cb small" style={{ minHeight: 28 }}><input type="checkbox" checked={d.nodeIds.includes(d.entryId)} onChange={() => toggleNode(d.entryId)} />и сам принимает напрямую</label>
+                  </>
+                )}
+              </>
+            }
+            entryOff={!d.entryId}
+            exits={mapExits}
+            ordered={!!d.entryId && st.autoMode === 'order'}
+            onToggle={toggleNode}
+            onMove={(id, dir) => move(exits.findIndex((x) => x.id === id), dir)}
+          />
+        )}
         {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}: {i.error}</div>)}
-      </div>
-
-      {info.relay && (
-        <div className="stack" style={{ gap: 8 }}>
-          <h3>Вход <Info>Необязательно. Пользователь подключается к входу, а тот пересылает трафик на выбранный сервер: в подписке появятся профили «вход → de-1» для каждого выхода и «вход → авто».</Info></h3>
-          <div className="flex">
-            <select className="inp" style={{ width: 'auto' }} value={d.entryId} onChange={(e) => setD({ ...d, entryId: e.target.value })} aria-label="Сервер-вход">
-              <option value="">без входа</option>
-              {managed.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-            {d.entryId && <label className="flex small">порт входа<input className="inp mono" style={{ width: 100 }} value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} /></label>}
-            {d.entryId && stateOf(d.entryId, 'relay') && <Tag kind={stateOf(d.entryId, 'relay')!.state === 'active' ? 'ok' : 'warn'}>{stateOf(d.entryId, 'relay')!.state}</Tag>}
+        {d.entryId && info.relay && (
+          <div className="stack" style={{ gap: 8 }}>
+            <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
+            <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ['random', 'случайно']]} />
+            <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}{st.autoMode === 'order' ? ' Порядок — стрелками на схеме.' : ''}</span>
+            {st.autoMode !== 'random' && (
+              <div className="grid g4">
+                <label className="fld">Задержка не больше, мс<input className="inp mono" inputMode="numeric" value={st.maxRttMs} onChange={(e) => setSt({ maxRttMs: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                <label className="fld">Скорость не меньше, Мбит/с<input className="inp mono" inputMode="decimal" value={st.minMbps} onChange={(e) => setSt({ minMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} /></label>
+                <label className="fld">Проверять каждые, мин<input className="inp mono" inputMode="numeric" value={st.checkMin} onChange={(e) => setSt({ checkMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при проверке скорости. 5 МБ раз в 15 минут — около 0,5 ГБ трафика в сутки на выход.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+              </div>
+            )}
           </div>
-          {d.entryId && (
-            <div className="stack" style={{ gap: 8 }}>
-              <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
-              <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ['random', 'случайно']]} />
-              <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}</span>
-              {st.autoMode === 'order' && (
-                exits.length ? (
-                  <ol className="order" aria-label="Порядок выходов">
-                    {exits.map((s, i) => (
-                      <li key={s.id}>
-                        <b>{s.name}</b>{i === 0 && <span className="k">основной</span>}
-                        <button type="button" className="btn ghost icon" disabled={i === 0} onClick={() => move(i, -1)} aria-label={`${s.name} выше`}>{Icon.up}</button>
-                        <button type="button" className="btn ghost icon" disabled={i === exits.length - 1} onClick={() => move(i, 1)} aria-label={`${s.name} ниже`}>{Icon.down}</button>
-                      </li>
-                    ))}
-                  </ol>
-                ) : <span className="k">Отметьте выше серверы-выходы — здесь появится их порядок.</span>
-              )}
-              {st.autoMode !== 'random' && (
-                <div className="grid g4">
-                  <label className="fld">Задержка не больше, мс<input className="inp mono" inputMode="numeric" value={st.maxRttMs} onChange={(e) => setSt({ maxRttMs: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                  <label className="fld">Скорость не меньше, Мбит/с<input className="inp mono" inputMode="decimal" value={st.minMbps} onChange={(e) => setSt({ minMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} /></label>
-                  <label className="fld">Проверять каждые, мин<input className="inp mono" inputMode="numeric" value={st.checkMin} onChange={(e) => setSt({ checkMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                  <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при проверке скорости. 5 МБ раз в 15 минут — около 0,5 ГБ трафика в сутки на выход.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+        )}
+      </div>
 
       {(info.tr.length > 0 || d.protocol === 'hysteria2') && (
         <details className="stack">
