@@ -52,7 +52,8 @@ export function nodeConfig(t: TunnelCreds, sshPort: number): object {
       settings: { clients: [{ id: t.uuid, flow: 'xtls-rprx-vision' }], decryption: 'none' },
       streamSettings: {
         network: 'tcp', security: 'reality',
-        realitySettings: { show: false, target: `${t.sni}:443`, serverNames: [t.sni], privateKey: t.privateKey, shortIds: [t.shortId] },
+        // dest, а не target: target понимают только новые Xray, а версия Xray туннелей закреплена при первом использовании
+        realitySettings: { show: false, dest: `${t.sni}:443`, serverNames: [t.sni], privateKey: t.privateKey, shortIds: [t.shortId] },
       },
     }],
     outbounds: [{ tag: 'ssh', protocol: 'freedom', settings: { redirect: `127.0.0.1:${sshPort}` } }],

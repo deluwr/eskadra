@@ -67,6 +67,8 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 /** Служебный Xray на узле: свой бинарник (проверка SHA-256 из панели), конфиг, юнит, порт в зарезервированных. */
 function tunnelPart(m: SnippetMgmt): string {
   const cfg = JSON.stringify(nodeConfig(m.creds, m.sshPort), null, 2);
+  // запасной вариант для Xray, где адрес маскировки REALITY называется target (dest убран)
+  const cfgAlt = cfg.replace('"dest":', '"target":');
   return `
 # ── служебный туннель управления (VLESS-REALITY, §5.8) ──
 MGMT_PORT=${m.creds.port}
@@ -91,13 +93,25 @@ if ! /usr/local/lib/fleet-mgmt/xray version 2>/dev/null | grep -q "^Xray $XRAY_V
   rm -rf "$tmp"
 fi
 
-cat > /etc/fleet/mgmt/config.json.new <<'MGMT_EOF'
+cat > /etc/fleet/mgmt/config.next.json <<'MGMT_EOF'
 ${cfg}
 MGMT_EOF
-chown root:fleet-mgmt /etc/fleet/mgmt/config.json.new
-chmod 640 /etc/fleet/mgmt/config.json.new
-/usr/local/lib/fleet-mgmt/xray run -test -c /etc/fleet/mgmt/config.json.new >/dev/null || { echo "конфиг туннеля не прошёл проверку Xray" >&2; exit 1; }
-mv /etc/fleet/mgmt/config.json.new /etc/fleet/mgmt/config.json
+cat > /etc/fleet/mgmt/config.alt.json <<'MGMT_EOF'
+${cfgAlt}
+MGMT_EOF
+# проверка конфига этим Xray; если не принял — вариант с target; ни один — точная ошибка Xray в журнал панели
+if ! test_out="$(/usr/local/lib/fleet-mgmt/xray run -test -format json -c /etc/fleet/mgmt/config.next.json 2>&1)"; then
+  if /usr/local/lib/fleet-mgmt/xray run -test -format json -c /etc/fleet/mgmt/config.alt.json >/dev/null 2>&1; then
+    mv /etc/fleet/mgmt/config.alt.json /etc/fleet/mgmt/config.next.json
+  else
+    rm -f /etc/fleet/mgmt/config.alt.json
+    echo "конфиг туннеля не прошёл проверку Xray $XRAY_VER: $(printf '%s' "$test_out" | grep -Ev '^(Xray |A unified)' | tail -n 3 | tr '\\n' ' ')" >&2; exit 1
+  fi
+fi
+rm -f /etc/fleet/mgmt/config.alt.json
+chown root:fleet-mgmt /etc/fleet/mgmt/config.next.json
+chmod 640 /etc/fleet/mgmt/config.next.json
+mv /etc/fleet/mgmt/config.next.json /etc/fleet/mgmt/config.json
 
 cat > /etc/systemd/system/fleet-mgmt.service <<'UNIT_EOF'
 [Unit]
