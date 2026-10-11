@@ -24,6 +24,11 @@ const settingsBody = z.object({
   hy2Obfs: z.string().max(128).optional(),
   mtDomain: z.string().max(253).regex(/^[A-Za-z0-9.-]*$/).optional(),
   sniffing: z.boolean().optional(),
+  autoMode: z.enum(['random', 'smart']).optional(),
+  maxRttMs: z.number().int().min(20).max(2000).optional(),
+  minMbps: z.number().min(0.5).max(10000).optional(),
+  checkMin: z.number().int().min(5).max(1440).optional(),
+  testMB: z.number().int().min(1).max(100).optional(),
 }).default({});
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -131,6 +136,25 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
       if (!keep.has(`${ib.server_id}:${ib.kind}`)) db.prepare(`UPDATE inbounds SET state = 'removed' WHERE id = ?`).run(ib.id);
     audit(db, req.admin!.username, 'template.update', t.id, b);
     return templateView(vpn, vpn.template(t.id)!);
+  });
+
+  /** Состояние выходов «Авто через вход»: последние замеры и выбранный выход. */
+  app.get<{ Params: { id: string } }>('/api/v1/templates/:id/health', async (req) => {
+    const t = vpn.template(req.params.id);
+    if (!t) throw new HttpError(404, 'шаблон не найден');
+    const rows = db.prepare(`SELECT h.exit_id, s.name, h.rtt_ms, h.mbps, h.ok, h.error, h.checked_at FROM exit_health h JOIN servers s ON s.id = h.exit_id WHERE h.template_id = ? ORDER BY s.name`).all(t.id);
+    const ov = getSetting<string | null>(db, `auto.override.${t.id}`, null);
+    return { rows, selected: ov ? ov.slice(`to-${t.id}-`.length) : null, checkedAt: getSetting<string>(db, `auto.checked.${t.id}`, '') || null };
+  });
+
+  app.post<{ Params: { id: string } }>('/api/v1/templates/:id/health/check', { preHandler: guard(ctx, 'operator') }, async (req) => {
+    const t = vpn.template(req.params.id);
+    if (!t) throw new HttpError(404, 'шаблон не найден');
+    const lines: string[] = [];
+    const r = await ops.checkExits(t, (l) => lines.push(l));
+    if (!r) throw new HttpError(409, 'проверка выходов работает для конфигурации со входом и режимом «по качеству»');
+    audit(db, req.admin!.username, 'template.exits_check', t.id, { switched: r.switched });
+    return { ...r, log: lines };
   });
 
   app.get<{ Params: { id: string }; Querystring: { server?: string } }>('/api/v1/templates/:id/preview', async (req) => {

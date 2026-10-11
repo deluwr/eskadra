@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type Job, type Server, type Template } from '../api';
+import { api, ago, type Job, type Server, type Template } from '../api';
 import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, useAsync, usePoll, ask } from '../ui';
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -30,6 +30,7 @@ const CERT_LABEL: Record<CertMode, string> = {
 interface Settings {
   security: Security; transport: Transport; flow: string; path: string; host: string; serviceName: string; xhttpMode: string;
   alpn: string[]; certMode: CertMode; domain: string; domains: Record<string, string>; ssMethod: string; hy2Obfs: string; mtDomain: string; sniffing: boolean;
+  autoMode: 'random' | 'smart'; maxRttMs: number; minMbps: number; checkMin: number; testMB: number;
 }
 
 interface Draft {
@@ -42,6 +43,7 @@ const defaults = (p: Protocol): Settings => ({
   security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
+  autoMode: 'smart', maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5,
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -97,6 +99,7 @@ export function ConfigsPage() {
           {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current}
             onSaved={(t) => { void reload(); setDraft(toDraft(t)); }} onRollout={(id) => setJobId(id)} onDeleted={() => { setDraft(null); void reload(); }} />}
           {jobId && <JobLog id={jobId} onDone={() => void reload()} />}
+          {current?.entry_id && current.spec.autoMode === 'smart' && <ExitHealth t={current} />}
           {current && <Preview t={current} servers={servers ?? []} />}
         </div>
       </div>
@@ -203,6 +206,7 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
+      autoMode: st.autoMode, maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5,
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -323,6 +327,20 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
             {d.entryId && <label className="flex small">порт входа<input className="inp mono" style={{ width: 100 }} value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} /></label>}
             {d.entryId && stateOf(d.entryId, 'relay') && <Tag kind={stateOf(d.entryId, 'relay')!.state === 'active' ? 'ok' : 'warn'}>{stateOf(d.entryId, 'relay')!.state}</Tag>}
           </div>
+          {d.entryId && (
+            <div className="stack" style={{ gap: 8 }}>
+              <span className="k">Профиль «вход → авто» выбирает выход <Info>Случайно — на каждое соединение любой выход. По качеству — вход раз в минуту проверяет задержку выходов и не ведёт трафик через выходы медленнее порога; панель по расписанию меряет скорость скачивания через каждый выход и переключает вход, если текущий выход медленнее порога по задержке или скорости. Переключение — без разрыва соединений.</Info></span>
+              <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['random', 'случайно']]} />
+              {st.autoMode === 'smart' && (
+                <div className="grid g4">
+                  <label className="fld">Задержка не больше, мс<input className="inp mono" inputMode="numeric" value={st.maxRttMs} onChange={(e) => setSt({ maxRttMs: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                  <label className="fld">Скорость не меньше, Мбит/с<input className="inp mono" inputMode="decimal" value={st.minMbps} onChange={(e) => setSt({ minMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} /></label>
+                  <label className="fld">Проверять каждые, мин<input className="inp mono" inputMode="numeric" value={st.checkMin} onChange={(e) => setSt({ checkMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                  <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при проверке скорости. 5 МБ раз в 15 минут — около 0,5 ГБ трафика в сутки на выход.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -391,6 +409,44 @@ function JobLog({ id, onDone }: { id: number; onDone: () => void }) {
     <section className="card pad stack">
       <div className="flex" style={{ justifyContent: 'space-between' }}><h2>Выкат #{id}</h2>{data && <Tag kind={data.status === 'ok' ? 'ok' : data.status === 'failed' ? 'fail' : 'warn'}>{data.status === 'running' ? 'идёт…' : data.status}</Tag>}</div>
       <pre className="code">{data?.log || 'запуск…'}</pre>
+    </section>
+  );
+}
+
+interface Health { rows: Array<{ exit_id: string; name: string; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; checkedAt: string | null }
+
+/** Выходы «Авто через вход»: последние замеры, какой выбран; ручная проверка. */
+function ExitHealth({ t }: { t: Template }) {
+  const { data, reload } = usePoll(() => api.get<Health>(`/api/v1/templates/${t.id}/health`), 60_000, [t.id]);
+  const { busy, error, run } = useAsync();
+  const sp = t.spec as { maxRttMs?: number; minMbps?: number };
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Выходы «Авто» <Info>{`Пороги: задержка не больше ${sp.maxRttMs ?? 100} мс, скорость не меньше ${sp.minMbps ?? 10} Мбит/с. Выбранный выход меняется, только когда текущий перестаёт проходить пороги.`}</Info></h2>
+        <span className="flex">
+          {data?.checkedAt && <span className="k">проверено {ago(data.checkedAt)}</span>}
+          <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/templates/${t.id}/health/check`); await reload(); })}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>
+        </span>
+      </div>
+      <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
+        <table>
+          <thead><tr><th>Выход</th><th>Задержка</th><th>Скорость</th><th>Состояние</th></tr></thead>
+          <tbody>
+            {data?.rows.map((r) => (
+              <tr key={r.exit_id}>
+                <td><b>{r.name}</b>{data.selected === r.exit_id && <> <Tag kind="acc">выбран</Tag></>}</td>
+                <td className="mono">{r.rtt_ms !== null ? `${r.rtt_ms} мс` : '—'}</td>
+                <td className="mono">{r.mbps !== null ? `${r.mbps} Мбит/с` : '—'}</td>
+                <td>{r.ok ? <Tag kind="ok">проходит</Tag> : <Tag kind={r.error ? 'fail' : 'warn'}>{r.error ?? 'ниже порога'}</Tag>}</td>
+              </tr>
+            ))}
+            {data && !data.rows.length && <tr><td colSpan={4} className="empty">Проверок ещё не было — нажмите «Проверить сейчас» или подождите расписания.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {!data?.selected && !!data?.rows.length && <div className="k" style={{ padding: '10px 20px' }}>Выход не закреплён: Xray выбирает по наименьшей задержке.</div>}
+      <div style={{ padding: '0 20px' }}><ErrorBox error={error} /></div>
     </section>
   );
 }

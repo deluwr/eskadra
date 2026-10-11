@@ -67,7 +67,7 @@ test('xray render: direct inbound + relay routing by user', () => {
   const out = en.outbounds.find((o: any) => o.tag === 'to-t1-de');
   assert.equal(out.streamSettings.realitySettings.publicKey, 'PUBDE');
   assert.equal(out.settings.vnext[0].users[0].id, deIn.settings.clients[0].id, 'служебный UUID совпадает на входе и выходе');
-  const rule = en.routing.rules.find((r: any) => r.outboundTag === 'to-t1-de');
+  const rule = en.routing.rules.find((r: any) => r.outboundTag === 'to-t1-de' && r.user);
   assert.deepEqual(rule.user, ['u-00000001.v-de']);
   assert.ok(en.routing.balancers[0].selector[0] === 'to-t1-');
 });
@@ -176,4 +176,24 @@ test('preflight accepts other distros with systemd, rejects without', async () =
   const s = summarize(mk('ID=fedora\nPRETTY_NAME="Fedora 41"', '### firewalld\nrunning\n'), []);
   assert.equal(s.ufwActive, true, 'firewalld считается firewall хоста, как ufw');
   assert.match(s.checks.find((c) => c.id === 'ufw')!.detail, /firewalld/);
+});
+
+test('smart auto via entry: leastLoad with RTT threshold, observatory, probe SOCKS per exit', () => {
+  const { ctx, db } = fixture();
+  db.prepare(`UPDATE templates SET settings = ? WHERE id = 't1'`).run(JSON.stringify({ security: 'reality', autoMode: 'smart', maxRttMs: 100, minMbps: 10 }));
+  const en = new Vpn(ctx).renderXray(ctx.server('entry')) as any;
+  const bal = en.routing.balancers.find((b: any) => b.tag === 'bal-t1');
+  assert.equal(bal.strategy.type, 'leastLoad');
+  assert.equal(bal.strategy.settings.maxRTT, '100ms');
+  assert.equal(bal.fallbackTag, 'to-t1-de');
+  assert.deepEqual(en.burstObservatory.subjectSelector, ['to-t1-']);
+  assert.ok(en.api.services.includes('RoutingService'), 'переключение выхода через API без перезапуска');
+  const probe = en.inbounds.find((i: any) => i.tag === 'probe-t1-de');
+  assert.equal(probe.listen, '127.0.0.1');
+  assert.ok(en.routing.rules.some((r: any) => r.inboundTag?.[0] === 'probe-t1-de' && r.outboundTag === 'to-t1-de'));
+  fs.writeFileSync(path.join(os.tmpdir(), 'esk-smart-entry.json'), JSON.stringify(en));
+  db.prepare(`UPDATE templates SET settings = ? WHERE id = 't1'`).run(JSON.stringify({ security: 'reality', autoMode: 'random' }));
+  const rnd = new Vpn(ctx).renderXray(ctx.server('entry')) as any;
+  assert.equal(rnd.routing.balancers[0].strategy.type, 'random');
+  assert.equal(rnd.burstObservatory, undefined);
 });

@@ -191,6 +191,29 @@ cmd_status() {
   echo "listen:"; ss -ltnupH 2>/dev/null | grep -E "eskadra|\"(xray|sing-box|telemt)\"" | awk '{print $1" "$5}' || true
 }
 
+cmd_probe() {  # probe <локальный SOCKS-порт выхода> <байт>: задержка (мс) и скорость скачивания (Мбит/с) через этот выход
+  local port="$1" bytes="$2" t s
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] && [[ "$bytes" =~ ^[0-9]{1,9}$ ]] || die "usage: probe <port> <bytes>"
+  # задержка — как у наблюдения Xray: HTTPS-запрос к generate_204 через выход (лучший из трёх)
+  local best=""
+  for _ in 1 2 3; do
+    t="$(curl -s -o /dev/null -w '%{time_total}' --max-time 10 --socks5-hostname "127.0.0.1:$port" https://www.gstatic.com/generate_204 || true)"
+    [[ "$t" =~ ^[0-9.]+$ ]] && [ "$t" != "0.000000" ] || continue
+    if [ -z "$best" ] || awk -v a="$t" -v b="$best" 'BEGIN{exit !(a<b)}'; then best="$t"; fi
+  done
+  [ -n "$best" ] && echo "rtt_ms=$(awk -v t="$best" 'BEGIN{printf "%d", t*1000}')" || echo "rtt_ms=fail"
+  s="$(curl -s -o /dev/null -w '%{speed_download}' --max-time 40 --socks5-hostname "127.0.0.1:$port" "https://speed.cloudflare.com/__down?bytes=$bytes" || true)"
+  if [[ "$s" =~ ^[0-9.]+$ ]] && [ "${s%%.*}" != "0" ]; then echo "mbps=$(awk -v b="$s" 'BEGIN{printf "%.1f", b*8/1000000}')"; else echo "mbps=fail"; fi
+}
+
+cmd_bo() {  # bo <балансировщик> <outbound|clear>: переключить выбор балансировщика Xray на лету (без перезапуска)
+  local bin; bin="$(bin_of xray)"
+  [ -x "$bin" ] || die "xray not installed"
+  if [ "$2" = clear ]; then "$bin" api bo --server=127.0.0.1:10085 -b "$1" -r
+  else "$bin" api bo --server=127.0.0.1:10085 -b "$1" "$2"; fi
+  echo "balancer $1 -> $2"
+}
+
 cmd_x25519() {  # выводит private=… public=… (формат Xray менялся: Public key / Password)
   local out; out="$("$BIN/eskadra-xray" x25519)"
   local priv pub
@@ -346,6 +369,8 @@ case "${1:-}" in
   status)  cmd_status "${2:?}" ;;
   stop)    systemctl disable --now "$(unit_of "${2:?}")" 2>/dev/null || true; echo stopped ;;
   x25519)  cmd_x25519 ;;
+  probe)   cmd_probe "${2:?}" "${3:?}" ;;
+  bo)      cmd_bo "${2:?}" "${3:?}" ;;
   stats)   cmd_stats ;;
   tls)     cmd_tls "${2:?}" ;;
   cert-issue)  cmd_cert_issue "${2:?}" "${3:?}" "${4:?}" ;;

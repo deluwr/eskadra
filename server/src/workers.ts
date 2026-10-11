@@ -25,6 +25,7 @@ export class Workers {
     this.every('peers', 10 * 60_000, () => this.peerChecks());
     this.every('stats', 5 * 60_000, () => this.stats());
     this.every('sync', 20_000, () => this.syncDirty());
+    this.every('exits', 60_000, () => this.exitChecks());
     this.every('cleanup', 10 * 60_000, async () => {
       this.ctx.db.prepare('DELETE FROM allowed_ips WHERE expires_at < ?').run(new Date().toISOString());
     });
@@ -192,6 +193,28 @@ export class Workers {
       changed = true;
     }
     if (changed) this.ops.vpn.markDirty();
+  }
+
+  /** «Авто через вход» по качеству: проверка выходов по расписанию каждой конфигурации, уведомление о переключении. */
+  async exitChecks() {
+    for (const t of this.ops.vpn.templates()) {
+      const sp = this.ops.vpn.spec(t);
+      if (sp.autoMode !== 'smart' || !t.entry_id) continue;
+      const last = getSetting<string>(this.ctx.db, `auto.checked.${t.id}`, '');
+      if (last && Date.now() - Date.parse(last) < sp.checkMin * 60_000) continue;
+      try {
+        const r = await this.ops.checkExits(t, () => undefined);
+        if (r?.switched) {
+          const msg = r.switched.to
+            ? `«${t.name}»: «Авто» переключён ${r.switched.from ? `с ${r.switched.from} ` : ''}на ${r.switched.to}`
+            : `«${t.name}»: ни один выход не проходит пороги (задержка ≤ ${sp.maxRttMs} мс, скорость ≥ ${sp.minMbps} Мбит/с) — выбор по наименьшей задержке`;
+          this.log.info(msg);
+          void this.bot.notifyAdmins(msg);
+        }
+      } catch (e) {
+        this.log.warn(`проверка выходов ${t.name}: ${(e as Error).message}`);
+      }
+    }
   }
 
   /** Переприменение конфигов узлов, где поменялись пользователи или шаблоны. */

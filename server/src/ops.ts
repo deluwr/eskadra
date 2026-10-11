@@ -1,10 +1,12 @@
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { coreMode, foreignCore, panelPorts, type Ctx, type InboundRow, type NodeSession, type ServerRow, type TemplateRow } from './ctx.js';
-import { getSetting } from './db.js';
+import { getSetting, setSetting } from './db.js';
 import { json, Vpn } from './vpn.js';
 import { releaseFor, type Core } from './releases.js';
-import { certName, PROTOCOLS, protoOf } from './protocols.js';
+import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
+
+export interface ExitHealth { exitId: string; name: string; rttMs: number | null; mbps: number | null; ok: boolean; error: string | null }
 
 const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
 import { buildKitBundle, kitVersion } from './nodekit.js';
@@ -271,6 +273,54 @@ export class Ops {
       log(`${core}: ${out.trim()}`);
     }
     this.ctx.updateServer(s.id, { config_dirty: 0 });
+    // перезапуск Xray сбрасывает переключение балансировщика — возвращаем выбранные выходы «Авто» входа
+    if (!xuiMode) for (const t of this.vpn.templates().filter((x) => x.entry_id === s.id)) {
+      const ov = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
+      if (ov && this.vpn.spec(t).autoMode === 'smart') await n.op(['xray-bo', `bal-${t.id}`, ov]).catch(() => undefined);
+    }
+  }
+
+  /**
+   * «Авто через вход» по качеству: с входного узла через каждый выход меряются задержка и скорость скачивания.
+   * Если текущий выход не проходит пороги (задержка > maxRttMs или скорость < minMbps), вход переключается на лучший
+   * подходящий выход (без перезапуска Xray). Если подходящих нет — переключение снимается и выбор остаётся за Xray
+   * (наименьшая задержка). Возвращает результаты и смену выхода (для уведомления).
+   */
+  async checkExits(t: TemplateRow, log: (l: string) => void): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null } | null } | null> {
+    const sp = this.vpn.spec(t);
+    if (sp.autoMode !== 'smart' || !t.entry_id) return null;
+    const entry = this.ctx.server(t.entry_id);
+    if (entry.sudo_mode !== 'restricted' || coreMode(entry) === 'xui') return null;
+    const targets = this.vpn.relayTargets(t);
+    if (!targets.length) return null;
+    const results: ExitHealth[] = [];
+    const prev = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
+    let next: string | null = prev;
+    await this.ctx.onNode(entry, async (n) => {
+      for (const x of targets) {
+        const r = await n.op(['exit-probe', probePort(t.id, x.id), sp.testMB * 1_000_000], { timeoutMs: 120_000 });
+        const rtt = Number(r.stdout.match(/^rtt_ms=(\d+)/m)?.[1] ?? NaN);
+        const mbps = Number(r.stdout.match(/^mbps=([\d.]+)/m)?.[1] ?? NaN);
+        const err = r.code !== 0 ? (r.stderr || r.stdout).trim().slice(0, 200) : Number.isNaN(rtt) ? 'выход не отвечает' : Number.isNaN(mbps) ? 'скачивание не удалось' : null;
+        const ok = !err && rtt <= sp.maxRttMs && mbps >= sp.minMbps;
+        results.push({ exitId: x.id, name: x.name, rttMs: Number.isNaN(rtt) ? null : rtt, mbps: Number.isNaN(mbps) ? null : mbps, ok, error: err });
+        this.ctx.db.prepare(`INSERT INTO exit_health (template_id, exit_id, rtt_ms, mbps, ok, error, checked_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, mbps = excluded.mbps, ok = excluded.ok, error = excluded.error, checked_at = excluded.checked_at`)
+          .run(t.id, x.id, Number.isNaN(rtt) ? null : rtt, Number.isNaN(mbps) ? null : mbps, ok ? 1 : 0, err);
+        log(`${entry.name} → ${x.name}: ${err ?? `${rtt} мс, ${mbps} Мбит/с`}${ok ? '' : ' — не проходит пороги'}`);
+      }
+      const good = results.filter((r) => r.ok).sort((a, b) => (b.mbps! - a.mbps!) || (a.rttMs! - b.rttMs!));
+      const cur = prev ? results.find((r) => `to-${t.id}-${r.exitId}` === prev) : undefined;
+      // текущий выход проходит пороги — оставляем (без лишних переключений); иначе — лучший подходящий или Xray сам
+      next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
+      if (next !== prev) {
+        await n.must(['xray-bo', `bal-${t.id}`, next ?? 'clear']);
+        setSetting(this.ctx.db, `auto.override.${t.id}`, next);
+      }
+    });
+    setSetting(this.ctx.db, `auto.checked.${t.id}`, new Date().toISOString());
+    const nameOf = (tag: string | null) => (tag ? targets.find((x) => tag === `to-${t.id}-${x.id}`)?.name ?? tag : null);
+    return { results, switched: next !== prev ? { from: nameOf(prev), to: nameOf(next) } : null };
   }
 
   /** Выкат шаблона: canary → остальные direct-узлы → вход. Ошибка — откат inbound и остановка. */

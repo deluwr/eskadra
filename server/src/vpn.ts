@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Ctx, InboundRow, ServerRow, TemplateRow, UserRow } from './ctx.js';
 import { getSetting } from './db.js';
 import { activeBotProxy, botCredKey } from './botproxy.js';
-import { certName, link as protoLink, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
+import { certName, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
   if (!s) return fallback;
@@ -141,6 +141,8 @@ export class Vpn {
       { type: 'field', protocol: ['bittorrent'], outboundTag: 'block' },
     ];
     const balancers: object[] = [];
+    const observed: string[] = [];   // префиксы outbound'ов выходов, за которыми следит Xray (умный «Авто»)
+    let observeRtt = 0;
 
     for (const ib of ibs) {
       const t = this.template(ib.template_id)!;
@@ -153,6 +155,11 @@ export class Vpn {
           const xi = this.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct'`, t.id, x.id)[0];
           if (!xi || (sp.security === 'reality' && !xi.public_key)) continue;
           outbounds.push(xrayOutbound(sp, xi, outTag, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id));
+          if (sp.autoMode === 'smart') {
+            // локальный SOCKS для проб: панель меряет задержку и скорость именно этого выхода
+            inbounds.push({ tag: `probe-${t.id}-${x.id}`, listen: '127.0.0.1', port: probePort(t.id, x.id), protocol: 'socks', settings: { udp: false } });
+            rules.push({ type: 'field', inboundTag: [`probe-${t.id}-${x.id}`], outboundTag: outTag });
+          }
           const emails: string[] = [];
           for (const u of users)
             if (json<string[]>(u.modes, []).includes('via') && this.userAllows(u, x.id)) {
@@ -170,7 +177,18 @@ export class Vpn {
               clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:auto`), email));
               autoEmails.push(email);
             }
-          balancers.push({ tag: `bal-${t.id}`, selector: [`to-${t.id}-`], strategy: { type: 'random' } });
+          if (sp.autoMode === 'smart') {
+            // по качеству: Xray выбирает выход с наименьшей задержкой и не берёт выходы с задержкой выше порога;
+            // если все выше порога — первый выход (fallback). Скорость меряет панель и переключает через API (ops.checkExits)
+            observed.push(`to-${t.id}-`);
+            observeRtt = Math.max(observeRtt, sp.maxRttMs);
+            balancers.push({
+              tag: `bal-${t.id}`, selector: [`to-${t.id}-`], fallbackTag: `to-${t.id}-${targets[0]!.id}`,
+              strategy: { type: 'leastLoad', settings: { expected: 1, maxRTT: `${sp.maxRttMs}ms`, tolerance: 0.01 } },
+            });
+          } else {
+            balancers.push({ tag: `bal-${t.id}`, selector: [`to-${t.id}-`], strategy: { type: 'random' } });
+          }
           if (autoEmails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: autoEmails, balancerTag: `bal-${t.id}` });
         }
         // всё прочее с входа, не попавшее в правила, не выпускаем наружу с самого входа
@@ -184,7 +202,13 @@ export class Vpn {
     }
     return {
       log: { loglevel: 'warning' },
-      api: { tag: 'api', services: ['StatsService'] },
+      api: { tag: 'api', services: ['StatsService', 'RoutingService'] },
+      ...(observed.length ? {
+        burstObservatory: {
+          subjectSelector: observed,
+          pingConfig: { destination: 'https://www.gstatic.com/generate_204', interval: '1m', sampling: 3, timeout: `${Math.max(5, Math.ceil(observeRtt * 5 / 1000))}s` },
+        },
+      } : {}),
       stats: {},
       policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true } }, system: { statsInboundUplink: false } },
       inbounds,

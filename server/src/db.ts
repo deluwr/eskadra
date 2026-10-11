@@ -249,6 +249,18 @@ const MIGRATIONS: string[] = [
   ALTER TABLE templates ADD COLUMN settings TEXT NOT NULL DEFAULT '{}';
   UPDATE templates SET protocol = 'vless', settings = '{"security":"reality","transport":"tcp","flow":"xtls-rprx-vision"}' WHERE protocol = 'vless-reality';
   `,
+  `
+  CREATE TABLE IF NOT EXISTS exit_health (
+    template_id TEXT NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+    exit_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    rtt_ms INTEGER,
+    mbps REAL,
+    ok INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (template_id, exit_id)
+  );
+  `,
 ];
 
 export type Db = DatabaseSync;

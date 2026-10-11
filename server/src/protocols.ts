@@ -51,6 +51,16 @@ export interface Spec {
   hy2Obfs: string;           // пароль obfs salamander, пусто — без obfs
   mtDomain: string;          // MTProto fake-TLS: домен маскировки
   sniffing: boolean;
+  /**
+   * «Авто через вход»: random — случайный выход; smart — по качеству: Xray сам уводит трафик с выходов с задержкой
+   * выше maxRttMs (leastLoad + наблюдение), а панель раз в checkMin минут меряет скорость скачивания через каждый
+   * выход (testMB) и переключает вход на другой выход, если текущий медленнее minMbps или с задержкой выше порога.
+   */
+  autoMode: 'random' | 'smart';
+  maxRttMs: number;
+  minMbps: number;
+  checkMin: number;
+  testMB: number;
 }
 
 /** Настройки шаблона с умолчаниями; старый протокол «vless-reality» = VLESS + REALITY + Vision. */
@@ -77,7 +87,17 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     hy2Obfs: raw.hy2Obfs ?? '',
     mtDomain: raw.mtDomain || sni[0] || 'www.apple.com',
     sniffing: raw.sniffing ?? true,
+    autoMode: raw.autoMode ?? 'smart',
+    maxRttMs: raw.maxRttMs ?? 100,
+    minMbps: raw.minMbps ?? 10,
+    checkMin: raw.checkMin ?? 15,
+    testMB: raw.testMB ?? 5,
   };
+}
+
+/** Локальный SOCKS-порт пробы выхода на входном узле (127.0.0.1): через него панель меряет задержку и скорость конкретного выхода. */
+export function probePort(templateId: string, exitId: string): number {
+  return 62000 + (createHash('sha256').update(`${templateId}:${exitId}`).digest().readUInt16BE(0) % 3000);
 }
 
 /** Порт inbound'а — TCP или UDP. */
