@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(here, '..', 'src');
+// строки сервера, которые показывает интерфейс: пункты проверки и предупреждения плана правил
+const SERVER_FILES = ['firewall.ts', 'preflight.ts'].map((f) => path.join(here, '..', '..', 'server', 'src', f));
 const CYR = /[А-Яа-яЁё]/;
 
 function files(dir) {
@@ -33,7 +35,7 @@ function stripComments(src) {
 export function extract() {
   const keys = new Set();
   const add = (s) => { s = s.replace(/\s+/g, ' ').trim(); if (CYR.test(s) && !s.includes('$')) keys.add(s); };
-  for (const f of files(SRC)) {
+  for (const f of [...files(SRC), ...SERVER_FILES]) {
     const src = stripComments(fs.readFileSync(f, 'utf8'));
     // шаблонные строки: ${…} → {}
     for (const m of src.matchAll(/`((?:[^`\\]|\\.)*)`/g)) {
@@ -49,7 +51,7 @@ export function extract() {
     for (const m of src.matchAll(/'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"/g)) add((m[1] ?? m[2]).replace(/\\(.)/g, '$1'));
     // текст JSX между тегами/выражениями
     // (?<![=\-]) — не «=>»/«->»; текст не должен быть похож на код
-    const jsxText = (t) => { if (!/[;=]|\[|\]|\bconst\b|=>|\?\./.test(t)) add(t); };
+    const jsxText = (t) => { if (!/=>|\bconst\b|\?\.|\);|\]\s*;|=\s*[[{'"`]|\breturn\b/.test(t)) add(t); };
     for (const m of src.matchAll(/(?<![=\-])>([^<>{}]*[А-Яа-яЁё][^<>{}]*)(?=[<{])/g)) jsxText(m[1]);
     for (const m of src.matchAll(/\}([^<>{}`'"]*[А-Яа-яЁё][^<>{}`'"]*)(?=[<{])/g)) jsxText(m[1]);
   }

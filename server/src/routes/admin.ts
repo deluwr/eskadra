@@ -36,16 +36,15 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     const traffic = db.prepare('SELECT COALESCE(SUM(up + down), 0) AS t FROM traffic WHERE period = ?').get(period()) as { t: number };
     const lastBackup = db.prepare('SELECT * FROM backups ORDER BY id DESC LIMIT 1').get();
     const attention: Array<{ level: 'fail' | 'warn' | 'info'; title: string; detail: string; serverId?: string }> = [];
-    if (!getSetting<boolean>(db, 'overlay.enabled', false))
-      attention.push({ level: 'warn', title: 'Overlay не настроен', detail: 'Управление держится на from= с адресом исполнителя. Сменится адрес — узлы перестанут пускать панель (§7.10).' });
     for (const s of servers) {
+      const protect = s.protection_target !== 'P1';   // при обычной защите про firewall и проверку не напоминаем
       if (s.fail_since) attention.push({ level: 'fail', title: `${s.name}: нет связи`, detail: `с ${s.fail_since}`, serverId: s.id });
-      if (s.ufw_active) attention.push({ level: 'warn', title: `${s.name}: включён firewall хоста (ufw/firewalld)`, detail: 'Перед P2/P3 его нужно выключить.', serverId: s.id });
-      if (s.fw_mode === 'pending') attention.push({ level: 'warn', title: `${s.name}: firewall ждёт подтверждения`, detail: `до ${s.fw_pending_until}`, serverId: s.id });
-      if (s.role !== 'control' && s.sudo_mode === 'restricted' && !s.checklist_passed_at)
-        attention.push({ level: 'info', title: `${s.name} ждёт ручного чек-листа`, detail: 'После него станет доступен план firewall.', serverId: s.id });
+      if (protect && s.ufw_active) attention.push({ level: 'warn', title: `${s.name}: включён ufw/firewalld`, detail: 'Он мешает защите Эскадры — выключите его на вкладке «Хост».', serverId: s.id });
+      if (s.fw_mode === 'pending') attention.push({ level: 'warn', title: `${s.name}: защита ждёт подтверждения`, detail: `до ${s.fw_pending_until}`, serverId: s.id });
+      if (protect && s.fw_mode !== 'enforced' && s.sudo_mode === 'restricted' && !s.checklist_passed_at)
+        attention.push({ level: 'info', title: `${s.name}: защита не включена`, detail: 'Отметьте проверку доступа на вкладке «Защита», затем включите защиту.', serverId: s.id });
       for (const ib of vpn.inbounds(`server_id = ? AND state = 'error'`, s.id))
-        attention.push({ level: 'warn', title: `${s.name}: inbound не поднялся`, detail: ib.error ?? '', serverId: s.id });
+        attention.push({ level: 'warn', title: `${s.name}: конфигурация не поднялась`, detail: ib.error ?? '', serverId: s.id });
     }
     const recipients = db.prepare(`SELECT COUNT(*) AS n FROM admins WHERE backup_recipient = 1 AND tg_id IS NOT NULL`).get() as { n: number };
     if (recipients.n < 2) attention.push({ level: 'warn', title: 'Бэкапы: меньше двух получателей', detail: 'Если единственный получатель удалит чат, копии пропадут.' });

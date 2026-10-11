@@ -32,7 +32,11 @@ export function tr(s: string): string | null {
   if (out === null) {
     for (const p of patterns) {
       const m = s.match(p.re);
-      if (m) { let i = 1; out = p.out.replace(/\{\}/g, () => { const g = m[i++] ?? ''; return tr(g) ?? g; }); break; }
+      // подстановка — данные (число, имя) или сама переводимая строка; иначе шаблон «{} из {}» портил бы любую фразу со словом «из»
+      if (!m || !m.slice(1).every((g) => !CYR.test(g) || tr(g) !== null)) continue;
+      let i = 1;
+      out = p.out.replace(/\{\}/g, () => { const g = m[i++] ?? ''; return tr(g) ?? g; });
+      break;
     }
   }
   // составные подписи: «de-1 · напрямую», «relay → авто», «12 · активно · ревизия 3»
@@ -58,13 +62,15 @@ function translateText(node: Text) {
   const lead = v.match(/^\s*/)![0], trail = v.match(/\s*$/)![0];
   const core = v.trim().replace(/\s+/g, ' ');
   const out = tr(core);
-  if (out !== null) node.nodeValue = lead + out + trail;
+  // пишем только при изменении: любая запись вызывает событие наблюдателя, а перевод может сохранять кириллицу
+  // (имена, «Language / Язык») — без этой проверки наблюдатель и перевод зацикливаются
+  if (out !== null && lead + out + trail !== v) node.nodeValue = lead + out + trail;
 }
 
 function translateEl(el: Element) {
   for (const a of ATTRS) {
     const v = el.getAttribute(a);
-    if (v && CYR.test(v)) { const out = tr(v.trim()); if (out !== null) el.setAttribute(a, out); }
+    if (v && CYR.test(v)) { const out = tr(v.trim()); if (out !== null && out !== v) el.setAttribute(a, out); }
   }
 }
 
@@ -83,7 +89,8 @@ let observer: MutationObserver | null = null;
 export function startI18n(lang: Lang) {
   document.documentElement.lang = lang;
   if (lang !== 'en') return;
-  document.title = tr(document.title) ?? document.title;
+  const title = tr(document.title);
+  if (title && title !== document.title) document.title = title;
   walk(document.body);
   observer = new MutationObserver((list) => {
     for (const m of list) {
