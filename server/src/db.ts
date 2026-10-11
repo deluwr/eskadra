@@ -261,6 +261,9 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (template_id, exit_id)
   );
   `,
+  `
+  ALTER TABLE servers ADD COLUMN tls_state TEXT;
+  `,
 ];
 
 export type Db = DatabaseSync;

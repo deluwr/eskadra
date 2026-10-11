@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { api, ago, fmtTime, type Check, type Job, type Preflight, type ServerDetail } from '../api';
+import { api, ago, fmtTime, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
 import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, Switch, Tag, roleLabel, useAsync, usePoll, ask, toast, LEVEL_LABEL } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
@@ -540,6 +540,43 @@ function SosTab({ d }: { d: ServerDetail }) {
 
 // ───── хост ─────
 
+const certName = (n: string) => (n === 'ip' ? 'На IP сервера' : n.startsWith('dom-') ? n.slice(4) : n.startsWith('tpl-') ? 'Загруженный' : n);
+
+/** TLS-сертификаты узла: Let's Encrypt продлевает сам узел; здесь — сроки, результат продления, ручной запуск. */
+function CertsCard({ s, onChange }: { s: Server; onChange: () => void }) {
+  const { busy, error, run } = useAsync();
+  const st = s.tls_state;
+  const act = (a: 'check' | 'renew') => run(async () => { await api.post(`/api/v1/servers/${s.id}/certs/${a}`); toast(a === 'renew' ? 'Продление выполнено — результат ниже' : 'Сертификаты проверены'); onChange(); });
+  return (
+    <section className="card pad stack">
+      <div className="flex" style={{ justifyContent: 'space-between' }}>
+        <h2>TLS-сертификаты <Info>Let's Encrypt продлевает сам сервер: таймер дважды в сутки, сертификат на IP — за 3 дня до конца, на домен — за 30. Панель проверяет сроки каждые 3 часа и пишет в бот, если продление не удалось или срок подходит к концу. Для продления нужен открытый снаружи порт 80.</Info></h2>
+        <span className="flex">
+          <button className="btn sm" disabled={busy || s.sudo_mode !== 'restricted'} onClick={() => void act('check')}>Проверить</button>
+          {st?.certs.some((c) => c.le) && <button className="btn sm" disabled={busy} onClick={() => void act('renew')}>{busy ? 'Продлеваю…' : 'Продлить сейчас'}</button>}
+        </span>
+      </div>
+      {s.certProblems.map((p) => <div key={p.key} className={`alert ${p.level}`}><b>{p.title}</b><br />{p.detail}</div>)}
+      {!st ? <span className="k">Ещё не проверялись. Сертификаты появляются у конфигураций с TLS и Hysteria2.</span> : !st.certs.length ? <span className="k">На сервере нет TLS-сертификатов Эскадры.</span> : (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Сертификат</th><th>Действует до</th><th>Продление</th></tr></thead>
+            <tbody>{st.certs.map((c) => (
+              <tr key={c.name}>
+                <td><b>{certName(c.name)}</b></td>
+                <td className="mono small">{c.notAfter ? fmtTime(c.notAfter) : '?'}</td>
+                <td>{c.le ? (st.timer ? <Tag kind="ok">сам, Let's Encrypt</Tag> : <Tag kind="warn">таймер выключен</Tag>) : <Tag>вручную</Tag>}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+      {st?.renew && <span className="k">{`Последнее продление: ${fmtTime(st.renew.at)}`} · {st.renew.code === 0 ? 'успешно' : `ошибка: ${st.renew.err || 'certbot завершился с ошибкой'}`} · {`проверено ${ago(st.checkedAt)}`}</span>}
+      <ErrorBox error={error} />
+    </section>
+  );
+}
+
 function HostTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
@@ -566,6 +603,7 @@ function HostTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         {st && <pre className="code">{st.output}{'\nfirewall: ' + st.fwState}{'\n\nxray:\n' + st.xray}{'\nsing-box:\n' + st.singbox}</pre>}
       </section>
       <CoresCard d={d} onChange={onChange} />
+      <CertsCard s={s} onChange={onChange} />
       <section className="card pad stack">
         <h2>Проверка сервера <Info>Снимок только для чтения: ОС, SSH, firewall, занятые порты, сторонние ядра. Ничего не меняет.</Info></h2>
         <PreflightView d={d} onChange={onChange} />

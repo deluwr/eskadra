@@ -8,6 +8,7 @@ import { Ops } from './ops.js';
 import { effectiveLimits, json, period } from './vpn.js';
 import type { Backups } from './backup.js';
 import type { Bot } from './bot.js';
+import { certLabel, certProblems } from './certs.js';
 
 const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60_000 : 0);
 
@@ -31,6 +32,32 @@ export class Workers {
     });
     this.every('backup', 60_000, () => this.backups.tick());
     this.every('cores', 6 * 3600_000, () => this.coreCheck());
+    this.every('certs', 3 * 3600_000, () => this.certCheck());
+  }
+
+  /**
+   * Сертификаты узлов: сроки и результат продления (продлевает сам узел). О новой проблеме — одно сообщение в бот;
+   * проблема ушла (сертификат продлён) — сообщение об этом.
+   */
+  async certCheck() {
+    const notified = getSetting<Record<string, string>>(this.ctx.db, 'certs.notified', {});
+    const seen = new Set<string>();
+    const tplName = (id: string) => this.ops.vpn.template(id)?.name;
+    for (const s of this.ctx.servers().filter((x) => x.sudo_mode === 'restricted' && !x.fail_since)) {
+      try { await this.ops.checkCerts(s); } catch (e) { this.log.warn(`сертификаты ${s.name}: ${(e as Error).message}`); continue; }
+      for (const p of certProblems(this.ctx.server(s.id), tplName)) {
+        seen.add(p.key);
+        if (notified[p.key]) continue;
+        notified[p.key] = new Date().toISOString();
+        void this.bot.notifyAdmins(`${p.level === 'fail' ? '⛔' : '⚠️'} ${p.title}. ${p.detail}`);
+      }
+      const gone = Object.keys(notified).filter((k) => k.startsWith(`${s.id}:`) && !seen.has(k));
+      for (const k of gone) delete notified[k];
+      // «всё в порядке» — только когда у узла не осталось проблем с сертификатами (иначе предупреждение просто сменилось)
+      if (gone.length && ![...seen].some((k) => k.startsWith(`${s.id}:`)))
+        void this.bot.notifyAdmins(`✅ ${s.name}: сертификаты в порядке${gone.some((k) => !/:(renew|timer)$/.test(k)) ? ` (${[...new Set(gone.filter((k) => !/:(renew|timer)$/.test(k)).map((k) => certLabel(k.split(':')[1]!, tplName)))].join(', ')})` : ''}`);
+    }
+    setSetting(this.ctx.db, 'certs.notified', notified);
   }
 
   /** Новые версии ядер: одно уведомление на версию; версия Xray у узлов с 3x-ui обновляется в карточке. */

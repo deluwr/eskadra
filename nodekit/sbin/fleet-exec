@@ -61,6 +61,8 @@ case "${1:-}" in
   tls-set)       name_ok "${2:?name}"; name_ok "${3:?crt}"; name_ok "${4:?key}"; staged "$STAGING/$3"; staged "$STAGING/$4"
                  exec /usr/local/sbin/fleet-core cert-set "$2" "$STAGING/$3" "$STAGING/$4" ;;
   tls-deploy)    name_ok "${2:?name}"; exec /usr/local/sbin/fleet-core cert-deploy "$2" ;;
+  tls-status)    exec /usr/local/sbin/fleet-core cert-status ;;
+  tls-renew)     exec /usr/local/sbin/fleet-core cert-renew ;;
   # уже установленный 3x-ui: inbounds Эскадры живут в его Xray (stdin — JSON с действием)
   xui)           exec python3 /usr/local/sbin/fleet-xui ;;
   xui-remove)    exec /usr/local/sbin/fleetctl xui-remove ;;

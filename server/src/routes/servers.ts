@@ -16,6 +16,7 @@ import { kitVersion } from '../nodekit.js';
 import { Ops, startJob } from '../ops.js';
 import { json } from '../vpn.js';
 import { CHECKLIST, renderPlan } from '../firewall.js';
+import { certProblems } from '../certs.js';
 
 const sshUtils = ssh2.utils;
 /** entry — вход (к нему подключаются пользователи, он же пересылает на выходы); exit — выход в интернет. relay/control — старые значения. */
@@ -34,6 +35,8 @@ export function publicView(ctx: Ctx, r: ServerRow) {
     admin_ips: json<string[]>(r.admin_ips, []),
     cores: json<Record<string, { version: string }>>(r.cores, {}),
     checklist: json<Record<string, boolean>>(r.checklist, {}),
+    tls_state: json(r.tls_state, null),
+    certProblems: certProblems(r, (id) => (ctx.db.prepare('SELECT name FROM templates WHERE id = ?').get(id) as { name: string } | undefined)?.name),
     stage: stageOf(r),
     executorOk: !r.seen_from_ip || expectedPanelIps(r, ctx.executorIps()).includes(r.seen_from_ip),
   };
@@ -245,6 +248,16 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     });
     audit(db, who(req), rebuild ? 'server.host_key_repinned' : 'server.host_key_pinned', r.id, { fingerprint });
     return { ok: true, rebuild };
+  });
+
+  // TLS-сертификаты узла: проверить сроки или продлить сейчас (узел продлевает и сам, по таймеру)
+  app.post<{ Params: { id: string; act: string } }>('/api/v1/servers/:id/certs/:act', { preHandler: guard(ctx, 'operator') }, async (req) => {
+    const r = ctx.server(req.params.id);
+    if (!['check', 'renew'].includes(req.params.act)) throw new HttpError(404, 'нет такого действия');
+    if (r.sudo_mode !== 'restricted') throw new HttpError(409, 'сервер ещё не настроен');
+    const st = await new Ops(ctx).checkCerts(r, req.params.act === 'renew');
+    if (req.params.act === 'renew') audit(db, who(req), 'server.certs_renew', r.id, { renew: st.renew });
+    return publicView(ctx, ctx.server(r.id));
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/check', async (req) => {

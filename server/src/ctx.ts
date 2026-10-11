@@ -20,6 +20,8 @@ export interface ServerRow {
   /** Канал управления (§5.8): SSH напрямую или внутри служебного туннеля VLESS-REALITY. */
   mgmt_mode: 'direct' | 'tunnel' | 'local'; mgmt_port: number | null; mgmt_uuid: string | null; mgmt_key_sealed: string | null;
   mgmt_pub: string | null; mgmt_sid: string | null; mgmt_sni: string | null; mgmt_local_port: number | null;
+  /** сертификаты узла и результат последнего продления (certs.ts, JSON) */
+  tls_state: string | null;
 }
 
 /** Порты самой панели и подписок — на главном сервере, ставшем узлом, их нельзя закрыть или занять (§7.7). */

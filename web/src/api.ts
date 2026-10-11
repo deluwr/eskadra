@@ -52,6 +52,8 @@ export interface Server {
   ufw_active: number; ssh_ports: number[]; admin_ips: string[]; cores: Record<string, { version: string }>;
   checklist_passed_at: string | null; kit_version: string | null; stage: number; executorOk: boolean; created_at: string;
   core_mode: 'auto' | 'own' | 'xui'; coreModeEffective: 'own' | 'xui'; xuiConfigured: boolean; xui_user: string | null;
+  tls_state: { checkedAt: string; certs: Array<{ name: string; notAfter: string | null; le: boolean }>; renew: { at: string; code: number; err: string } | null; timer: boolean } | null;
+  certProblems: Array<{ key: string; level: 'fail' | 'warn'; title: string; detail: string }>;
   external_cores: Array<{ name: string; active: string; version: string }>;
   mgmt_mode: 'direct' | 'tunnel' | 'local'; config_dirty: number;
   mgmt: { mode: 'direct' | 'tunnel' | 'local'; port: number | null; sni: string | null; localPort: number | null; client: { running: boolean; version: string | null; error: string | null } | null };

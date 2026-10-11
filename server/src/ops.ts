@@ -10,6 +10,7 @@ export interface ExitHealth { exitId: string; name: string; rttMs: number | null
 
 const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
 import { buildKitBundle, kitVersion } from './nodekit.js';
+import { parseCertStatus, type TlsState } from './certs.js';
 import { parseSections } from './preflight.js';
 
 export interface JobHandle { id: number; log: (line: string) => void; finish: (s: 'ok' | 'failed') => void }
@@ -298,6 +299,18 @@ export class Ops {
       ok = !Number.isNaN(rtt) && (sp.autoMode === 'order' || rtt <= sp.maxRttMs);
     });
     return ok;
+  }
+
+  /** Сертификаты узла: сроки и результат последнего продления (продлевает сам узел, панель следит). */
+  async checkCerts(s: ServerRow, renew = false): Promise<TlsState> {
+    let st: TlsState | null = null;
+    await this.ctx.onNode(s, async (n) => {
+      await this.ensureKit(s, n, () => undefined);   // cert-status появился в nodekit 0.12
+      if (renew) await n.op(['tls-renew'], { timeoutMs: 300_000 });
+      st = parseCertStatus(await n.must(['tls-status']));
+    });
+    this.ctx.updateServer(s.id, { tls_state: JSON.stringify(st) });
+    return st!;
   }
 
   async checkExits(t: TemplateRow, log: (l: string) => void): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null } | null } | null> {

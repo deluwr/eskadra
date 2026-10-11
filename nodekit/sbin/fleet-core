@@ -296,7 +296,7 @@ cert_timer() {  # продление дважды в сутки; новый се
 Description=Eskadra: renew TLS certificates of inbounds
 [Service]
 Type=oneshot
-ExecStart=$CB --config-dir $LEDIR --work-dir $LEDIR/work --logs-dir /var/log/eskadra-letsencrypt renew -q
+ExecStart=/usr/local/sbin/fleet-core cert-renew
 EOF
   cat > "$UNITS/eskadra-certbot.timer" <<'EOF'
 [Unit]
@@ -310,6 +310,33 @@ WantedBy=timers.target
 EOF
   systemctl daemon-reload
   systemctl enable --now eskadra-certbot.timer >/dev/null 2>&1 || true
+}
+
+cmd_cert_renew() {  # продление (таймер и кнопка в панели): результат — в renew.status, его читает панель
+  local out code=0
+  [ -x "$CB" ] || { echo "certbot не установлен"; return 0; }
+  [ -f "$UNITS/eskadra-certbot.timer" ] && ! systemctl is-active --quiet eskadra-certbot.timer && systemctl enable --now eskadra-certbot.timer >/dev/null 2>&1 || true
+  out="$("$CB" --config-dir "$LEDIR" --work-dir "$LEDIR/work" --logs-dir /var/log/eskadra-letsencrypt renew -q 2>&1)" || code=$?
+  install -d -m 755 "$ETC/tls"
+  { echo "at=$(date +%s)"; echo "code=$code"
+    echo "err=$(printf '%s' "$out" | grep -v '^\s*$' | tail -n 3 | tr '\n' ' ' | tr -d '\r' | cut -c1-400)"; } > "$ETC/tls/renew.status.new"
+  mv "$ETC/tls/renew.status.new" "$ETC/tls/renew.status"
+  [ "$code" = 0 ] && echo "renew ok" || { echo "renew failed: $out" >&2; return "$code"; }
+}
+
+cmd_cert_status() {  # сертификаты узла для панели: имя, конец срока (unix), Let's Encrypt ли он; результат последнего продления
+  local f name end le
+  # старый таймер вызывал certbot напрямую и не записывал результат — переводим на cert-renew
+  if [ -f "$UNITS/eskadra-certbot.service" ] && ! grep -q 'cert-renew' "$UNITS/eskadra-certbot.service"; then cert_timer; fi
+  for f in "$ETC"/tls/*/fullchain.pem; do
+    [ -s "$f" ] || continue
+    name="$(basename "$(dirname "$f")")"
+    end="$(date -d "$(openssl x509 -in "$f" -noout -enddate | cut -d= -f2)" +%s 2>/dev/null || echo 0)"
+    [ -f "$LEDIR/renewal/$name.conf" ] && le=1 || le=0
+    echo "cert $name $end $le"
+  done
+  [ -f "$ETC/tls/renew.status" ] && sed 's/^/renew_/' "$ETC/tls/renew.status"
+  systemctl is-active --quiet eskadra-certbot.timer 2>/dev/null && echo "timer=active" || echo "timer=inactive"
 }
 
 cmd_cert_deploy() {  # deploy-hook certbot: живой сертификат → /etc/eskadra/tls/<имя>, перезапуск ядер с этим сертификатом
@@ -377,5 +404,7 @@ case "${1:-}" in
   cert-issue)  cmd_cert_issue "${2:?}" "${3:?}" "${4:?}" ;;
   cert-set)    cmd_cert_set "${2:?}" "${3:?}" "${4:?}" ;;
   cert-deploy) cmd_cert_deploy "${2:?}" ;;
+  cert-renew)  cmd_cert_renew ;;
+  cert-status) cmd_cert_status ;;
   *) die "usage: fleet-core install|apply|status|stop|x25519|stats|tls" ;;
 esac
