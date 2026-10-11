@@ -52,6 +52,9 @@ export function activeBotProxy(ctx: Ctx): { setting: BotProxySetting; server: Se
   return { setting: st, server, template };
 }
 
+/** Служебный секрет первичного доступа через прокси (onboard.ts): клиент svc.mgmt есть в каждом inbound Xray узлов. */
+export const mgmtCredKey = (templateId: string, serverId: string) => `mgmt:${templateId}:${serverId}`;
+
 /** Служебный секрет бота для выбранной конфигурации (клиент добавляется в inbound узла, vpn.directClients). */
 export const botCredKey = (templateId: string, serverId: string) => `bot:${templateId}:${serverId}`;
 

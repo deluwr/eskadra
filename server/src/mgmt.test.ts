@@ -191,3 +191,18 @@ test('ядро, остановленное вручную, выкат не за�
   await new Ops(ctx).applyServer(ctx.server('n1'), n, () => undefined);
   assert.ok(!calls.includes('core-stop'));
 });
+
+test('первичный доступ через конфигурацию флота: служебный клиент svc.mgmt в inbound и outbound к нему', async () => {
+  const { ctx, db } = fixture();
+  db.prepare(`UPDATE servers SET mgmt_mode = 'direct' WHERE id = 'n1'`).run();
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids) VALUES ('t1', 'rv', 'xray', 'vless-reality', 8443, '["sni.example"]', '["n1"]')`).run();
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, private_key_sealed, public_key, short_id) VALUES ('ib1', 't1', 'n1', 'direct', 8443, 'tcp', 'active', ?, 'PUB', 'aa11')`).run(ctx.seal('PRIV'));
+  const { viaOutbound } = await import('./onboard.js');
+  const o = viaOutbound(ctx, { kind: 'fleet', serverId: 'n1', templateId: 't1' }).outbound as any;
+  const x = new Vpn(ctx).renderXray(ctx.server('n1')) as any;
+  const svc = x.inbounds.find((i: any) => i.tag === 'in-ib1').settings.clients.find((c: any) => c.email === 'svc.mgmt');
+  assert.ok(svc, 'svc.mgmt есть в inbound узла');
+  assert.equal(o.settings.vnext[0].users[0].id, svc.id, 'секрет совпадает');
+  assert.equal(o.settings.vnext[0].address, '203.0.113.7');
+  assert.throws(() => viaOutbound(ctx, { kind: 'fleet', serverId: 'n1', templateId: 'nope' }), /не выкачена/);
+});

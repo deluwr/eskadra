@@ -984,4 +984,13 @@ export const EN: Record<string, string> = {
   "Перезапустить работающие ядра на {}? Подключения пользователей этого сервера оборвутся на пару секунд и восстановятся сами.": "Restart running cores on {}? This server's user connections drop for a couple of seconds and recover by themselves.",
   "Перезапустить ядра": "Restart cores",
   "Перезапустить ядра {}": "Restart cores on {}",
+  "vless://uuid@203.0.113.5:443?type=tcp&security=reality&pbk=…&sni=…#имя (также trojan://, vmess://, ss:// или JSON outbound)": "vless://uuid@203.0.113.5:443?type=tcp&security=reality&pbk=…&sni=…#name (also trojan://, vmess://, ss:// or a JSON outbound)",
+  "Во флоте пока нет выкаченных конфигураций Xray на других серверах — вставьте свою ссылку.": "The fleet has no rolled-out Xray configurations on other servers yet — paste your own link.",
+  "Как панель один раз зайдёт на сервер, чтобы его настроить. Если главный сервер в РФ и SSH до сервера за границей режется — выберите конфигурацию панели (например, выход за границей) или свою ссылку: панель зайдёт на SSH сервера через этот VLESS-прокси, а дальше будет работать по своему туннелю.": "How the panel logs in once to set the server up. If the main server is in Russia and SSH to a server abroad gets cut, pick a panel configuration (for example, an exit abroad) or your own link: the panel reaches the server's SSH through that VLESS proxy and then works over its own tunnel.",
+  "Канал «напрямую по SSH» после настройки тоже должен проходить — иначе выберите канал «через туннель».": "The “direct SSH” channel must also work after setup — otherwise choose the “via tunnel” channel.",
+  "Конфигурация для доступа": "Configuration for access",
+  "Прокси должен быть за пределами РФ. Ссылка используется только на время подключения и не сохраняется.": "The proxy must be outside Russia. The link is used only while connecting and isn't stored.",
+  "Ссылка прокси": "Proxy link",
+  "через конфигурацию панели": "via a panel configuration",
+  "через свою ссылку": "via my own link",
 };

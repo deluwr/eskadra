@@ -85,7 +85,11 @@ export class HttpError extends Error {
 /** Общий контекст: база, шифрование секретов, доступ к узлам. */
 export class Ctx {
   /** Клиент служебных туннелей на главном сервере (задаётся в main; в тестах — нет). */
-  mgmt: { ensure(): Promise<void>; status(): { running: boolean; version: string | null; error: string | null } } | null = null;
+  mgmt: {
+    ensure(): Promise<void>;
+    status(): { running: boolean; version: string | null; error: string | null };
+    openVia(outbound: Record<string, unknown>, host: string, port: number): Promise<{ port: number; close: () => Promise<void> }>;
+  } | null = null;
 
   constructor(readonly db: Db, readonly sealer: Sealer) {}
 

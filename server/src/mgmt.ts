@@ -65,15 +65,16 @@ export interface TunnelNode { id: string; host: string; sshPort: number; creds: 
 export interface ClientExtra { inbound: object; outbound: object; rule: object }
 
 /** Конфиг Xray-клиента на главном сервере: локальный порт узла → VLESS-REALITY к узлу; extra — прокси бота. */
-export function clientConfig(nodes: TunnelNode[], extra?: ClientExtra | null): object {
+export function clientConfig(nodes: TunnelNode[], extra?: ClientExtra | ClientExtra[] | null): object {
+  const extras = Array.isArray(extra) ? extra : extra ? [extra] : [];
   return {
     log: { loglevel: 'warning' },
-    inbounds: [...(extra ? [extra.inbound] : []), ...nodes.map((n) => ({
+    inbounds: [...extras.map((e) => e.inbound), ...nodes.map((n) => ({
       tag: `in-${n.id}`, listen: '127.0.0.1', port: n.creds.localPort, protocol: 'dokodemo-door',
       settings: { address: '127.0.0.1', port: n.sshPort, network: 'tcp' },
     }))],
     outbounds: [
-      ...(extra ? [extra.outbound] : []),
+      ...extras.map((e) => e.outbound),
       ...nodes.map((n) => ({
         tag: `out-${n.id}`, protocol: 'vless',
         settings: { vnext: [{ address: n.host, port: n.creds.port, users: [{ id: n.creds.uuid, encryption: 'none', flow: 'xtls-rprx-vision' }] }] },
@@ -84,7 +85,7 @@ export function clientConfig(nodes: TunnelNode[], extra?: ClientExtra | null): o
       })),
       { tag: 'block', protocol: 'blackhole' },
     ],
-    routing: { rules: [...(extra ? [extra.rule] : []), ...nodes.map((n) => ({ type: 'field', inboundTag: [`in-${n.id}`], outboundTag: `out-${n.id}` }))] },
+    routing: { rules: [...extras.map((e) => e.rule), ...nodes.map((n) => ({ type: 'field', inboundTag: [`in-${n.id}`], outboundTag: `out-${n.id}` }))] },
   };
 }
 
@@ -198,8 +199,9 @@ export class Mgmt {
 
   private async ensureNow(): Promise<void> {
     const nodes = this.nodes();
-    const extra = botProxyClientPart(this.ctx);
-    if (!nodes.length && !extra) { this.stop(); return; }
+    const bot = botProxyClientPart(this.ctx);
+    const extra = bot ? [bot] : [];
+    if (!nodes.length && !extra.length) { this.stop(); return; }
     try {
       const pin = await this.pin();
       await this.ensureBinary(pin);
@@ -224,13 +226,48 @@ export class Mgmt {
       });
       this.child = child;
       this.runningHash = hash;
-      await waitListen(nodes[0]?.creds.localPort ?? (extra!.inbound as { port: number }).port, 5000);
+      await waitListen(nodes[0]?.creds.localPort ?? (extra[0]!.inbound as { port: number }).port, 5000);
       if (child.exitCode !== null) throw new Error(this.lastError ?? 'Xray туннелей не запустился');
       this.lastError = null;
     } catch (e) {
       this.lastError = (e as Error).message;
       throw new Error(`туннель управления: ${this.lastError}`);
     }
+  }
+
+  /**
+   * Открыть временный проброс к SSH сервера через прокси (outbound Xray). Возвращает локальный порт;
+   * close() убирает проброс. Нужен для первичного доступа, когда SSH напрямую режется.
+   */
+  async openVia(outbound: Record<string, unknown>, host: string, port: number): Promise<{ port: number; close: () => Promise<void> }> {
+    // отдельный процесс Xray: неудачный конфиг прокси не задевает туннели к другим серверам
+    const pin = await this.pin();
+    await this.ensureBinary(pin);
+    const used = new Set(this.ctx.servers().map((s) => s.mgmt_local_port ?? 0));
+    let local = 0;
+    do local = 47000 + Math.floor(Math.random() * 2000); while (used.has(local));
+    const cfg = {
+      log: { loglevel: 'warning' },
+      inbounds: [{ tag: 'boot-in', listen: '127.0.0.1', port: local, protocol: 'dokodemo-door', settings: { address: host, port, network: 'tcp' } }],
+      outbounds: [{ ...outbound, tag: 'boot-out' }, { tag: 'block', protocol: 'blackhole' }],
+      routing: { rules: [{ type: 'field', inboundTag: ['boot-in'], outboundTag: 'boot-out' }] },
+    };
+    const file = path.join(this.dir, `boot-${local}.json`);
+    fs.writeFileSync(file, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+    const child = spawn(this.bin, ['run', '-c', file], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const tail: string[] = [];
+    const onOut = (d: Buffer) => { for (const l of d.toString('utf8').split('\n')) if (l.trim()) { tail.push(l); if (tail.length > 10) tail.shift(); } };
+    child.stdout?.on('data', onOut);
+    child.stderr?.on('data', onOut);
+    const close = async () => { child.kill('SIGTERM'); fs.rmSync(file, { force: true }); };
+    try {
+      await waitListen(local, 5000);
+      if (child.exitCode !== null) throw new Error('');
+    } catch {
+      await close();
+      throw new Error(`Xray не принял конфигурацию прокси: ${tail.slice(-2).join(' | ') || 'неизвестная ошибка'}`);
+    }
+    return { port: local, close };
   }
 
   stop() {

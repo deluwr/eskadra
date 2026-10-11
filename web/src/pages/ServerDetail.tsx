@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { HostStatsPanel } from '../HostStats';
+import { ViaPicker, viaBody, viaReady, type Via } from '../ViaPicker';
 import { api, ago, fmtTime, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
 import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, StageHelp, Switch, Tag, RoleTag, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
 
@@ -146,7 +147,7 @@ function Onboarding({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
       {!running && (failed || !job) && (
         <div className="stack">
           {askAuth || (failed && reached <= 1)
-            ? <AuthForm id={s.id} onStarted={() => { setAskAuth(false); onChange(); }} />
+            ? <AuthForm id={s.id} mgmtMode={s.mgmt_mode} onStarted={() => { setAskAuth(false); onChange(); }} />
             : <div className="flex">
                 <ConnectButton id={s.id} label={job ? 'Повторить' : 'Подключить'} onStarted={onChange} />
                 <button className="link" onClick={() => setAskAuth(true)}>Ввести логин и пароль</button>
@@ -169,15 +170,16 @@ function ConnectButton({ id, label, onStarted }: { id: string; label: string; on
 }
 
 /** Одноразовый доступ для повторной попытки: не сохраняется. */
-function AuthForm({ id, onStarted }: { id: string; onStarted: () => void }) {
+function AuthForm({ id, mgmtMode, onStarted }: { id: string; mgmtMode: string; onStarted: () => void }) {
   const [f, setF] = useState({ user: 'root', method: 'password', password: '', privateKey: '' });
+  const [via, setVia] = useState<Via>({ kind: 'direct' });
   const { busy, error, run } = useAsync();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   return (
     <form className="stack" autoComplete="off" onSubmit={(e) => {
       e.preventDefault();
       void run(async () => {
-        const auth = f.method === 'password' ? { user: f.user, password: f.password } : { user: f.user, privateKey: f.privateKey };
+        const auth = { ...(f.method === 'password' ? { user: f.user, password: f.password } : { user: f.user, privateKey: f.privateKey }), ...viaBody(via) };
         await api.post(`/api/v1/servers/${id}/onboard`, { auth });
         onStarted();
       });
@@ -188,7 +190,8 @@ function AuthForm({ id, onStarted }: { id: string; onStarted: () => void }) {
         {f.method === 'password' && <label className="fld" style={{ gridColumn: 'span 2' }}><span>Пароль <Info>Используется один раз и не сохраняется.</Info></span><input className="inp" type="password" value={f.password} onChange={set('password')} autoComplete="new-password" /></label>}
       </div>
       {f.method === 'key' && <label className="fld">Приватный ключ<textarea className="inp mono" rows={4} value={f.privateKey} onChange={set('privateKey')} spellCheck={false} /></label>}
-      <div><button className="btn pri" disabled={busy || !(f.method === 'password' ? f.password : f.privateKey.trim())}>Подключить</button></div>
+      <ViaPicker value={via} onChange={setVia} exclude={id} mgmtMode={mgmtMode} />
+      <div><button className="btn pri" disabled={busy || !(f.method === 'password' ? f.password : f.privateKey.trim()) || !viaReady(via)}>Подключить</button></div>
       <ErrorBox error={error} />
     </form>
   );
@@ -460,7 +463,7 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
       {switched && (
         <div className="stack">
           <b className="small">Перенастроить доступ</b>
-          <AuthForm id={s.id} onStarted={() => { setSwitched(false); onChange(); }} />
+          <AuthForm id={s.id} mgmtMode={s.mgmt_mode} onStarted={() => { setSwitched(false); onChange(); }} />
           <ManualSnippet d={d} open={false} />
         </div>
       )}

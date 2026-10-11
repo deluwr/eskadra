@@ -18,6 +18,7 @@ import { json } from '../vpn.js';
 import { CHECKLIST, renderPlan } from '../firewall.js';
 import { certProblems } from '../certs.js';
 import { localRaw, parseHostStat } from '../hoststats.js';
+import { botProxyOptions } from '../botproxy.js';
 
 const sshUtils = ssh2.utils;
 /** entry — вход (к нему подключаются пользователи, он же пересылает на выходы); exit — выход в интернет. relay/control — старые значения. */
@@ -66,6 +67,11 @@ export const createBody = z.object({
     password: z.string().max(1024).optional(),
     privateKey: z.string().max(16384).optional(),
     passphrase: z.string().max(1024).optional(),
+    /** Первичный доступ через прокси (SSH напрямую режется): конфигурация флота или своя ссылка. */
+    via: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('fleet'), serverId: z.string().max(64), templateId: z.string().max(64) }),
+      z.object({ kind: z.literal('link'), link: z.string().trim().min(10).max(8192) }),
+    ]).optional(),
   }).refine((a) => !!a.password || !!a.privateKey, 'нужен пароль или ключ').optional(),
 });
 
@@ -256,6 +262,9 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     audit(db, who(req), rebuild ? 'server.host_key_repinned' : 'server.host_key_pinned', r.id, { fingerprint });
     return { ok: true, rebuild };
   });
+
+  /** Конфигурации флота, через которые панель может зайти на SSH нового сервера при первичном доступе. */
+  app.get('/api/v1/servers/proxy-options', async () => botProxyOptions(ctx));
 
   // Живая статистика: главный сервер — локально; узел — счётчики hoststat по SSH (окно раскрыто — опрос раз в несколько секунд)
   app.get('/api/v1/stats/main', async () => parseHostStat('main', localRaw()));

@@ -10,6 +10,7 @@ import { Ops, coresOff } from './ops.js';
 import { effectiveLimits, json, period, Vpn } from './vpn.js';
 import { saveUser, subBase, userBody } from './routes/users.js';
 import { createBody, createServer } from './routes/servers.js';
+import { botProxyOptions } from './botproxy.js';
 
 export type Button = { text: string; callback_data?: string; url?: string };
 export type Kb = Button[][];
@@ -232,13 +233,19 @@ export class AdminFlows {
         return true;
       }
       case 'sadd': await toast(); await this.startServerFlow(chatId, a); return true;
-      case 'fr': case 'fm': case 'fok': case 'fx': {
+      case 'fr': case 'fm': case 'fv': case 'fvl': case 'fok': case 'fx': {
         const f = this.flows.get(chatId);
         if (!f || f.kind !== 'server') return toast('Ввод устарел — начните заново').then(() => true);
         await toast();
         if (act === 'fx') { this.flows.delete(chatId); await this.io.show(chatId, { text: 'Подключение отменено.' }, mid); return true; }
         if (act === 'fr') { f.data.role = args[0]!; f.step = 'mgmt'; await this.io.show(chatId, this.mgmtAsk(), mid); return true; }
-        if (act === 'fm') { f.data.mgmt = args[0]!; f.step = 'confirm'; await this.io.show(chatId, this.serverSummary(f), mid); return true; }
+        if (act === 'fm') { f.data.mgmt = args[0]!; f.step = 'via'; await this.io.show(chatId, this.viaAsk(), mid); return true; }
+        if (act === 'fv') {
+          if (args[0] === 'direct') { delete f.data.viaServer; delete f.data.viaTpl; delete f.data.viaLink; }
+          else { f.data.viaServer = args[0]!; f.data.viaTpl = args[1]!; delete f.data.viaLink; }
+          f.step = 'confirm'; await this.io.show(chatId, this.serverSummary(f), mid); return true;
+        }
+        if (act === 'fvl') { f.step = 'vialink'; await this.io.show(chatId, { text: 'Пришлите ссылку прокси за пределами РФ: vless://…, trojan://, vmess:// или ss://. Сообщение удалю сразу после чтения.\n/cancel — отмена' }, mid); return true; }
         return this.finishServer(chatId, mid, a, f).then(() => true);
       }
     }
@@ -368,11 +375,21 @@ export class AdminFlows {
     };
   }
 
+  /** Первичный доступ: напрямую или через прокси — если SSH до сервера из РФ режется. */
+  private viaAsk(): Screen {
+    const opts = botProxyOptions(this.ctx).slice(0, 8);
+    return {
+      text: 'Как панели первый раз зайти на сервер?\n<b>Напрямую</b> — по SSH.\n<b>Через прокси</b> — если главный сервер в РФ и SSH до сервера за границей режется: панель зайдёт через конфигурацию флота или вашу ссылку VLESS.',
+      kb: [[cb('Напрямую', 'fv:direct')], ...opts.map((o) => [cb(`Через ${o.serverName} · ${o.templateName}`, `fv:${o.serverId}:${o.templateId}`)]), [cb('Своя ссылка vless://', 'fvl')], [cb('Отмена', 'fx')]],
+    };
+  }
+
   private serverSummary(f: Flow): Screen {
     const d = f.data;
     return {
       text: [`<b>Подключить сервер?</b>`, `Имя: ${esc(d.name!)}`, `Адрес: <code>${esc(d.host!)}:${d.port}</code>`, `Вход: ${esc(d.user!)} по ${d.key ? 'ключу' : 'паролю'}`,
-        `Роль: ${d.role === 'exit' ? 'Выход' : 'Relay'}`, `Канал: ${d.mgmt === 'tunnel' ? 'через туннель' : 'напрямую'}`, '', 'Панель зайдёт один раз, поставит свой ключ и служебные скрипты, затем доступ по паролю ей больше не нужен.'].join('\n'),
+        `Роль: ${d.role === 'exit' ? 'Выход' : 'Relay'}`, `Канал: ${d.mgmt === 'tunnel' ? 'через туннель' : 'напрямую'}`,
+        `Первичный доступ: ${d.viaLink ? 'через вашу ссылку' : d.viaServer ? `через ${esc(this.server(d.viaServer)?.name ?? d.viaServer)}` : 'напрямую'}`, '', 'Панель зайдёт один раз, поставит свой ключ и служебные скрипты, затем доступ по паролю ей больше не нужен.'].join('\n'),
       kb: [[cb('Подключить', 'fok'), cb('Отмена', 'fx')]],
     };
   }
@@ -404,6 +421,12 @@ export class AdminFlows {
         f.step = 'role';
         await this.io.show(chatId, { text: 'Принято, сообщение удалено. Роль сервера:', kb: [[cb('Relay (вход)', 'fr:entry'), cb('Выход', 'fr:exit')], [cb('Отмена', 'fx')]] });
         return;
+      case 'vialink':
+        await this.io.drop(chatId, messageId);   // в ссылке секрет прокси
+        if (!/^(vless|trojan|vmess|ss):\/\//i.test(text) && !text.startsWith('{')) { await this.io.send(chatId, 'Нужна ссылка vless://, trojan://, vmess:// или ss://. Ещё раз:'); return; }
+        d.viaLink = text; delete d.viaServer; delete d.viaTpl; f.step = 'confirm';
+        await this.io.show(chatId, this.serverSummary(f));
+        return;
       default:
         await this.io.send(chatId, 'Выберите вариант кнопкой выше или /cancel.');
     }
@@ -414,7 +437,10 @@ export class AdminFlows {
     const d = f.data;
     const parsed = createBody.safeParse({
       name: d.name, host: d.host, sshPort: d.port, role: d.role, mgmtMode: d.mgmt,
-      auth: { user: d.user, ...(d.key ? { privateKey: d.key } : { password: d.password }) },
+      auth: {
+        user: d.user, ...(d.key ? { privateKey: d.key } : { password: d.password }),
+        ...(d.viaLink ? { via: { kind: 'link', link: d.viaLink } } : d.viaServer ? { via: { kind: 'fleet', serverId: d.viaServer, templateId: d.viaTpl } } : {}),
+      },
     });
     if (!parsed.success) { await this.io.show(chatId, { text: `Данные не подошли: ${esc(parsed.error.issues.map((i) => i.message).join('; '))}` }, mid); return; }
     let r: { id: string; jobId: number | null };

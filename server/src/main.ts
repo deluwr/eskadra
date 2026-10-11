@@ -5,7 +5,8 @@ import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import { ZodError } from 'zod';
 import { config } from './config.js';
-import { openDb } from './db.js';
+import { getSetting, openDb, setSetting } from './db.js';
+import { Vpn } from './vpn.js';
 import { loadOrCreateMasterKey, Sealer } from './lib/crypto.js';
 import { Ctx, HttpError } from './ctx.js';
 import { authRoutes, requireAdmin } from './routes/auth.js';
@@ -54,6 +55,9 @@ const mgmt = new Mgmt(ctx, config.dataDir, app.log);
 ctx.mgmt = mgmt;
 for (const sig of ['SIGTERM', 'SIGINT'] as const) process.once(sig, () => { mgmt.stop(); process.exit(0); });
 process.once('exit', () => mgmt.stop());
+
+// v0.17: в inbounds Xray узлов добавлен служебный клиент svc.mgmt (первичный доступ через прокси) — переприменить один раз
+if (!getSetting(db, 'migrate.svcMgmt', false)) { new Vpn(ctx).markDirty(); setSetting(db, 'migrate.svcMgmt', true); }
 
 const bot = new Bot(ctx, app.log);
 const backups = new Backups(ctx, bot);

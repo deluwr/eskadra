@@ -62,7 +62,7 @@ test('xray render: direct inbound + relay routing by user', () => {
   assert.equal(deIn.port, 8443);
   assert.equal(deIn.streamSettings.realitySettings.privateKey, 'PRIVDE');
   // exit скрыт (direct_access = 0): пользователи напрямую не добавляются, только служебный клиент входа
-  assert.deepEqual(deIn.settings.clients.map((c: any) => c.email), ['svc.relay-entry-t1']);
+  assert.deepEqual(deIn.settings.clients.map((c: any) => c.email), ['svc.relay-entry-t1', 'svc.mgmt']);
   const en = vpn.renderXray(ctx.server('entry')) as any;
   const out = en.outbounds.find((o: any) => o.tag === 'to-t1-de');
   assert.equal(out.streamSettings.realitySettings.publicKey, 'PUBDE');

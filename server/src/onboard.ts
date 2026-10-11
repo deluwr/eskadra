@@ -12,11 +12,34 @@ import { fetchHostKey, fingerprintOf, HostKeyError, mask, withNodeLock, withSess
 import { parseSections, summarize } from './preflight.js';
 import { buildInstallScript, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from './nodekit.js';
 import { Ops, startJob, type JobHandle } from './ops.js';
+import { parseProxyLink } from './proxylink.js';
+import { Vpn } from './vpn.js';
+import { specOf, xrayOutbound } from './protocols.js';
+import { mgmtCredKey } from './botproxy.js';
 
 const { Client } = ssh2;
 
 /** Одноразовый доступ к узлу для первичной настройки. */
-export interface BootstrapAuth { user: string; password?: string; privateKey?: string; passphrase?: string }
+/**
+ * Как дойти до SSH сервера при первичном доступе: напрямую (по умолчанию) или через прокси — конфигурацию флота
+ * (служебный клиент svc.mgmt) либо свою ссылку vless://, trojan://, vmess://, ss://. Нужно, когда главный сервер
+ * в РФ и SSH до сервера за границей режется: панель заходит через прокси, а дальше узел работает по своему туннелю.
+ */
+export type BootstrapVia = { kind: 'fleet'; serverId: string; templateId: string } | { kind: 'link'; link: string };
+export interface BootstrapAuth { user: string; password?: string; privateKey?: string; passphrase?: string; via?: BootstrapVia }
+
+/** Outbound Xray для первичного доступа через прокси. */
+export function viaOutbound(ctx: Ctx, via: BootstrapVia): { outbound: Record<string, unknown>; label: string } {
+  if (via.kind === 'link') {
+    try { return { outbound: parseProxyLink(via.link, 'boot-out'), label: 'свою ссылку' }; } catch (e) { throw new HttpError(400, `ссылка прокси: ${(e as Error).message}`); }
+  }
+  const vpn = new Vpn(ctx);
+  const t = vpn.template(via.templateId);
+  const s = ctx.servers().find((x) => x.id === via.serverId);
+  const ib = t && s ? vpn.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct' AND state = 'active'`, t.id, s.id)[0] : undefined;
+  if (!t || !s || !ib) throw new HttpError(400, 'выбранная конфигурация не выкачена на этот сервер — выберите другую');
+  return { outbound: xrayOutbound(specOf(t), ib, 'boot-out', s.host, vpn.svcCred(mgmtCredKey(t.id, s.id)), s.id), label: `${s.name} · ${t.name}` };
+}
 
 type Log = (line: string) => void;
 
@@ -36,65 +59,80 @@ export async function snippetOf(ctx: Ctx, r: ServerRow): Promise<string> {
 export async function bootstrapWithAuth(ctx: Ctx, r: ServerRow, auth: BootstrapAuth, log: Log): Promise<void> {
   const snippet = await snippetOf(ctx, r);
   let seenFp = '';
-  const client: SshClient = await new Promise((resolve, reject) => {
-    const c = new Client();
-    let mismatch: string | null = null;
-    c.on('ready', () => resolve(c));
-    c.on('error', (e) => reject(mismatch ? new HostKeyError(mismatch) : explainConnect(e, r)));
-    // часть серверов спрашивает пароль через keyboard-interactive
-    c.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => finish(prompts.map(() => auth.password ?? '')));
-    c.connect({
-      host: r.host, port: r.ssh_port, username: auth.user,
-      ...(auth.privateKey ? { privateKey: auth.privateKey, passphrase: auth.passphrase || undefined } : { password: auth.password }),
-      tryKeyboard: !auth.privateKey,
-      readyTimeout: 20_000,
-      algorithms: { serverHostKey: ['ssh-ed25519'] },
-      hostVerifier: (key: Buffer) => {
-        seenFp = fingerprintOf(key).fp;
-        if (r.host_key_fp && r.host_key_fp !== seenFp) {
-          mismatch = `ключ сервера изменился: был ${r.host_key_fp}, сейчас ${seenFp}. Если сервер переустанавливали — удалите его из панели и добавьте заново`;
-          return false;
-        }
-        return true;
-      },
-    });
-  });
+  // через прокси: временный проброс 127.0.0.1:<порт> → прокси → сервер:SSH (отдельный процесс Xray панели)
+  let via: { port: number; close: () => Promise<void> } | null = null;
+  if (auth.via) {
+    const o = viaOutbound(ctx, auth.via);
+    if (!ctx.mgmt) throw new Error('клиент туннелей панели не запущен');
+    const v = await ctx.mgmt.openVia(o.outbound, r.host, r.ssh_port);
+    via = v;
+    log(`первичный доступ через прокси (${o.label}): 127.0.0.1:${v.port} → ${r.host}:${r.ssh_port}`);
+  }
   try {
-    log(`вход ${auth.user}@${r.host}:${r.ssh_port} выполнен, ключ сервера ${seenFp}`);
-    const run = (cmd: string, stdin: string) => new Promise<{ code: number | null; out: string }>((resolve, reject) => {
-      client.exec(cmd, (err, stream) => {
-        if (err) return reject(err);
-        let out = '';
-        const timer = setTimeout(() => { stream.close(); reject(new Error('bootstrap не завершился за 10 минут')); }, 600_000);
-        stream.on('data', (d: Buffer) => (out += d.toString('utf8')));
-        stream.stderr.on('data', (d: Buffer) => (out += d.toString('utf8')));
-        stream.on('close', (code: number | null) => { clearTimeout(timer); resolve({ code, out }); });
-        stream.end(stdin);
+    const client: SshClient = await new Promise((resolve, reject) => {
+      const c = new Client();
+      let mismatch: string | null = null;
+      c.on('ready', () => resolve(c));
+      c.on('error', (e) => reject(mismatch ? new HostKeyError(mismatch) : explainConnect(e, r, !!via)));
+      // часть серверов спрашивает пароль через keyboard-interactive
+      c.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => finish(prompts.map(() => auth.password ?? '')));
+      c.connect({
+        host: via ? '127.0.0.1' : r.host, port: via ? via.port : r.ssh_port, username: auth.user,
+        ...(auth.privateKey ? { privateKey: auth.privateKey, passphrase: auth.passphrase || undefined } : { password: auth.password }),
+        tryKeyboard: !auth.privateKey,
+        readyTimeout: 20_000,
+        algorithms: { serverHostKey: ['ssh-ed25519'] },
+        hostVerifier: (key: Buffer) => {
+          seenFp = fingerprintOf(key).fp;
+          if (r.host_key_fp && r.host_key_fp !== seenFp) {
+            mismatch = `ключ сервера изменился: был ${r.host_key_fp}, сейчас ${seenFp}. Если сервер переустанавливали — удалите его из панели и добавьте заново`;
+            return false;
+          }
+          return true;
+        },
       });
     });
-    let res;
-    if (auth.user === 'root') res = await run('bash -s', snippet);
-    else {
-      const nopass = await run('sudo -n true', '');
-      if (nopass.code === 0) res = await run('sudo -n bash -s', snippet);
-      else if (auth.password) res = await run(`sudo -S -p '' bash -s`, auth.password + '\n' + snippet);
-      else throw new Error(`у пользователя ${auth.user} нет sudo без пароля — укажите root или пароль пользователя`);
+    try {
+      log(`вход ${auth.user}@${r.host}:${r.ssh_port} выполнен, ключ сервера ${seenFp}`);
+      const run = (cmd: string, stdin: string) => new Promise<{ code: number | null; out: string }>((resolve, reject) => {
+        client.exec(cmd, (err, stream) => {
+          if (err) return reject(err);
+          let out = '';
+          const timer = setTimeout(() => { stream.close(); reject(new Error('bootstrap не завершился за 10 минут')); }, 600_000);
+          stream.on('data', (d: Buffer) => (out += d.toString('utf8')));
+          stream.stderr.on('data', (d: Buffer) => (out += d.toString('utf8')));
+          stream.on('close', (code: number | null) => { clearTimeout(timer); resolve({ code, out }); });
+          stream.end(stdin);
+        });
+      });
+      let res;
+      if (auth.user === 'root') res = await run('bash -s', snippet);
+      else {
+        const nopass = await run('sudo -n true', '');
+        if (nopass.code === 0) res = await run('sudo -n bash -s', snippet);
+        else if (auth.password) res = await run(`sudo -S -p '' bash -s`, auth.password + '\n' + snippet);
+        else throw new Error(`у пользователя ${auth.user} нет sudo без пароля — укажите root или пароль пользователя`);
+      }
+      const secrets = [auth.password ?? '', auth.privateKey ?? ''];
+      log(mask(`bootstrap: exit ${res.code}\n${res.out.trim()}`, secrets));
+      if (res.code !== 0) throw new Error(`bootstrap завершился с ошибкой (код ${res.code}): ${mask(res.out.trim().split('\n').slice(-2).join(' '), secrets)}`);
+      if (!res.out.includes(seenFp.replace(/^SHA256:/, ''))) log('предупреждение: отпечаток в выводе сниппета не найден (нестандартный ssh-keygen?)');
+    } finally {
+      client.end();
     }
-    const secrets = [auth.password ?? '', auth.privateKey ?? ''];
-    log(mask(`bootstrap: exit ${res.code}\n${res.out.trim()}`, secrets));
-    if (res.code !== 0) throw new Error(`bootstrap завершился с ошибкой (код ${res.code}): ${mask(res.out.trim().split('\n').slice(-2).join(' '), secrets)}`);
-    if (!res.out.includes(seenFp.replace(/^SHA256:/, ''))) log('предупреждение: отпечаток в выводе сниппета не найден (нестандартный ssh-keygen?)');
+    ctx.updateServer(r.id, { host_key_fp: seenFp, host_key_pending_fp: null, host_key_algo: 'ssh-ed25519' });
   } finally {
-    client.end();
+    await via?.close();
   }
-  ctx.updateServer(r.id, { host_key_fp: seenFp, host_key_pending_fp: null, host_key_algo: 'ssh-ed25519' });
 }
 
-function explainConnect(e: Error & { level?: string; code?: string }, r: ServerRow): Error {
+function explainConnect(e: Error & { level?: string; code?: string }, r: ServerRow, viaProxy = false): Error {
   if (e.level === 'client-authentication') return new Error('сервер не принял логин/пароль или ключ');
+  if (viaProxy && (e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT' || /Timed out|handshake|closed/i.test(e.message)))
+    return new Error(`через прокси ${r.host}:${r.ssh_port} не ответил. Проверьте, что прокси рабочий (подключитесь им с телефона) и что порт SSH ${r.ssh_port} на сервере открыт`);
   if (e.code === 'ECONNREFUSED') return new Error(`порт SSH ${r.ssh_port} закрыт на ${r.host}`);
   if (e.code === 'ETIMEDOUT' || /Timed out/i.test(e.message))
-    return new Error(`${r.host}:${r.ssh_port} не отвечает по SSH. Если главный сервер в РФ и SSH режется — выберите канал «через туннель» и выполните сниппет вручную в консоли хостера`);
+    return new Error(`${r.host}:${r.ssh_port} не отвечает по SSH напрямую. Если главный сервер в РФ и SSH режется — выберите «Первичный доступ: через прокси» (конфигурация панели или своя ссылка vless://)`);
   return e;
 }
 

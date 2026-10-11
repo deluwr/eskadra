@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Ctx, InboundRow, ServerRow, TemplateRow, UserRow } from './ctx.js';
 import { getSetting } from './db.js';
-import { activeBotProxy, botCredKey } from './botproxy.js';
+import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
 import { certName, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
@@ -234,6 +234,8 @@ export class Vpn {
     const bot = activeBotProxy(this.ctx);
     if (bot && bot.template.id === t.id && bot.server.id === server.id)
       clients.push(xrayClient(sp, this.svcCred(botCredKey(t.id, server.id)), 'svc.bot'));
+    // через эту конфигурацию панель может зайти на SSH нового сервера при первичном доступе (onboard.ts, «через прокси»)
+    if (server.mgmt_mode !== 'local') clients.push(xrayClient(sp, this.svcCred(mgmtCredKey(t.id, server.id)), 'svc.mgmt'));
     return clients;
   }
 

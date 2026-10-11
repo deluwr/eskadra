@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { api, ago, type Server } from '../api';
 import { ErrorBox, Info, Seg, useAsync, usePoll } from '../ui';
 import { ServerTable } from '../ServerTable';
+import { ViaPicker, viaBody, viaReady, type Via } from '../ViaPicker';
 
 export function ServersPage() {
   const { data: servers, error, reload } = usePoll(() => api.get<Server[]>('/api/v1/servers'), 30_000);
@@ -58,10 +59,12 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
   const { busy, error, run } = useAsync();
   const { data: groups } = usePoll(() => api.get<Array<{ name: string }>>('/api/v1/groups'), null);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+  const [via, setVia] = useState<Via>({ kind: 'direct' });
   const create = (manual: boolean) => run(async () => {
-    const auth = manual ? undefined : f.method === 'password'
-      ? { user: f.user, password: f.password }
-      : { user: f.user, privateKey: f.privateKey, ...(f.passphrase ? { passphrase: f.passphrase } : {}) };
+    const auth = manual ? undefined : {
+      ...(f.method === 'password' ? { user: f.user, password: f.password } : { user: f.user, privateKey: f.privateKey, ...(f.passphrase ? { passphrase: f.passphrase } : {}) }),
+      ...viaBody(via),
+    };
     const r = await api.post<{ server: Server }>('/api/v1/servers', {
       name: f.name, host: f.host, sshPort: Number(f.sshPort), role: f.role, group: f.group, mgmtMode: f.mgmtMode, ...(auth ? { auth } : {}),
     });
@@ -117,9 +120,12 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
         </div>
       </fieldset>
 
+      {/* через прокси — значит SSH напрямую режется: и дальше управлять сервером лучше через туннель */}
+      <ViaPicker value={via} onChange={(v) => { setVia(v); if (v.kind !== 'direct') setF((x) => ({ ...x, mgmtMode: 'tunnel' })); }} mgmtMode={f.mgmtMode} />
+
       <ErrorBox error={error} />
       <div className="flex">
-        <button className="btn pri" disabled={busy || !hasSecret}>{busy ? 'Добавляю…' : 'Добавить и настроить'}</button>
+        <button className="btn pri" disabled={busy || !hasSecret || !viaReady(via)}>{busy ? 'Добавляю…' : 'Добавить и настроить'}</button>
         <button type="button" className="btn ghost" onClick={onCancel}>Отмена</button>
         <span style={{ flex: 1 }} />
         <button type="button" className="link" disabled={busy || !f.name || !f.host} onClick={() => void create(true)}>Без пароля: выполню команду на сервере сам</button>
