@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, fmtBytes, fmtTime, type Server, type User } from '../api';
-import { CopyButton, ErrorBox, Modal, Seg, Tag, useAsync, usePoll, ask, Info } from '../ui';
+import { CopyButton, ErrorBox, Modal, Seg, Tag, useAsync, usePoll, ask, Info, QrButton } from '../ui';
 
 interface Form {
   name: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
@@ -87,6 +87,19 @@ function SubServiceCard() {
   );
 }
 
+/** Импорт подписки в популярные клиенты по их схемам ссылок. */
+function importLinks(url: string, name: string): Array<[string, string]> {
+  const u = encodeURIComponent(url);
+  const n = encodeURIComponent(`Эскадра · ${name}`);
+  return [
+    ['Hiddify', `hiddify://import/${url}#${n}`],
+    ['v2rayNG', `v2rayng://install-sub?url=${u}&name=${n}`],
+    ['Happ', `happ://add/${url}`],
+    ['Streisand', `streisand://import/${url}#${n}`],
+    ['sing-box', `sing-box://import-remote-profile?url=${u}#${n}`],
+  ];
+}
+
 function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; wlOn: boolean }) {
   const [f, setF] = useState<Form>(user ? toForm(user) : emptyForm);
   const { data: groups } = usePoll(() => api.get<Array<{ name: string; traffic_gb: number | null; days: number | null; devices: number | null }>>('/api/v1/limit-groups'), null);
@@ -161,7 +174,12 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
           {mode === 'sub' ? (
             user.subUrl ? (
               <>
-                <div className="flex"><input className="inp mono" style={{ flex: 1 }} value={user.subUrl} readOnly aria-label="Ссылка подписки" /><CopyButton text={user.subUrl} /></div>
+                {user.profiles === 0 && <div className="alert warn">В подписке нет ни одного профиля — клиент (v2rayN и др.) ничего не добавит. Выкатите конфигурацию на серверы, доступные пользователю, и проверьте режимы подключения выше.</div>}
+                <div className="flex"><input className="inp mono" style={{ flex: 1 }} value={user.subUrl} readOnly aria-label="Ссылка подписки" /><CopyButton text={user.subUrl} /><QrButton text={user.subUrl} title={`Подписка · ${user.name}`} /></div>
+                <div className="flex" style={{ gap: 6 }}>
+                  <span className="k">Открыть в приложении <Info>Кнопки работают на устройстве, где установлено приложение. В v2rayN (Windows) — «Подписки → Добавить», вставьте ссылку; или отсканируйте QR с экрана.</Info></span>
+                  {importLinks(user.subUrl, user.name).map(([n, href]) => <a key={n} className="btn ghost sm" href={href}>{n}</a>)}
+                </div>
                 <div className="flex"><button className="btn sm" onClick={() => void rotate('sub')}>Сменить токен</button>{user.knockUrl && <CopyButton text={user.knockUrl} label="Knock-ссылка" />}</div>
                 <span className="k">Одна ссылка, обновляется сама. Профилей внутри: {user.profiles}.</span>
               </>
@@ -172,7 +190,7 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
               {links?.map((l) => (
                 <div key={l.key} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}>
                   <span className="row-text" style={{ minWidth: 0 }}><b className="small">{l.name}</b><span className="k mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 260 }}>{l.uri}</span></span>
-                  <CopyButton text={l.uri} />
+                  <span className="flex" style={{ gap: 6 }}><QrButton text={l.uri} title={l.name} /><CopyButton text={l.uri} /></span>
                 </div>
               ))}
               {links && !links.length && <span className="k">Нет активных профилей: выкатите конфигурацию на доступные узлы.</span>}

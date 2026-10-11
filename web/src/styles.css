@@ -191,3 +191,7 @@ pre.code { margin: 0; background: var(--code); color: var(--code-text); border-r
 .onb li.done { color: var(--text); } .onb li.done .onb-n { background: var(--ok-bg); color: var(--ok); }
 .onb li.cur { color: var(--text); border-color: var(--accent); } .onb li.cur .onb-n { background: var(--accent-bg); color: var(--accent); }
 .onb li.fail { color: var(--text); border-color: var(--fail); } .onb li.fail .onb-n { background: var(--fail-bg); color: var(--fail); }
+
+/* QR-код: белый фон всегда, иначе в тёмной теме не сканируется */
+.qr { background: #fff; border-radius: 10px; padding: 6px; }
+.qr svg { width: 100%; height: 100%; display: block; }

@@ -2,6 +2,11 @@ import { useEffect, useState } from 'react';
 import { api, type Job, type Server, type Template } from '../api';
 import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, useAsync, usePoll, ask } from '../ui';
 
+const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
+/** Имя конфигурации: строчная латиница, цифры и дефис — регистр и пробелы исправляются сами, кириллица транслитерируется. */
+export const slugName = (v: string) => v.toLowerCase().split('').map((c) => TRANSLIT[c] ?? c).join('')
+  .replace(/[\s_.]+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-/, '').slice(0, 48);
+
 type Protocol = 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'mtproto';
 type Security = 'reality' | 'tls' | 'none';
 type Transport = 'tcp' | 'ws' | 'grpc' | 'xhttp' | 'httpupgrade';
@@ -95,7 +100,6 @@ export function ConfigsPage() {
           {current && <Preview t={current} servers={servers ?? []} />}
         </div>
       </div>
-      <CoresPanel />
     </>
   );
 }
@@ -108,7 +112,7 @@ interface CoresInfo {
   servers: Array<{ id: string; name: string; mode: 'own' | 'xui'; xray: { version: string; previous?: string } | null; singbox: { version: string; previous?: string } | null; xui: { version: string; panel?: string } | null; outdated: string[] }>;
 }
 
-function CoresPanel() {
+export function CoresPanel() {
   const { data, reload } = usePoll(() => api.get<CoresInfo>('/api/v1/cores'), null);
   const [core, setCore] = useState<'xray' | 'sing-box'>('xray');
   const [version, setVersion] = useState('latest');
@@ -230,7 +234,7 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
             {(Object.keys(PROTO) as Protocol[]).map((p) => <option key={p} value={p}>{PROTO[p].name}</option>)}
           </select>
         </label>
-        <label className="fld">Имя<input className="inp mono" value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} placeholder={`${d.protocol}-${st.security === 'none' ? 'plain' : st.security}`} /></label>
+        <label className="fld"><span>Имя <Info>Строчная латиница, цифры и дефис — заглавные, пробелы и кириллица исправляются сами. Имя можно поменять в любой момент.</Info></span><input className="inp mono" value={d.name} onChange={(e) => setD({ ...d, name: slugName(e.target.value) })} placeholder={`${d.protocol}-${st.security === 'none' ? 'plain' : st.security}`} /></label>
         <label className="fld"><span>Порт ({info.udp ? 'UDP' : 'TCP'}) <Info>Откроется на серверах сам после проверки: не SSH, не занят, в диапазоне группы.{d.protocol === 'mtproto' ? ' Для MTProto лучше 443 — так соединение больше похоже на обычный HTTPS.' : ''}</Info></span>
           <input className="inp mono" value={d.port} onChange={(e) => setD({ ...d, port: e.target.value })} inputMode="numeric" />
         </label>
@@ -391,18 +395,20 @@ function JobLog({ id, onDone }: { id: number; onDone: () => void }) {
   );
 }
 
+/** Итоговый конфиг ядра для сервера — для проверки; свёрнут, загружается только при открытии. */
 function Preview({ t, servers }: { t: Template; servers: Server[] }) {
   const ids = [...t.node_ids, ...(t.entry_id ? [t.entry_id] : [])];
   const [sid, setSid] = useState(ids[0] ?? '');
-  const { data } = usePoll(() => (sid ? api.get<{ config: string | null }>(`/api/v1/templates/${t.id}/preview?server=${sid}`) : Promise.resolve({ config: null })), null, [sid, t.revision]);
+  const [open, setOpen] = useState(false);
+  const { data } = usePoll(() => (open && sid ? api.get<{ config: string | null }>(`/api/v1/templates/${t.id}/preview?server=${sid}`) : Promise.resolve({ config: null })), null, [sid, t.revision, open]);
   if (!ids.length) return null;
   return (
-    <section className="card pad stack">
-      <div className="flex" style={{ justifyContent: 'space-between' }}>
-        <h2>Рендер для узла</h2>
-        <select className="inp" style={{ width: 'auto' }} value={sid} onChange={(e) => setSid(e.target.value)} aria-label="Узел">{ids.map((i) => <option key={i} value={i}>{servers.find((s) => s.id === i)?.name ?? i}</option>)}</select>
+    <details className="card pad" onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary className="k" style={{ cursor: 'pointer' }}>Итоговый конфиг для сервера <Info>Что получит ядро на выбранном сервере после выката. Секреты скрыты. Нужно только для проверки.</Info></summary>
+      <div className="stack" style={{ paddingTop: 12 }}>
+        <select className="inp" style={{ width: 'auto' }} value={sid} onChange={(e) => setSid(e.target.value)} aria-label="Сервер">{ids.map((i) => <option key={i} value={i}>{servers.find((s) => s.id === i)?.name ?? i}</option>)}</select>
+        {data?.config ? <CopyBlock text={data.config} /> : <p className="k">Конфиг появится после выката (нужны ключи с сервера).</p>}
       </div>
-      {data?.config ? <CopyBlock text={data.config} /> : <p className="k">Конфиг появится после выката (нужны ключи с узла).</p>}
-    </section>
+    </details>
   );
 }

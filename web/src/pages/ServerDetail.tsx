@@ -19,7 +19,7 @@ export function ServerDetailPage({ id }: { id: string }) {
       <div className="page-head">
         <div className="stack" style={{ gap: 6 }}>
           <a href="#/servers" className="k">← Серверы</a>
-          <h1>{s.name} <StagePip stage={s.stage} /></h1>
+          <h1><ServerName id={s.id} name={s.name} onSaved={reload} /> <StagePip stage={s.stage} /></h1>
           <span className="k">
             <span className="mono">{s.host}</span> · {roleLabel(s)} · защита <Level value={s.protection_current} />
             <Info label="Подробности о сервере">
@@ -32,7 +32,7 @@ export function ServerDetailPage({ id }: { id: string }) {
         <HeaderActions d={d} onChange={reload} />
       </div>
       <ErrorBox error={error} />
-      {s.fail_since && <div className="alert fail">Нет связи с узлом с {fmtTime(s.fail_since)}. Если сбой продлится дольше порога, чек-лист придётся пройти заново.</div>}
+      {s.fail_since && <div className="alert fail">Нет связи с сервером с {fmtTime(s.fail_since)}.{s.protection_target !== 'P1' ? ' Если сбой продлится дольше порога из настроек, проверку перед защитой придётся пройти заново.' : ''}</div>}
       {s.fw_mode === 'pending' && <PendingBanner d={d} onChange={reload} />}
 
       {onboarding ? <Onboarding d={d} onChange={reload} /> : (
@@ -51,6 +51,22 @@ export function ServerDetailPage({ id }: { id: string }) {
         </>
       )}
     </>
+  );
+}
+
+/** Имя сервера с переименованием по нажатию. */
+function ServerName({ id, name, onSaved }: { id: string; name: string; onSaved: () => void }) {
+  const [edit, setEdit] = useState(false);
+  const [v, setV] = useState(name);
+  const { busy, error, run } = useAsync();
+  if (!edit) return <span className="flex" style={{ gap: 6, display: 'inline-flex' }}>{name}<button className="btn ghost sm" aria-label="Переименовать" onClick={() => { setV(name); setEdit(true); }}>✎</button></span>;
+  return (
+    <form className="flex" style={{ display: 'inline-flex' }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.patch(`/api/v1/servers/${id}`, { name: v.trim() }); setEdit(false); onSaved(); }); }}>
+      <input className="inp" style={{ width: 220, fontSize: 18 }} value={v} onChange={(e) => setV(e.target.value)} autoFocus maxLength={64} aria-label="Имя сервера" />
+      <button className="btn sm pri" disabled={busy || !v.trim()}>Сохранить</button>
+      <button type="button" className="btn ghost sm" onClick={() => setEdit(false)}>Отмена</button>
+      {error && <span className="tag fail">{error}</span>}
+    </form>
   );
 }
 
@@ -195,10 +211,11 @@ function ManualSnippet({ d, open }: { d: ServerDetail; open: boolean }) {
 
 // ───── вкладка «Защита» ─────
 
+/** Уровни защиты: что в каждый входит. Высокая включает всё из средней. */
 const LEVELS = [
-  { code: 'P1', name: 'Обычная', desc: 'Сервер как есть, ничего не блокируется.' },
-  { code: 'P2', name: 'Средняя', desc: 'Закрыты все порты, кроме нужных.' },
-  { code: 'P3', name: 'Высокая', desc: 'Ещё SSH только с адресов панели и админов и только по ключам.' },
+  { code: 'P1', name: 'Обычная', base: null, items: ['Сервер работает как есть, ничего не блокируется', 'Панель только следит за состоянием'] },
+  { code: 'P2', name: 'Средняя', base: null, items: ['Закрыты все входящие порты, кроме нужных: SSH, порты конфигураций, связь между вашими серверами', 'На главном сервере открыты ещё панель и подписки'] },
+  { code: 'P3', name: 'Высокая', base: 'Всё из средней, плюс:', items: ['SSH пускает только адреса панели и ваши админские адреса', 'Вход по SSH только по ключам — пароли выключаются'] },
 ] as const;
 
 interface Plan { text: string; lint: string[]; warnings: string[]; summary: { level: string; stealth: string; sshPorts: number[]; svcTcp: number[]; svcUdp: number[]; panel: string[]; admin: string[]; peers: string[]; users: number } }
@@ -206,74 +223,96 @@ interface Plan { text: string; lint: string[]; warnings: string[]; summary: { le
 function ProtectTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
-  const [plan, setPlan] = useState<Plan | null>(null);
-  const [win, setWin] = useState(120);
-  const [shadow, setShadow] = useState<Array<{ flow: string; count: number }> | null>(null);
-  const passed = !!d.checklist.passedAt;
-  const fwStage = s.fw_mode === 'enforced' ? 5 : s.fw_mode === 'pending' ? 4 : s.fw_mode === 'shadow' ? 3 : plan ? 2 : passed ? 2 : 1;
-
   return (
     <div className="stack" style={{ gap: 20 }}>
       <section className="stack">
         <div className="flex" style={{ justifyContent: 'space-between' }}>
-          <h2>Уровень защиты <Info>Выбранный уровень включается не сразу: сначала короткий чек-лист, затем правила с автоматическим откатом, если доступ пропадёт.</Info></h2>
+          <h2>Уровень защиты</h2>
           <span className="k">Сейчас: <Level value={s.protection_current} /></span>
         </div>
         <div className="grid g3">
           {LEVELS.map((l) => (
             <button key={l.code} className={`lvl ${s.protection_target === l.code ? 'on' : ''}`} aria-pressed={s.protection_target === l.code} disabled={busy}
-              onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { protectionTarget: l.code }); setPlan(null); onChange(); })}>
+              onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { protectionTarget: l.code }); onChange(); })}>
               <span style={{ fontSize: 17, fontWeight: 600 }}>{l.name}</span>
-              <span className="k">{l.desc}</span>
+              {l.base && <span className="k">{l.base}</span>}
+              <span className="stack" style={{ gap: 6 }}>{l.items.map((x) => <span key={x} className="ctl"><span style={{ width: 14, color: 'var(--ok)', fontWeight: 700 }}>✓</span>{x}</span>)}</span>
             </button>
           ))}
         </div>
+        <ErrorBox error={error} />
       </section>
+      {s.protection_target !== 'P1' && <ProtectSteps d={d} onChange={onChange} />}
+    </div>
+  );
+}
 
-      {s.protection_target !== 'P1' && (
-        <section className="card pad stack" style={{ gap: 18 }}>
-          <div className="flex" style={{ justifyContent: 'space-between' }}>
-            <div><h2>Применение блокировок</h2><span className="k">Режим firewall: {s.fw_mode}</span></div>
+/** Включение средней/высокой защиты: проверка доступа → пробный режим → включение с автоматическим откатом. */
+function ProtectSteps({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
+  const s = d.server;
+  const { busy, error, run } = useAsync();
+  const [win, setWin] = useState(120);
+  const [report, setReport] = useState<Array<{ flow: string; count: number }> | null>(null);
+  // план правил строится сам — пользователь видит только найденные проблемы
+  const { data: plan } = usePoll(() => api.post<Plan>(`/api/v1/servers/${s.id}/fw/plan`, {}), null, [s.protection_target, s.fw_mode, s.checklist_passed_at]);
+  const passed = !!d.checklist.passedAt;
+  const trial = s.fw_mode === 'shadow';
+  const enforced = s.fw_mode === 'enforced' && s.protection_current === s.protection_target;
+  const blocked = !!plan?.lint.length || !!s.ufw_active;
+
+  if (enforced) return (
+    <section className="card pad stack">
+      <div className="alert ok">Защита «{LEVELS.find((l) => l.code === s.protection_target)?.name.toLowerCase()}» включена.</div>
+      {s.protection_target === 'P3' && <KeyOnly d={d} onChange={onChange} />}
+    </section>
+  );
+
+  return (
+    <section className="card pad stack" style={{ gap: 18 }}>
+      <h2>Как включить</h2>
+      {s.ufw_active ? <div className="alert warn">На сервере включён ufw/firewalld — он мешает правилам Эскадры. Выключите его на вкладке «Хост».</div> : null}
+      {plan?.lint.map((l) => <div key={l} className="alert fail">{l}</div>)}
+
+      <div className="stack" style={{ gap: 8 }}>
+        <h3>1. Проверьте, что не потеряете доступ <Info>Отметьте то, что проверили сами. Пункты с пометкой «авто» панель проверяет сама.</Info></h3>
+        <Checklist d={d} onChange={onChange} />
+      </div>
+
+      <div className="stack" style={{ gap: 8 }}>
+        <h3>2. Пробный режим (по желанию) <Info>Правила ставятся, но ничего не блокируют: сервер только записывает, кого бы он отрезал. Оставьте на несколько часов, затем посмотрите отчёт — если там ваши адреса или нужные сервисы, значит, что-то не учтено.</Info></h3>
+        <div className="flex">
+          {trial ? <Tag kind="info" dot>пробный режим включён</Tag>
+            : <button className="btn" disabled={busy || blocked} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/fw/shadow`, {}); onChange(); })}>Включить пробный режим</button>}
+          {trial && <button className="btn" disabled={busy} onClick={() => void run(async () => setReport((await api.get<{ top: Array<{ flow: string; count: number }> }>(`/api/v1/servers/${s.id}/fw/shadow-log?minutes=1440`)).top))}>Показать отчёт пробного режима</button>}
+        </div>
+        {report && (report.length
+          ? <><span className="small">За последние сутки защита отрезала бы эти подключения (источник → порт, число попыток):</span><pre className="code">{report.map((h) => `${String(h.count).padStart(6)}  ${h.flow}`).join('\n')}</pre></>
+          : <div className="alert ok">За последние сутки защита никого бы не отрезала — можно включать.</div>)}
+      </div>
+
+      <div className="stack" style={{ gap: 8 }}>
+        <h3>3. Включите защиту <Info>Правила включаются с таймером: если за выбранное время вы не подтвердите, что доступ к серверу есть, сервер сам вернёт всё как было.</Info></h3>
+        <div className="flex">
+          <label className="flex small">время на проверку
+            <select className="inp" style={{ width: 'auto' }} value={win} onChange={(e) => setWin(Number(e.target.value))} aria-label="Время на проверку"><option value={120}>2 минуты</option><option value={300}>5 минут</option><option value={600}>10 минут</option></select>
+          </label>
+          <button className="btn pri" disabled={busy || !passed || blocked} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/fw/apply`, { window: win }); onChange(); })}>Включить защиту</button>
+        </div>
+        {!passed && <span className="k">Сначала отметьте пункты шага 1.</span>}
+      </div>
+
+      {plan && (
+        <details>
+          <summary className="k" style={{ cursor: 'pointer' }}>Технические подробности правил</summary>
+          <div className="stack" style={{ paddingTop: 8 }}>
+            {plan.warnings.map((w) => <div key={w} className="alert warn small">{w}</div>)}
+            <span className="k">SSH {plan.summary.sshPorts.join(', ')} · адреса панели {plan.summary.panel.join(', ') || '—'} · админы {plan.summary.admin.join(', ') || '—'} · серверов флота {plan.summary.peers.length} · порты TCP {plan.summary.svcTcp.join(', ') || '—'} · UDP {plan.summary.svcUdp.join(', ') || '—'}</span>
+            <CopyBlock text={plan.text} />
           </div>
-          <div className="pipeline" aria-label="Этапы применения">
-            {['Наблюдение', 'Ручной чек-лист', 'План и линтер', 'Shadow', 'Таймер отката', 'Подтверждено'].map((t, i) => (
-              <span key={t} className={`pst ${i < fwStage ? 'done' : i === fwStage ? 'cur' : ''}`}><b>{i < fwStage ? '✓' : i + 1}</b>{t}</span>
-            ))}
-          </div>
-          {s.ufw_active ? <div className="alert warn">На узле включён firewall хоста (ufw/firewalld): он перебивает разрешения nftables. Выключите его на вкладке «Хост».</div> : null}
-          <div className="split">
-            <div className="wide"><Checklist d={d} onChange={onChange} /></div>
-            <div className="narrow stack">
-              <h3>План</h3>
-              <div className="flex">
-                <button className="btn" disabled={busy} onClick={() => void run(async () => setPlan(await api.post<Plan>(`/api/v1/servers/${s.id}/fw/plan`, {})))}>Построить план</button>
-                {plan && <Tag kind={plan.lint.length ? 'fail' : 'ok'}>{plan.lint.length ? `линтер: ${plan.lint.length}` : 'линтер пройден'}</Tag>}
-              </div>
-              {plan && (
-                <>
-                  {plan.lint.map((l) => <div key={l} className="alert fail">{l}</div>)}
-                  {plan.warnings.map((w) => <div key={w} className="alert warn">{w}</div>)}
-                  <div className="k">SSH {plan.summary.sshPorts.join(', ')} · панель {plan.summary.panel.join(', ')} · админы {plan.summary.admin.join(', ') || '—'} · ноды {plan.summary.peers.length} · сервисные tcp {plan.summary.svcTcp.join(', ') || '—'} udp {plan.summary.svcUdp.join(', ') || '—'} · скрытность {plan.summary.stealth} · IP пользователей {plan.summary.users}</div>
-                  <details><summary className="k" style={{ cursor: 'pointer' }}>Текст плана nft</summary><CopyBlock text={plan.text} /></details>
-                  <div className="flex">
-                    <button className="btn" disabled={busy || !!plan.lint.length} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/fw/shadow`, {}); onChange(); })}>Включить shadow</button>
-                    <button className="btn ghost" disabled={busy} onClick={() => void run(async () => setShadow((await api.get<{ top: Array<{ flow: string; count: number }> }>(`/api/v1/servers/${s.id}/fw/shadow-log?minutes=1440`)).top))}>Что бы заблокировалось</button>
-                  </div>
-                  {shadow && (shadow.length ? <pre className="code">{shadow.map((h) => `${String(h.count).padStart(6)}  ${h.flow}`).join('\n')}</pre> : <p className="k">За сутки ничего бы не заблокировалось (или shadow ещё не включался).</p>)}
-                  <div className="flex">
-                    <select className="inp" style={{ width: 'auto' }} value={win} onChange={(e) => setWin(Number(e.target.value))} aria-label="Окно подтверждения"><option value={120}>120 с</option><option value={300}>300 с</option><option value={600}>600 с</option></select>
-                    <button className="btn pri" disabled={busy || !passed || !!plan.lint.length || !!s.ufw_active} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/fw/apply`, { window: win }); onChange(); })}>Применить под таймером</button>
-                  </div>
-                  {!passed && <span className="k">Применение откроется после ручного чек-листа.</span>}
-                </>
-              )}
-            </div>
-          </div>
-          {s.protection_target === 'P3' && s.fw_mode === 'enforced' && <KeyOnly d={d} onChange={onChange} />}
-        </section>
+        </details>
       )}
       <ErrorBox error={error} />
-    </div>
+    </section>
   );
 }
 
@@ -283,7 +322,7 @@ function Checklist({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const done = d.checklist.items.filter((i) => (i.auto ? i.done : marks[i.id])).length;
   return (
     <div className="stack" style={{ gap: 4 }}>
-      <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Ручной чек-лист</h3><span className="k">{done} из {d.checklist.total} · {d.checklist.passedAt ? `пройден ${fmtTime(d.checklist.passedAt)}` : 'проходится один раз'}</span></div>
+      <span className="k">{done} из {d.checklist.total}{d.checklist.passedAt ? ' · пройдено' : ''}</span>
       {d.checklist.items.map((i) => (
         <label key={i.id} className="cb" style={{ borderTop: '1px solid var(--line)', padding: '6px 0', alignItems: 'flex-start' }}>
           <input type="checkbox" disabled={i.auto} checked={i.auto ? i.done : !!marks[i.id]} onChange={(e) => setMarks({ ...marks, [i.id]: e.target.checked })} />
@@ -291,7 +330,6 @@ function Checklist({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         </label>
       ))}
       <div className="flex" style={{ marginTop: 8 }}><button className="btn" disabled={busy} onClick={() => void run(async () => { await api.put(`/api/v1/servers/${d.server.id}/checklist`, marks); onChange(); })}>Сохранить отметки</button></div>
-      <div className="alert info small">Пройденный чек-лист не истекает. Проверять заново нужно только после сбоя: нет связи с узлом или между узлами дольше порога (Настройки), а также после смены SSH или пересборки узла.</div>
       <ErrorBox error={error} />
     </div>
   );
@@ -303,7 +341,7 @@ function KeyOnly({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   return (
     <div className="row" style={{ padding: '14px 0 0' }}>
-      <div className="row-text"><b>C3 · SSH только по ключам</b><span className="k">Под таймером отката 180 с. Включайте, только если вход своим ключом проверен.</span></div>
+      <div className="row-text"><b>Вход по SSH только по ключам <Info>Пароли для SSH выключаются. Включается с таймером: если за 3 минуты не подтвердить, что вход работает, сервер вернёт как было. Включайте, только если входите на сервер своим ключом.</Info></b></div>
       {s.key_only ? <Tag kind="ok">включено</Tag> : pending ? (
         <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/key-only`, { action: 'confirm' }); setPending(false); onChange(); })}>Вход работает — подтвердить</button>
           <button className="btn" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/key-only`, { action: 'rollback' }); setPending(false); onChange(); })}>Откатить</button></div>

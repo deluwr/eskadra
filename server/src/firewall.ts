@@ -144,16 +144,16 @@ export function renderPlan(ctx: Ctx, s: ServerRow, level: 'P2' | 'P3'): PlanResu
 export interface ChecklistItem { id: string; title: string; auto: boolean }
 
 export const CHECKLIST: ChecklistItem[] = [
-  { id: 'panel_ssh', title: 'SSH панели в новой сессии', auto: true },
-  { id: 'admin_key', title: 'Вход своим ключом с вашего устройства (независимый путь)', auto: false },
-  { id: 'console', title: 'Консоль хостера открывается, вход работает', auto: false },
-  { id: 'breakglass', title: 'Break-glass: вход в консоль под fleetadmin, sudo fleetctl status отвечает', auto: false },
+  { id: 'panel_ssh', title: 'Панель заходит на сервер', auto: true },
+  { id: 'admin_key', title: 'Вы сами заходите на сервер по SSH со своего устройства', auto: false },
+  { id: 'console', title: 'Консоль в панели хостера открывается, вход в неё работает', auto: false },
+  { id: 'breakglass', title: 'Аварийный вход: в консоли хостера вход под fleetadmin работает (пароль выдаётся на вкладке «Аварийный доступ»)', auto: false },
   { id: 'panel_web', title: 'Панель открывается с вашего устройства', auto: false },
-  { id: 'inbounds', title: 'Каждый inbound подключается реальным клиентом из домашней и мобильной сети', auto: false },
-  { id: 'subs', title: 'Подписка импортируется в клиенты', auto: false },
-  { id: 'mesh', title: 'Связь с соседними нодами проходит', auto: true },
-  { id: 'executor', title: 'Узел видит панель с адреса из executor.ips', auto: true },
-  { id: 'snapshot', title: 'Снапшот VM у провайдера сделан', auto: false },
-  { id: 'open_list', title: 'Просмотрен список того, что останется открытым', auto: false },
-  { id: 'key_two_paths', title: 'Для P3: вход по ключу проверен двумя путями (панель и ваш ключ)', auto: false },
+  { id: 'inbounds', title: 'Каждая конфигурация подключается из домашней и мобильной сети', auto: false },
+  { id: 'subs', title: 'Подписка добавляется в клиент', auto: false },
+  { id: 'mesh', title: 'Связь с другими вашими серверами есть', auto: true },
+  { id: 'executor', title: 'Сервер видит панель с ожидаемого адреса', auto: true },
+  { id: 'snapshot', title: 'Снимок (снапшот) сервера у хостера сделан', auto: false },
+  { id: 'open_list', title: 'Вы посмотрели, что останется открытым (подробности правил на шаге 3)', auto: false },
+  { id: 'key_two_paths', title: 'Для высокой защиты: вход по ключу работает и у панели, и у вас', auto: false },
 ];

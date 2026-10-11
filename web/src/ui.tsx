@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import qrcode from 'qrcode-generator';
 
 export function useAsync() {
   const [busy, setBusy] = useState(false);
@@ -98,11 +99,14 @@ export const Icon = {
   audit: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" /></svg>,
   settings: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></svg>,
   sun: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>,
+  cores: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></svg>,
   help: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01" /></svg>,
   moon: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" /></svg>,
 };
 
 export const STAGES = ['не подключён', 'подключён', 'настроен', 'проверен', 'защищён'];
+/** Что значат четыре полоски этапа: зелёная — пройден, оранжевая — следующий шаг, серая — ещё впереди. */
+export const STAGE_HELP = 'Четыре полоски — этапы сервера: 1 подключён (панель входит своим ключом) → 2 настроен (служебные скрипты и ядра) → 3 проверен (чек-лист защиты пройден) → 4 защищён (блокировки включены). Зелёная — этап пройден, оранжевая — следующий шаг, серая — ещё впереди. Для обычной защиты достаточно этапа 2.';
 
 /** Подсказка (i): текст по наведению, фокусу или нажатию — вместо абзацев пояснений в интерфейсе. */
 export function Info({ children, label = 'Подсказка' }: { children: ReactNode; label?: string }) {
@@ -128,11 +132,39 @@ export function Level({ value }: { value: string }) {
 export function StagePip({ stage }: { stage: number }) {
   return (
     <div>
-      <div className="pip" aria-label={`этап ${stage} из 4`}>
+      <div className="pip" aria-label={`этап ${stage} из 4`} title={STAGE_HELP}>
         {[1, 2, 3, 4].map((i) => <i key={i} className={i <= stage ? 'd' : i === stage + 1 ? 'c' : ''} />)}
       </div>
       <div className="k">{STAGES[stage]}</div>
     </div>
+  );
+}
+
+/** QR-код как SVG (масштабируется без размытия). */
+export function Qr({ text, size = 260 }: { text: string; size?: number }) {
+  const qr = qrcode(0, 'M');
+  qr.addData(text, 'Byte');
+  qr.make();
+  const svg = qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true });
+  return <div className="qr" style={{ width: size, height: size }} role="img" aria-label="QR-код" dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
+/** Кнопка «QR»: окно с кодом для сканирования телефоном и копированием. */
+export function QrButton({ text, title, label = 'QR' }: { text: string; title: string; label?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button type="button" className="btn sm" onClick={() => setOpen(true)}>{label}</button>
+      {open && (
+        <Modal title={title} onClose={() => setOpen(false)}>
+          <div className="stack" style={{ alignItems: 'center' }}>
+            <Qr text={text} />
+            <span className="k mono" style={{ wordBreak: 'break-all', maxWidth: 360 }}>{text.length > 140 ? text.slice(0, 140) + '…' : text}</span>
+            <div className="flex"><CopyButton text={text} /><button className="btn ghost sm" onClick={() => setOpen(false)}>Закрыть</button></div>
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
 

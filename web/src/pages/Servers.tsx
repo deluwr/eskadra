@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { api, ago, type Server } from '../api';
-import { ErrorBox, Info, Level, Seg, StagePip, Tag, roleLabel, useAsync, usePoll } from '../ui';
+import { ErrorBox, Info, Level, STAGE_HELP, Seg, StagePip, Tag, roleLabel, useAsync, usePoll } from '../ui';
 
 export function ServersPage() {
   const { data: servers, error, reload } = usePoll(() => api.get<Server[]>('/api/v1/servers'), 30_000);
@@ -15,18 +15,18 @@ export function ServersPage() {
       <div className="page-head">
         <div><h1>Серверы</h1><p>Узлы флота и их состояние</p></div>
         <div className="flex">
-          {servers && !self && <SelfNodeButton onDone={(id) => { void reload(); location.hash = `#/server/${id}`; }} />}
           <button className="btn pri" onClick={() => setAdding((v) => !v)}>{adding ? 'Скрыть форму' : 'Добавить сервер'}</button>
         </div>
       </div>
       <ErrorBox error={error} />
+      {servers && !self && <SelfNodeCard onDone={(id) => { void reload(); location.hash = `#/server/${id}`; }} />}
       {adding && <AddServerForm onCreated={(id) => { void reload(); location.hash = `#/server/${id}`; }} onCancel={() => setAdding(false)} />}
       <Seg value={filter} onChange={setFilter} label="Фильтр" options={[
         ['all', `Все · ${servers?.length ?? 0}`], ['entry', 'Входы'], ['exit', 'Выходы'], ['attn', 'Требуют внимания'],
       ]} />
       <section className="card table-wrap">
         <table>
-          <thead><tr><th>Сервер</th><th>Роль</th><th>Этап</th><th>Защита</th><th>Связь</th></tr></thead>
+          <thead><tr><th>Сервер</th><th>Роль</th><th>Этап <Info>{STAGE_HELP}</Info></th><th>Защита</th><th>Связь</th></tr></thead>
           <tbody>
             {list.map((s) => (
               <tr key={s.id} className="clickable" onClick={() => (location.hash = `#/server/${s.id}`)}>
@@ -46,17 +46,22 @@ export function ServersPage() {
 }
 
 /** Главный сервер (где работает панель) становится входом для пользователей — одной кнопкой. */
-function SelfNodeButton({ onDone }: { onDone: (id: string) => void }) {
+function SelfNodeCard({ onDone }: { onDone: (id: string) => void }) {
   const { busy, error, run } = useAsync();
   return (
-    <span className="flex">
-      <button className="btn" disabled={busy} onClick={() => void run(async () => {
-        const r = await api.post<{ server: Server }>('/api/v1/servers/self');
-        onDone(r.server.id);
-      })}>{busy ? 'Подключаю…' : 'Главный сервер — вход'}</button>
-      <Info>Сервер с панелью тоже начнёт принимать пользователей и пересылать их на выходы. Панель настроит его сама; порты панели и подписок останутся открытыми, защита по умолчанию — обычная.</Info>
-      {error && <span className="tag fail">{error}</span>}
-    </span>
+    <section className="card pad flex" style={{ justifyContent: 'space-between', borderColor: 'var(--accent)' }}>
+      <div className="row-text" style={{ maxWidth: 640 }}>
+        <b>Главный сервер может быть входом</b>
+        <span className="small">Сервер, на котором работает панель, пока не принимает пользователей. Если сделать его входом, пользователи будут подключаться к нему, а он — пересылать трафик на выходы. Удобно, когда главный сервер в РФ: к нему проще подключиться.</span>
+      </div>
+      <div className="stack" style={{ alignItems: 'flex-end' }}>
+        <button className="btn pri" disabled={busy} onClick={() => void run(async () => {
+          const r = await api.post<{ server: Server }>('/api/v1/servers/self');
+          onDone(r.server.id);
+        })}>{busy ? 'Подключаю…' : 'Сделать главный сервер входом'}</button>
+        <ErrorBox error={error} />
+      </div>
+    </section>
   );
 }
 
@@ -115,11 +120,11 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
         <div className="choice">
           <label>
             <input type="radio" name="mgmt" value="direct" checked={f.mgmtMode === 'direct'} onChange={set('mgmtMode')} />
-            <span><b>Напрямую по SSH</b><span className="k">главный сервер вне РФ</span></span>
+            <span><b>Напрямую по SSH</b></span>
           </label>
           <label>
             <input type="radio" name="mgmt" value="tunnel" checked={f.mgmtMode === 'tunnel'} onChange={set('mgmtMode')} />
-            <span><b>Через туннель</b><span className="k">главный сервер в РФ</span></span>
+            <span><b>Через туннель</b></span>
           </label>
         </div>
       </fieldset>

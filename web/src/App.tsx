@@ -12,6 +12,7 @@ import { SettingsPage } from './pages/Settings';
 import { BackupsPage } from './pages/Backups';
 import { AuditPage } from './pages/Audit';
 import { HelpPage } from './pages/Help';
+import { CoresPage } from './pages/Cores';
 
 type Route = { page: string; id?: string };
 const parseHash = (): Route => {
@@ -54,7 +55,7 @@ export function App() {
 
   const logout = async () => { await api.post('/api/v1/auth/logout'); void refreshAuth(); };
   const nav: Array<[string, string, ReactNode]> = [
-    ['overview', 'Обзор', Icon.overview], ['servers', 'Серверы', Icon.servers], ['configs', 'Конфигурации', Icon.configs],
+    ['overview', 'Обзор', Icon.overview], ['servers', 'Серверы', Icon.servers], ['configs', 'Конфигурации', Icon.configs], ['cores', 'Ядра', Icon.cores],
     ['users', 'Пользователи', Icon.users], ['ports', 'Порты и связность', Icon.ports], ['access', 'Права и роли', Icon.access],
   ];
   const nav2: Array<[string, string, ReactNode]> = [['backups', 'Бэкапы', Icon.backups], ['audit', 'Аудит', Icon.audit], ['settings', 'Настройки', Icon.settings], ['help', 'Справка', Icon.help]];
@@ -92,6 +93,7 @@ export function App() {
           {route.page === 'backups' && <BackupsPage />}
           {route.page === 'audit' && <AuditPage />}
           {route.page === 'help' && <HelpPage />}
+          {route.page === 'cores' && <CoresPage />}
         </main>
       </div>
       {otpAsk && <OtpModal onDone={(code) => { otpAsk(code); setOtpAsk(null); }} />}

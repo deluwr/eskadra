@@ -26,8 +26,13 @@ const settingsBody = z.object({
   sniffing: z.boolean().optional(),
 }).default({});
 
+const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
+/** Имя конфигурации: строчная латиница, цифры и дефис — регистр и пробелы исправляются сами, кириллица транслитерируется. */
+export const slugName = (v: string) => v.toLowerCase().split('').map((c) => TRANSLIT[c] ?? c).join('')
+  .replace(/[\s_.]+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-/, '').slice(0, 48);
+
 const body = z.object({
-  name: z.string().trim().min(1).max(48).regex(/^[a-z0-9-]+$/, 'только латиница в нижнем регистре, цифры и дефис'),
+  name: z.preprocess((v) => (typeof v === 'string' ? slugName(v).replace(/-$/, '') : v), z.string().min(1, 'имя: укажите латиницей или цифрами').max(48)),
   protocol: z.enum(['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2', 'mtproto']),
   port: z.number().int().min(1).max(65535),
   sni: z.array(z.string().trim().regex(/^[A-Za-z0-9.-]{1,253}$/)).max(16).default([]),
