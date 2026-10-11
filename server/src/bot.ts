@@ -1,21 +1,44 @@
+import { randomBytes } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Ctx, UserRow } from './ctx.js';
 import { getSetting } from './db.js';
-import { Vpn } from './vpn.js';
+import { effectiveLimits, period, Vpn } from './vpn.js';
 import { subBase } from './routes/users.js';
 import { ProxyAgent, type Dispatcher } from 'undici';
 import { activeBotProxy } from './botproxy.js';
+import { attentionOf } from './attention.js';
+import { audit } from './lib/audit.js';
+import { Ops } from './ops.js';
 
 const PART = 45 * 1024 * 1024;
+const BIND_TTL = 15 * 60_000;
+
+type Button = { text: string; callback_data?: string; url?: string };
+type Kb = Button[][];
+interface Screen { text: string; kb?: Kb }
+interface AdminRow { id: number; username: string; role: 'owner' | 'admin' | 'operator' }
+interface Bind { kind: 'admin' | 'user'; id: string; exp: number; boundTo?: string }
+interface TgUpdate {
+  update_id: number;
+  message?: { chat: { id: number; type: string }; from?: { id: number }; text?: string };
+  callback_query?: { id: string; from: { id: number }; data?: string; message?: { message_id: number; chat: { id: number; type: string } } };
+}
+
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} ГБ`;
+const cb = (text: string, data: string): Button => ({ text, callback_data: data });
 
 /**
- * Telegram-бот (§14): long polling — входящий порт не нужен. Бот не ходит в БД напрямую за чужими данными:
- * отвечает только админам (по tg_id из «Права и роли») и пользователям VPN (по tg_id пользователя).
+ * Telegram-бот (§14): long polling — входящий порт не нужен. Отвечает только в личных чатах и только тем, чей
+ * Telegram привязан: админам (по tg_id из «Права и роли») и пользователям VPN. Незнакомцу бот показывает лишь его
+ * собственный ID — ни названия панели, ни логинов, ни серверов. Привязка — одноразовой ссылкой из панели.
  */
 export class Bot {
   private running = false;
   private offset = 0;
   private abort: AbortController | null = null;
+  private me: string | null = null;
+  private binds = new Map<string, Bind>();
   onBackupRequest: (() => Promise<string>) | null = null;
 
   constructor(private readonly ctx: Ctx, private readonly log: FastifyBaseLogger) {}
@@ -64,23 +87,32 @@ export class Bot {
   }
 
   async getMe(): Promise<{ username: string }> {
-    return (await this.api('getMe', {})) as { username: string };
+    const r = (await this.api('getMe', {})) as { username: string };
+    this.me = r.username;
+    return r;
   }
 
-  async send(chatId: string, text: string) {
-    await this.api('sendMessage', { chat_id: chatId, text, disable_web_page_preview: true });
+  async send(chatId: string, text: string, kb?: Kb) {
+    await this.api('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true, ...(kb ? { reply_markup: { inline_keyboard: kb } } : {}) });
   }
 
-  async notifyAdmins(text: string) {
+  private async show(chatId: string, s: Screen, messageId?: number) {
+    const body = { chat_id: chatId, text: s.text, parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: { inline_keyboard: s.kb ?? [] } };
+    if (messageId === undefined) return void (await this.api('sendMessage', body));
+    // «message is not modified» — экран не изменился (повторное нажатие «Обновить»): не ошибка
+    await this.api('editMessageText', { ...body, message_id: messageId }).catch((e: Error) => { if (!/not modified/.test(e.message)) throw e; });
+  }
+
+  async notifyAdmins(text: string, kb?: Kb) {
     if (!this.token()) return;
     const ids = this.ctx.db.prepare(`SELECT tg_id FROM admins WHERE tg_id IS NOT NULL`).all() as Array<{ tg_id: string }>;
-    for (const a of ids) await this.send(a.tg_id, text).catch(() => undefined);
+    for (const a of ids) await this.send(a.tg_id, esc(text), kb).catch(() => undefined);
   }
 
   /** Отправить зашифрованный бэкап всем админам-получателям; большие файлы — частями. */
   async sendBackup(name: string, data: Buffer): Promise<{ ok: number; total: number; errors: string[] }> {
     const ids = this.ctx.db.prepare(`SELECT username, tg_id FROM admins WHERE backup_recipient = 1 AND tg_id IS NOT NULL`).all() as Array<{ username: string; tg_id: string }>;
-    if (!this.token() || !ids.length) return { ok: 0, total: 0, errors: this.token() ? ['нет получателей с Telegram ID'] : ['бот не настроен'] };
+    if (!this.token() || !ids.length) return { ok: 0, total: 0, errors: this.token() ? ['нет получателей с привязанным Telegram'] : ['бот не настроен'] };
     const parts: Buffer[] = [];
     for (let i = 0; i < data.length; i += PART) parts.push(data.subarray(i, i + PART));
     let ok = 0;
@@ -91,7 +123,7 @@ export class Bot {
           const fd = new FormData();
           fd.set('chat_id', a.tg_id);
           fd.set('caption', parts.length > 1 ? `${name} · часть ${i + 1}/${parts.length}` : `Бэкап Эскадры · ${name}`);
-          fd.set('document', new Blob([new Uint8Array(p)]),parts.length > 1 ? `${name}.part${i + 1}` : name);
+          fd.set('document', new Blob([new Uint8Array(p)]), parts.length > 1 ? `${name}.part${i + 1}` : name);
           await this.api('sendDocument', fd, AbortSignal.timeout(300_000));
         }
         ok++;
@@ -102,9 +134,47 @@ export class Bot {
     return { ok, total: ids.length, errors };
   }
 
+  // ───── привязка Telegram одноразовой ссылкой ─────
+
+  /** Ссылка t.me/<бот>?start=<код>: человек открывает её и нажимает «Старт» — бот запоминает его Telegram. */
+  async bindLink(kind: Bind['kind'], id: string): Promise<{ code: string; url: string; expiresAt: string }> {
+    if (!this.token()) throw new Error('бот не настроен — задайте токен в «Настройках»');
+    const name = this.me ?? (await this.getMe()).username;
+    const now = Date.now();
+    for (const [k, b] of this.binds) if (b.exp < now || (b.kind === kind && b.id === id && !b.boundTo)) this.binds.delete(k);
+    const code = randomBytes(12).toString('base64url');
+    this.binds.set(code, { kind, id, exp: now + BIND_TTL });
+    return { code, url: `https://t.me/${name}?start=${code}`, expiresAt: new Date(now + BIND_TTL).toISOString() };
+  }
+
+  bindState(code: string): 'pending' | 'bound' | 'expired' {
+    const b = this.binds.get(code);
+    if (!b) return 'expired';
+    if (b.boundTo) return 'bound';
+    return b.exp < Date.now() ? 'expired' : 'pending';
+  }
+
+  private bind(code: string, tgId: string): string {
+    const b = this.binds.get(code);
+    if (!b || b.boundTo || b.exp < Date.now()) return 'Ссылка устарела или уже использована. Попросите новую.';
+    const db = this.ctx.db;
+    if (b.kind === 'admin') {
+      db.prepare('UPDATE admins SET tg_id = NULL WHERE tg_id = ? AND id != ?').run(tgId, Number(b.id));
+      db.prepare('UPDATE admins SET tg_id = ? WHERE id = ?').run(tgId, Number(b.id));
+    } else {
+      db.prepare('UPDATE users SET tg_id = ? WHERE id = ?').run(tgId, b.id);
+    }
+    b.boundTo = tgId;
+    audit(db, 'bot', b.kind === 'admin' ? 'admin.tg_bound' : 'user.tg_bound', b.id);
+    return 'Telegram привязан.';
+  }
+
+  // ───── цикл ─────
+
   start() {
     if (this.running || !this.token()) return;
     this.running = true;
+    void this.api('setMyCommands', { commands: [{ command: 'menu', description: 'Меню' }] }).catch(() => undefined);
     void this.loop();
   }
 
@@ -113,17 +183,20 @@ export class Bot {
     this.abort?.abort();
   }
 
-  restart() { this.stop(); setTimeout(() => this.start(), 500); }
+  restart() { this.stop(); this.me = null; setTimeout(() => this.start(), 500); }
 
   private async loop() {
     while (this.running) {
       try {
         this.abort = new AbortController();
-        const updates = (await this.api('getUpdates', { offset: this.offset, timeout: 50, allowed_updates: ['message'] },
-          AbortSignal.any([this.abort.signal, AbortSignal.timeout(65_000)]))) as Array<{ update_id: number; message?: { chat: { id: number }; from?: { id: number }; text?: string } }>;
+        const updates = (await this.api('getUpdates', { offset: this.offset, timeout: 50, allowed_updates: ['message', 'callback_query'] },
+          AbortSignal.any([this.abort.signal, AbortSignal.timeout(65_000)]))) as TgUpdate[];
         for (const u of updates) {
           this.offset = u.update_id + 1;
-          if (u.message?.text) await this.handle(String(u.message.chat.id), String(u.message.from?.id ?? ''), u.message.text).catch((e) => this.log.warn(`bot: ${(e as Error).message}`));
+          const job = u.message?.text && u.message.chat.type === 'private'
+            ? this.onMessage(String(u.message.chat.id), String(u.message.from?.id ?? ''), u.message.text)
+            : u.callback_query ? this.onCallback(u.callback_query) : null;
+          await job?.catch((e) => this.log.warn(`bot: ${(e as Error).message}`));
         }
       } catch (e) {
         if (!this.running) break;
@@ -133,32 +206,153 @@ export class Bot {
     }
   }
 
-  private async handle(chatId: string, fromId: string, text: string) {
-    const cmd = text.trim().split(/\s+/)[0]!.replace(/@.*$/, '').toLowerCase();
-    const admin = this.ctx.db.prepare('SELECT username, role FROM admins WHERE tg_id = ?').get(fromId) as { username: string; role: string } | undefined;
-    const user = this.ctx.db.prepare('SELECT * FROM users WHERE tg_id = ?').get(fromId) as UserRow | undefined;
+  private who(tgId: string) {
+    const admin = this.ctx.db.prepare('SELECT id, username, role FROM admins WHERE tg_id = ?').get(tgId) as AdminRow | undefined;
+    const user = this.ctx.db.prepare('SELECT * FROM users WHERE tg_id = ?').get(tgId) as UserRow | undefined;
+    return { admin, user };
+  }
 
-    if (cmd === '/start') {
-      const who = admin ? `админ ${admin.username}` : user ? `пользователь ${user.name}` : 'не привязан';
-      return this.send(chatId, `Эскадра. Ваш Telegram ID: ${fromId} (${who}).\nАдмину: укажите этот ID в «Права и роли». Пользователю: его указывает администратор.`);
+  private async onMessage(chatId: string, fromId: string, text: string) {
+    const [head, arg] = text.trim().split(/\s+/);
+    const cmd = head!.replace(/@.*$/, '').toLowerCase();
+    if (cmd === '/start' && arg) await this.send(chatId, this.bind(arg, fromId));
+    const { admin, user } = this.who(fromId);
+    // незнакомцу — только его ID для привязки вручную; ничего о панели
+    if (!admin && !user) return this.send(chatId, `Ваш Telegram ID: <code>${fromId}</code>`);
+    return this.show(chatId, admin ? this.adminMenu() : this.userMenu(user!));
+  }
+
+  private async onCallback(q: NonNullable<TgUpdate['callback_query']>) {
+    const chat = q.message?.chat;
+    if (!chat || chat.type !== 'private' || !q.data) return this.api('answerCallbackQuery', { callback_query_id: q.id });
+    const chatId = String(chat.id);
+    const mid = q.message!.message_id;
+    const { admin, user } = this.who(String(q.from.id));
+    const [act, arg] = q.data.split(':');
+    const toast = (text?: string) => this.api('answerCallbackQuery', { callback_query_id: q.id, ...(text ? { text } : {}) }).catch(() => undefined);
+    if (!admin && !user) {
+      await toast('Нет доступа');
+      return this.show(chatId, { text: 'Доступ к этому чату отозван.' }, mid);
     }
     if (admin) {
-      if (cmd === '/status') {
-        const rows = this.ctx.servers().map((s) => `${s.fail_since ? '🔴' : '🟢'} ${s.name} · ${s.role} · ${s.protection_current}/${s.protection_target} · ${s.fw_mode}`);
-        return this.send(chatId, rows.join('\n') || 'серверов нет');
+      const canBackup = admin.role !== 'operator';
+      switch (act) {
+        case 'm': await toast(); return this.show(chatId, this.adminMenu(), mid);
+        case 'srv': await toast(); return this.show(chatId, this.serversScreen(), mid);
+        case 'att': await toast(); return this.show(chatId, this.attentionScreen(), mid);
+        case 'ex': await toast(); return this.show(chatId, this.exitsScreen(), mid);
+        case 'exc': {
+          const t = new Vpn(this.ctx).template(arg ?? '');
+          if (!t) return toast('Конфигурация не найдена');
+          await toast('Проверяю выходы…');
+          await this.show(chatId, { text: `Проверяю выходы «${esc(t.name)}»…` }, mid);
+          const r = await new Ops(this.ctx).checkExits(t, () => undefined).catch((e: Error) => ({ error: e.message }));
+          audit(this.ctx.db, admin.username, 'template.exits_check', t.id, { via: 'bot' });
+          const s = this.exitsScreen();
+          if (r && 'error' in r) s.text = `Проверка не удалась: ${esc(r.error)}\n\n${s.text}`;
+          return this.show(chatId, s, mid);
+        }
+        case 'bk':
+          await toast();
+          if (!canBackup) return this.show(chatId, { text: 'Бэкап запускают owner и admin.', kb: [[cb('‹ Меню', 'm')]] }, mid);
+          return this.show(chatId, { text: 'Создать бэкап сейчас и отправить его получателям?', kb: [[cb('Создать бэкап', 'bkgo'), cb('Отмена', 'm')]] }, mid);
+        case 'bkgo': {
+          if (!canBackup || !this.onBackupRequest) return toast('Нет доступа');
+          await toast('Бэкап запущен');
+          await this.show(chatId, { text: 'Создаю бэкап…' }, mid);
+          return this.show(chatId, { text: esc(await this.onBackupRequest()), kb: [[cb('‹ Меню', 'm')]] }, mid);
+        }
       }
-      if (cmd === '/backup' && this.onBackupRequest) return this.send(chatId, await this.onBackupRequest());
     }
     if (user) {
       const base = subBase(this.ctx);
-      if (cmd === '/sub') return this.send(chatId, base ? `Подписка:\n${base}/s/${user.sub_token}` : 'Сервис подписок не настроен');
-      if (cmd === '/access') return this.send(chatId, base ? `Откройте с телефона БЕЗ VPN, чтобы открыть доступ:\n${base}/k/${user.knock_token}` : 'Сервис подписок не настроен');
-      if (cmd === '/links') {
-        const vpn = new Vpn(this.ctx);
-        const links = vpn.profiles(user).map((p) => `${p.name}:\n${vpn.link(user, p)}`);
-        return this.send(chatId, links.join('\n\n') || 'нет доступных профилей');
+      switch (act) {
+        case 'm': await toast(); return this.show(chatId, this.userMenu(user), mid);
+        case 'sub':
+          await toast();
+          return this.show(chatId, { text: base ? `Ссылка подписки — добавьте её в приложение:\n<code>${esc(`${base}/s/${user.sub_token}`)}</code>` : 'Подписки пока не настроены.', kb: [[cb('‹ Меню', 'm')]] }, mid);
+        case 'knock':
+          await toast();
+          return this.show(chatId, { text: base ? `Откройте ссылку с телефона <b>без VPN</b> — так сервер узнает ваш адрес:\n${esc(`${base}/k/${user.knock_token}`)}` : 'Подписки пока не настроены.', kb: [[cb('‹ Меню', 'm')]] }, mid);
+        case 'lk': {
+          await toast();
+          const vpn = new Vpn(this.ctx);
+          const ps = vpn.profiles(user);
+          if (!ps.length) return this.show(chatId, { text: 'Профилей пока нет.', kb: [[cb('‹ Меню', 'm')]] }, mid);
+          return this.show(chatId, { text: 'Выберите профиль — пришлю ссылку для импорта:', kb: [...ps.slice(0, 40).map((p, i) => [cb(p.name, `l:${i}`)]), [cb('‹ Меню', 'm')]] }, mid);
+        }
+        case 'l': {
+          const vpn = new Vpn(this.ctx);
+          const p = vpn.profiles(user)[Number(arg)];
+          if (!p) return toast('Профиль не найден — откройте список заново');
+          await toast();
+          // ссылку — отдельным сообщением, чтобы её было удобно скопировать и она не пропала при смене экрана
+          return this.send(chatId, `<b>${esc(p.name)}</b>\n<code>${esc(vpn.link(user, p))}</code>`);
+        }
       }
     }
-    return this.send(chatId, admin ? 'Команды: /status /backup' : user ? 'Команды: /sub /links /access' : 'Нет доступа. /start покажет ваш ID.');
+    return toast();
+  }
+
+  // ───── экраны ─────
+
+  private adminMenu(): Screen {
+    const servers = this.ctx.servers();
+    const online = servers.filter((s) => s.last_seen_at && !s.fail_since).length;
+    const att = attentionOf(this.ctx, new Vpn(this.ctx));
+    const head = servers.length ? `Серверов на связи: <b>${online} из ${servers.length}</b>` : 'Серверов пока нет.';
+    return {
+      text: `${head}\n${att.length ? `Требует внимания: <b>${att.length}</b>` : 'Всё в порядке.'}`,
+      kb: [
+        [cb('Серверы', 'srv'), cb(att.length ? `Внимание · ${att.length}` : 'Внимание', 'att')],
+        [cb('Выходы «Авто»', 'ex'), cb('Бэкап', 'bk')],
+        [cb('Обновить', 'm')],
+      ],
+    };
+  }
+
+  private serversScreen(): Screen {
+    const lines = this.ctx.servers().map((s) => `${s.fail_since ? '🔴' : s.last_seen_at ? '🟢' : '⚪️'} <b>${esc(s.name)}</b> — ${s.role === 'entry' ? 'вход' : 'выход'}${s.fail_since ? `, нет связи с ${esc(s.fail_since.slice(0, 16).replace('T', ' '))}` : ''}`);
+    return { text: lines.join('\n') || 'Серверов пока нет.', kb: [[cb('‹ Меню', 'm'), cb('Обновить', 'srv')]] };
+  }
+
+  private attentionScreen(): Screen {
+    const icon = { fail: '🔴', warn: '🟠', info: '🔵' } as const;
+    const att = attentionOf(this.ctx, new Vpn(this.ctx));
+    return {
+      text: att.map((a) => `${icon[a.level]} <b>${esc(a.title)}</b>${a.detail ? `\n${esc(a.detail)}` : ''}`).join('\n\n') || 'Всё в порядке.',
+      kb: [[cb('‹ Меню', 'm'), cb('Обновить', 'att')]],
+    };
+  }
+
+  private exitsScreen(): Screen {
+    const vpn = new Vpn(this.ctx);
+    const db = this.ctx.db;
+    const ts = vpn.templates().filter((t) => t.entry_id && vpn.spec(t).autoMode !== 'random');
+    if (!ts.length) return { text: 'Нет конфигураций со входом, где «Авто» выбирает выход по качеству или по порядку.', kb: [[cb('‹ Меню', 'm')]] };
+    const blocks = ts.map((t) => {
+      const rows = db.prepare(`SELECT h.exit_id, s.name, h.rtt_ms, h.mbps, h.ok FROM exit_health h JOIN servers s ON s.id = h.exit_id WHERE h.template_id = ?`).all(t.id) as Array<{ exit_id: string; name: string; rtt_ms: number | null; mbps: number | null; ok: number }>;
+      const ov = getSetting<string | null>(db, `auto.override.${t.id}`, null);
+      const sel = ov?.slice(`to-${t.id}-`.length);
+      const list = rows.map((r) => `${r.ok ? '🟢' : '🔴'} ${esc(r.name)}${r.exit_id === sel ? ' ← выбран' : ''}: ${r.rtt_ms ?? '—'} мс, ${r.mbps ?? '—'} Мбит/с`);
+      return `<b>${esc(t.name)}</b>\n${list.join('\n') || 'проверок ещё не было'}`;
+    });
+    return { text: blocks.join('\n\n'), kb: [...ts.map((t) => [cb(`Проверить «${t.name}»`, `exc:${t.id}`)]), [cb('‹ Меню', 'm'), cb('Обновить', 'ex')]] };
+  }
+
+  private userMenu(u: UserRow): Screen {
+    const lim = effectiveLimits(this.ctx, u);
+    const t = this.ctx.db.prepare('SELECT up, down FROM traffic WHERE user_id = ? AND period = ?').get(u.id, period()) as { up: number; down: number } | undefined;
+    const used = (t?.up ?? 0) + (t?.down ?? 0);
+    const lines = [
+      `<b>${esc(u.name)}</b> — ${u.status === 'active' ? 'доступ активен' : 'доступ приостановлен'}`,
+      `Трафик за месяц: ${gb(used)}${lim.trafficGb ? ` из ${lim.trafficGb} ГБ` : ''}`,
+      ...(lim.expireAt ? [`Действует до ${lim.expireAt.slice(0, 10)}`] : []),
+    ];
+    const wl = !!this.ctx.db.prepare(`SELECT 1 FROM groups WHERE stealth IN ('S3','S4')`).get();
+    return {
+      text: lines.join('\n'),
+      kb: [[cb('Подписка', 'sub'), cb('Ссылки на профили', 'lk')], ...(wl ? [[cb('Открыть доступ с нового адреса', 'knock')]] : []), [cb('Обновить', 'm')]],
+    };
   }
 }

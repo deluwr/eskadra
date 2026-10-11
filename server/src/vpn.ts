@@ -112,7 +112,10 @@ export class Vpn {
   /** Узлы, на которые ведёт вход шаблона: его direct-узлы с активным inbound, кроме самого входа. */
   relayTargets(t: TemplateRow): ServerRow[] {
     const active = new Set(this.inbounds(`template_id = ? AND kind = 'direct' AND state = 'active'`, t.id).map((i) => i.server_id));
-    return this.ctx.servers().filter((s) => s.id !== t.entry_id && active.has(s.id));
+    const order = specOf(t).exitOrder;
+    const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
+    // в порядке, заданном для «Авто» (не упомянутые — в конце, как были)
+    return this.ctx.servers().filter((s) => s.id !== t.entry_id && active.has(s.id)).sort((a, b) => rank(a.id) - rank(b.id));
   }
 
   spec = (t: TemplateRow): Spec => specOf(t);
@@ -155,7 +158,7 @@ export class Vpn {
           const xi = this.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct'`, t.id, x.id)[0];
           if (!xi || (sp.security === 'reality' && !xi.public_key)) continue;
           outbounds.push(xrayOutbound(sp, xi, outTag, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id));
-          if (sp.autoMode === 'smart') {
+          if (sp.autoMode !== 'random') {
             // локальный SOCKS для проб: панель меряет задержку и скорость именно этого выхода
             inbounds.push({ tag: `probe-${t.id}-${x.id}`, listen: '127.0.0.1', port: probePort(t.id, x.id), protocol: 'socks', settings: { udp: false } });
             rules.push({ type: 'field', inboundTag: [`probe-${t.id}-${x.id}`], outboundTag: outTag });
@@ -177,8 +180,8 @@ export class Vpn {
               clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:auto`), email));
               autoEmails.push(email);
             }
-          if (sp.autoMode === 'smart') {
-            // по качеству: Xray выбирает выход с наименьшей задержкой и не берёт выходы с задержкой выше порога;
+          if (sp.autoMode !== 'random') {
+            // по качеству и по порядку (fallback — первый в порядке): Xray выбирает выход с наименьшей задержкой и не берёт выходы с задержкой выше порога;
             // если все выше порога — первый выход (fallback). Скорость меряет панель и переключает через API (ops.checkExits)
             observed.push(`to-${t.id}-`);
             observeRtt = Math.max(observeRtt, sp.maxRttMs);

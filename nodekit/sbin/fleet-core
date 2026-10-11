@@ -202,6 +202,7 @@ cmd_probe() {  # probe <локальный SOCKS-порт выхода> <бай�
     if [ -z "$best" ] || awk -v a="$t" -v b="$best" 'BEGIN{exit !(a<b)}'; then best="$t"; fi
   done
   [ -n "$best" ] && echo "rtt_ms=$(awk -v t="$best" 'BEGIN{printf "%d", t*1000}')" || echo "rtt_ms=fail"
+  [ "$bytes" = 0 ] && return 0   # только задержка (быстрая проверка закреплённого выхода)
   s="$(curl -s -o /dev/null -w '%{speed_download}' --max-time 40 --socks5-hostname "127.0.0.1:$port" "https://speed.cloudflare.com/__down?bytes=$bytes" || true)"
   if [[ "$s" =~ ^[0-9.]+$ ]] && [ "${s%%.*}" != "0" ]; then echo "mbps=$(awk -v b="$s" 'BEGIN{printf "%.1f", b*8/1000000}')"; else echo "mbps=fail"; fi
 }

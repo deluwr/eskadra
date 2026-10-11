@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, fmtBytes, fmtTime, type Server, type User } from '../api';
-import { CopyButton, ErrorBox, Modal, Seg, Tag, useAsync, usePoll, ask, Info, QrButton } from '../ui';
+import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll, ask, Info, QrButton } from '../ui';
 
 interface Form {
   name: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
@@ -100,6 +100,9 @@ function importLinks(url: string, name: string): Array<[string, string]> {
   ];
 }
 
+const bodyOf = (f: Form) => ({ name: f.name, tgId: f.tgId || null, limitGroup: f.limitGroup, trafficLimitGb: num(f.trafficLimitGb), expireAt: f.expireAt ? new Date(f.expireAt + 'T23:59:59Z').toISOString() : null,
+  deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, wlMode: f.wlMode, status: f.status });
+
 function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; wlOn: boolean }) {
   const [f, setF] = useState<Form>(user ? toForm(user) : emptyForm);
   const { data: groups } = usePoll(() => api.get<Array<{ name: string; traffic_gb: number | null; days: number | null; devices: number | null }>>('/api/v1/limit-groups'), null);
@@ -115,10 +118,12 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
     setF({ ...f, nodeIds: next.length === nodes.length ? null : next });
   };
   const save = () => run(async () => {
-    const body = { name: f.name, tgId: f.tgId || null, limitGroup: f.limitGroup, trafficLimitGb: num(f.trafficLimitGb), expireAt: f.expireAt ? new Date(f.expireAt + 'T23:59:59Z').toISOString() : null,
-      deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, wlMode: f.wlMode, status: f.status };
+    // Telegram существующего пользователя меняется привязкой (кнопка «Привязать») — здесь берём сохранённый
+    const body = { ...bodyOf(f), tgId: user ? user.tg_id : f.tgId || null };
     onSaved(user ? await api.put<User>(`/api/v1/users/${user.id}`, body) : await api.post<User>('/api/v1/users', body));
+    toast(user ? 'Изменения сохранены' : `Пользователь ${f.name} создан`);
   });
+  const dirty = !user || JSON.stringify({ ...f, tgId: '' }) !== JSON.stringify({ ...toForm(user), tgId: '' });
   const loadLinks = () => run(async () => user && setLinks(await api.get(`/api/v1/users/${user.id}/links`)));
   useEffect(() => { if (mode === 'links' && user) void loadLinks(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [mode, user?.id]);
   const rotate = (what: string) => run(async () => { if (!user) return; onSaved(await api.post<User>(`/api/v1/users/${user.id}/rotate`, { what })); if (what === 'links') void loadLinks(); });
@@ -133,7 +138,11 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
       <div className="row" style={{ display: 'block' }}>
         <div className="grid g2">
           <label className="fld">Имя<input className="inp" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
-          <label className="fld">Telegram ID<input className="inp mono" value={f.tgId} onChange={(e) => setF({ ...f, tgId: e.target.value })} placeholder="для /sub /links /access в боте" /></label>
+          {user ? (
+            <div className="fld"><span>Telegram <Info>В боте пользователь получает подписку, ссылки на профили и сведения о своём трафике.</Info></span>
+              <span className="flex" style={{ minHeight: 40 }}><TgBind tgId={user.tg_id} linkUrl={`/api/v1/users/${user.id}/tg-link`} onChanged={() => void api.get<User>(`/api/v1/users/${user.id}`).then(onSaved)}
+                onSaveId={(v) => api.put(`/api/v1/users/${user.id}`, { ...bodyOf(toForm(user)), tgId: v })} /></span></div>
+          ) : <label className="fld">Telegram ID (необязательно)<input className="inp mono" inputMode="numeric" value={f.tgId} onChange={(e) => setF({ ...f, tgId: e.target.value.replace(/\D/g, '') })} placeholder="привязать можно и после создания" /></label>}
         </div>
       </div>
       <div className="row stack" style={{ alignItems: 'stretch' }}>
@@ -199,10 +208,12 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
           )}
         </div>
       )}
-      <div className="row">
-        <div className="flex"><button className="btn pri" disabled={busy || !f.name || !f.modes.length} onClick={() => void save()}>Сохранить</button>
-          {user && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Удалить ${user.name}?`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); onDeleted(); }); }}>Удалить</button>}</div>
-        <ErrorBox error={error} />
+      {error && <div className="row"><ErrorBox error={error} /></div>}
+      <div className="savebar">
+        <button className="btn pri" disabled={busy || !f.name || !f.modes.length || !dirty} onClick={() => void save()}>{user ? 'Сохранить' : 'Создать пользователя'}</button>
+        {user && dirty && <><span className="dirty"><span className="dot" />Есть несохранённые изменения</span><button className="btn ghost sm" onClick={() => setF(toForm(user))}>Отменить</button></>}
+        <span className="spacer" />
+        {user && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Удалить ${user.name}? Его ссылки и подписка перестанут работать.`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); toast(`${user.name} удалён`); onDeleted(); }); }}>Удалить</button>}
       </div>
     </section>
   );

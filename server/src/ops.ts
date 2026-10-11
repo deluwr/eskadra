@@ -276,7 +276,7 @@ export class Ops {
     // перезапуск Xray сбрасывает переключение балансировщика — возвращаем выбранные выходы «Авто» входа
     if (!xuiMode) for (const t of this.vpn.templates().filter((x) => x.entry_id === s.id)) {
       const ov = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
-      if (ov && this.vpn.spec(t).autoMode === 'smart') await n.op(['xray-bo', `bal-${t.id}`, ov]).catch(() => undefined);
+      if (ov && this.vpn.spec(t).autoMode !== 'random') await n.op(['xray-bo', `bal-${t.id}`, ov]).catch(() => undefined);
     }
   }
 
@@ -286,9 +286,23 @@ export class Ops {
    * подходящий выход (без перезапуска Xray). Если подходящих нет — переключение снимается и выбор остаётся за Xray
    * (наименьшая задержка). Возвращает результаты и смену выхода (для уведомления).
    */
+  /** Быстрая проверка закреплённого выхода (только задержка, без скачивания): false — выход не отвечает или медленнее порога. */
+  async pinnedAlive(t: TemplateRow): Promise<boolean> {
+    const sp = this.vpn.spec(t);
+    const ov = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
+    if (!ov || !t.entry_id) return true;
+    let ok = true;
+    await this.ctx.onNode(this.ctx.server(t.entry_id), async (n) => {
+      const r = await n.op(['exit-probe', probePort(t.id, ov.slice(`to-${t.id}-`.length)), 0], { timeoutMs: 60_000 });
+      const rtt = Number(r.stdout.match(/^rtt_ms=(\d+)/m)?.[1] ?? NaN);
+      ok = !Number.isNaN(rtt) && rtt <= sp.maxRttMs;
+    });
+    return ok;
+  }
+
   async checkExits(t: TemplateRow, log: (l: string) => void): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null } | null } | null> {
     const sp = this.vpn.spec(t);
-    if (sp.autoMode !== 'smart' || !t.entry_id) return null;
+    if (sp.autoMode === 'random' || !t.entry_id) return null;
     const entry = this.ctx.server(t.entry_id);
     if (entry.sudo_mode !== 'restricted' || coreMode(entry) === 'xui') return null;
     const targets = this.vpn.relayTargets(t);
@@ -311,8 +325,11 @@ export class Ops {
       }
       const good = results.filter((r) => r.ok).sort((a, b) => (b.mbps! - a.mbps!) || (a.rttMs! - b.rttMs!));
       const cur = prev ? results.find((r) => `to-${t.id}-${r.exitId}` === prev) : undefined;
-      // текущий выход проходит пороги — оставляем (без лишних переключений); иначе — лучший подходящий или Xray сам
-      next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
+      // по порядку — первый проходящий пороги выход (вернулся вышестоящий — возвращаемся к нему);
+      // по качеству — текущий, пока проходит пороги (без лишних переключений), иначе лучший подходящий; никто — Xray сам
+      const first = results.find((r) => r.ok);
+      if (sp.autoMode === 'order') next = first ? `to-${t.id}-${first.exitId}` : null;
+      else next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
       if (next !== prev) {
         await n.must(['xray-bo', `bal-${t.id}`, next ?? 'clear']);
         setSetting(this.ctx.db, `auto.override.${t.id}`, next);

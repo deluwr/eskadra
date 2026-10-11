@@ -195,21 +195,22 @@ export class Workers {
     if (changed) this.ops.vpn.markDirty();
   }
 
-  /** «Авто через вход» по качеству: проверка выходов по расписанию каждой конфигурации, уведомление о переключении. */
+  /** «Авто через вход» по качеству и по порядку: проверка выходов по расписанию каждой конфигурации, уведомление о переключении. */
   async exitChecks() {
     for (const t of this.ops.vpn.templates()) {
       const sp = this.ops.vpn.spec(t);
-      if (sp.autoMode !== 'smart' || !t.entry_id) continue;
+      if (sp.autoMode === 'random' || !t.entry_id) continue;
       const last = getSetting<string>(this.ctx.db, `auto.checked.${t.id}`, '');
-      if (last && Date.now() - Date.parse(last) < sp.checkMin * 60_000) continue;
       try {
+        // между полными проверками — раз в минуту только задержка закреплённого выхода; не отвечает — проверяем всё сразу
+        if (last && Date.now() - Date.parse(last) < sp.checkMin * 60_000 && (await this.ops.pinnedAlive(t).catch(() => true))) continue;
         const r = await this.ops.checkExits(t, () => undefined);
         if (r?.switched) {
           const msg = r.switched.to
             ? `«${t.name}»: «Авто» переключён ${r.switched.from ? `с ${r.switched.from} ` : ''}на ${r.switched.to}`
             : `«${t.name}»: ни один выход не проходит пороги (задержка ≤ ${sp.maxRttMs} мс, скорость ≥ ${sp.minMbps} Мбит/с) — выбор по наименьшей задержке`;
           this.log.info(msg);
-          void this.bot.notifyAdmins(msg);
+          void this.bot.notifyAdmins(msg, [[{ text: 'Выходы «Авто»', callback_data: 'ex' }]]);
         }
       } catch (e) {
         this.log.warn(`проверка выходов ${t.name}: ${(e as Error).message}`);

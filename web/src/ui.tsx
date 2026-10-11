@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import qrcode from 'qrcode-generator';
+import { api } from './api';
 
 export function useAsync() {
   const [busy, setBusy] = useState(false);
@@ -101,6 +102,8 @@ export const Icon = {
   sun: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>,
   cores: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></svg>,
   help: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01" /></svg>,
+  up: <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M6 15l6-6 6 6" /></svg>,
+  down: <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>,
   moon: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" /></svg>,
 };
 
@@ -181,5 +184,101 @@ export function Modal({ title, children, onClose }: { title: string; children: R
         {children}
       </div>
     </div>
+  );
+}
+
+// ───── уведомления о результате действия («Сохранено») ─────
+
+type ToastKind = 'ok' | 'fail' | 'info';
+let toastSink: ((text: string, kind: ToastKind) => void) | null = null;
+/** Короткое уведомление внизу экрана: подтверждает, что действие выполнено (сохранено, привязано, удалено). */
+export const toast = (text: string, kind: ToastKind = 'ok') => toastSink?.(text, kind);
+
+export function Toasts() {
+  const [items, setItems] = useState<Array<{ id: number; text: string; kind: ToastKind }>>([]);
+  useEffect(() => {
+    let n = 0;
+    toastSink = (text, kind) => {
+      const id = ++n;
+      setItems((xs) => [...xs.slice(-2), { id, text, kind }]);
+      setTimeout(() => setItems((xs) => xs.filter((x) => x.id !== id)), kind === 'fail' ? 6000 : 3000);
+    };
+    return () => { toastSink = null; };
+  }, []);
+  return (
+    <div className="toasts" role="status" aria-live="polite">
+      {items.map((t) => <div key={t.id} className={`toast ${t.kind}`}><span className="dot" />{t.text}</div>)}
+    </div>
+  );
+}
+
+// ───── привязка Telegram ─────
+
+/**
+ * Telegram администратора или пользователя: привязка одноразовой ссылкой на бота (человек нажимает «Старт» —
+ * панель видит это сразу) или вводом ID вручную. Сохранение — явной кнопкой, результат — уведомлением.
+ */
+export function TgBind({ tgId, linkUrl, onSaveId, onChanged, canEdit = true }: {
+  tgId: string | null; linkUrl: string; onSaveId: (id: string | null) => Promise<unknown>; onChanged: () => void; canEdit?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!canEdit) return tgId ? <Tag kind="ok">привязан</Tag> : <span className="k">не привязан</span>;
+  return (
+    <>
+      {tgId ? (
+        <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}>
+          <Tag kind="ok" dot>привязан</Tag>
+          <button className="btn ghost sm" onClick={() => setOpen(true)}>Изменить</button>
+        </span>
+      ) : <button className="btn sm" onClick={() => setOpen(true)}>Привязать</button>}
+      {open && <TgBindModal tgId={tgId} linkUrl={linkUrl} onSaveId={onSaveId} onClose={() => setOpen(false)} onChanged={onChanged} />}
+    </>
+  );
+}
+
+function TgBindModal({ tgId, linkUrl, onSaveId, onClose, onChanged }: { tgId: string | null; linkUrl: string; onSaveId: (id: string | null) => Promise<unknown>; onClose: () => void; onChanged: () => void }) {
+  const [link, setLink] = useState<{ code: string; url: string } | null>(null);
+  const [manual, setManual] = useState(tgId ?? '');
+  const { busy, error, run } = useAsync();
+  const done = (msg: string) => { toast(msg); onChanged(); onClose(); };
+  // ждём, пока человек откроет ссылку и нажмёт «Старт»
+  useEffect(() => {
+    if (!link) return;
+    const t = setInterval(() => {
+      void api.get<{ state: string }>(`/api/v1/tg-link/${link.code}`).then((r) => {
+        if (r.state === 'bound') done('Telegram привязан');
+        else if (r.state === 'expired') setLink(null);
+      }).catch(() => undefined);
+    }, 2000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [link?.code]);
+  return (
+    <Modal title="Telegram" onClose={onClose}>
+      {!link ? (
+        <div className="stack">
+          <p className="small">Ссылка откроет бота. После нажатия «Старт» Telegram привяжется сам — панель увидит это сразу.</p>
+          <div><button className="btn pri" disabled={busy} onClick={() => void run(async () => { setLink(await api.post(linkUrl)); })}>Получить ссылку</button></div>
+        </div>
+      ) : (
+        <div className="stack" style={{ alignItems: 'center' }}>
+          <Qr text={link.url} size={200} />
+          <div className="flex"><a className="btn pri" href={link.url} target="_blank" rel="noreferrer">Открыть в Telegram</a><CopyButton text={link.url} label="Копировать ссылку" /></div>
+          <span className="k flex" style={{ gap: 8 }}><span className="spin" aria-hidden="true" />Ждём нажатия «Старт» в боте · ссылка действует 15 минут</span>
+        </div>
+      )}
+      <details className="more" open={!!error || undefined}>
+        <summary>Ввести Telegram ID вручную</summary>
+        <form className="flex" style={{ marginTop: 10 }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await onSaveId(manual.trim() || null); done(manual.trim() ? 'Telegram ID сохранён' : 'Telegram отвязан'); }); }}>
+          <input className="inp mono" style={{ flex: 1, minWidth: 140 }} inputMode="numeric" value={manual} onChange={(e) => setManual(e.target.value.replace(/\D/g, ''))} placeholder="ID — бот присылает его на /start" aria-label="Telegram ID" />
+          <button className="btn" disabled={busy || manual === (tgId ?? '')}>Сохранить</button>
+        </form>
+      </details>
+      <ErrorBox error={error} />
+      <div className="flex" style={{ justifyContent: 'space-between' }}>
+        {tgId ? <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={() => void run(async () => { await onSaveId(null); done('Telegram отвязан'); })}>Отвязать</button> : <span />}
+        <button className="btn ghost" onClick={onClose}>Закрыть</button>
+      </div>
+    </Modal>
   );
 }

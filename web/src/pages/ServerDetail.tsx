@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { api, ago, fmtTime, type Check, type Job, type Preflight, type ServerDetail } from '../api';
-import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, Switch, Tag, roleLabel, useAsync, usePoll, ask } from '../ui';
+import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, Switch, Tag, roleLabel, useAsync, usePoll, ask, toast, LEVEL_LABEL } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
 
@@ -61,7 +61,7 @@ function ServerName({ id, name, onSaved }: { id: string; name: string; onSaved: 
   const { busy, error, run } = useAsync();
   if (!edit) return <span className="flex" style={{ gap: 6, display: 'inline-flex' }}>{name}<button className="btn ghost sm" aria-label="Переименовать" onClick={() => { setV(name); setEdit(true); }}>✎</button></span>;
   return (
-    <form className="flex" style={{ display: 'inline-flex' }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.patch(`/api/v1/servers/${id}`, { name: v.trim() }); setEdit(false); onSaved(); }); }}>
+    <form className="flex" style={{ display: 'inline-flex' }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.patch(`/api/v1/servers/${id}`, { name: v.trim() }); setEdit(false); toast('Имя сохранено'); onSaved(); }); }}>
       <input className="inp" style={{ width: 220, fontSize: 18 }} value={v} onChange={(e) => setV(e.target.value)} autoFocus maxLength={64} aria-label="Имя сервера" />
       <button className="btn sm pri" disabled={busy || !v.trim()}>Сохранить</button>
       <button type="button" className="btn ghost sm" onClick={() => setEdit(false)}>Отмена</button>
@@ -233,7 +233,7 @@ function ProtectTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
         <div className="grid g3">
           {LEVELS.map((l) => (
             <button key={l.code} className={`lvl ${s.protection_target === l.code ? 'on' : ''}`} aria-pressed={s.protection_target === l.code} disabled={busy}
-              onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { protectionTarget: l.code }); onChange(); })}>
+              onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { protectionTarget: l.code }); toast(`Уровень защиты: ${LEVEL_LABEL[l.code] ?? l.code}`); onChange(); })}>
               <span style={{ fontSize: 17, fontWeight: 600 }}>{l.name}</span>
               {l.base && <span className="k">{l.base}</span>}
               <span className="stack" style={{ gap: 6 }}>{l.items.map((x) => <span key={x} className="ctl"><span style={{ width: 14, color: 'var(--ok)', fontWeight: 700 }}>✓</span>{x}</span>)}</span>
@@ -382,7 +382,7 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
   const [ip, setIp] = useState('');
-  const patch = (body: object) => run(async () => { await api.patch(`/api/v1/servers/${s.id}`, body); onChange(); });
+  const patch = (body: object) => run(async () => { await api.patch(`/api/v1/servers/${s.id}`, body); toast('Сохранено'); onChange(); });
   return (
     <section className="card">
       <div className="card-head"><h2>Доступ и SSH</h2></div>

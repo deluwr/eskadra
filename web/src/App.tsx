@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api, ApiError, setOtpProvider } from './api';
-import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, useAsync } from './ui';
+import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync } from './ui';
 import { OverviewPage } from './pages/Overview';
 import { ServersPage } from './pages/Servers';
 import { ServerDetailPage } from './pages/ServerDetail';
@@ -74,7 +74,7 @@ export function App() {
       <aside className="side">
         <a className="brand" href="#/overview">
           <span className="brand-mark">{Icon.logo()}</span>
-          <span style={{ display: 'flex', flexDirection: 'column' }}><span className="brand-name">Эскадра</span><span className="k">управление узлами</span></span>
+          <span className="brand-text"><span className="brand-name">Эскадра</span><span className="k">управление узлами</span></span>
         </a>
         {nav.map(([id, label, icon]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{icon}{label}</a>)}
         <div className="side-sep" />
@@ -91,7 +91,7 @@ export function App() {
             void api.put('/api/v1/settings/lang', { lang: next }).catch(() => undefined).finally(() => setLang(next));
           }} aria-label="Language / Язык" title="Language / Язык">{getLang() === 'en' ? 'RU' : 'EN'}</button>
           <button className="btn ghost icon" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label="Переключить тему">{theme === 'dark' ? Icon.sun : Icon.moon}</button>
-          <span className="flex"><span className="tag">{auth.role}</span><span>{auth.username}</span></span>
+          <span className="flex who"><span className="tag">{auth.role}</span><span>{auth.username}</span></span>
           <button className="btn ghost" onClick={logout}>Выйти</button>
         </header>
         <main className="content">
@@ -109,6 +109,7 @@ export function App() {
           {route.page === 'cores' && <CoresPage />}
         </main>
       </div>
+      <Toasts />
       {otpAsk && <OtpModal onDone={(code) => { otpAsk(code); setOtpAsk(null); }} />}
       {confirmAsk && (
         <Modal title="Подтверждение" onClose={() => { confirmAsk.done(false); setConfirmAsk(null); }}>

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, ago } from '../api';
-import { ErrorBox, Info, Tag, roleLabel, useAsync, usePoll } from '../ui';
+import { ErrorBox, Info, Tag, roleLabel, useAsync, usePoll, toast } from '../ui';
 
 interface Conn {
   servers: Array<{ id: string; name: string; group: string; role: string; ufw: boolean; sshPorts: number[]; fwMode: string }>;
@@ -76,7 +76,7 @@ function NewGroup({ onSaved }: { onSaved: () => void }) {
   const [name, setName] = useState('');
   const { busy, error, run } = useAsync();
   return (
-    <form className="row stack" style={{ alignItems: 'stretch' }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.put('/api/v1/groups', { name: name.trim(), stealth: 'S0', peerScope: 'services', portRange: '443,1024-65535' }); setName(''); onSaved(); }); }}>
+    <form className="row stack" style={{ alignItems: 'stretch' }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.put('/api/v1/groups', { name: name.trim(), stealth: 'S0', peerScope: 'services', portRange: '443,1024-65535' }); toast(`Группа ${name.trim()} создана`); setName(''); onSaved(); }); }}>
       <b>Новая группа <Info>Например, «de» или «мобильные». После создания настройте политику выше и перенесите серверы в группу в их карточках (вкладка «Доступ»).</Info></b>
       <div className="flex"><input className="inp" style={{ flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="имя группы" maxLength={32} aria-label="Имя новой группы" /><button className="btn sm" disabled={busy || !name.trim()}>Создать</button></div>
       <ErrorBox error={error} />
@@ -94,7 +94,7 @@ function GroupRow({ g, servers, onSaved }: { g: Conn['groups'][number]; servers:
         <b>{g.name}</b>
         <span className="flex" style={{ gap: 6 }}>
           {servers.length ? servers.map((x) => <a key={x.id} className="tag" href={`#/server/${x.id}`}>{x.name}</a>) : <span className="k">нет серверов</span>}
-          {!servers.length && g.name !== 'default' && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void run(async () => { await api.del(`/api/v1/groups/${encodeURIComponent(g.name)}`); onSaved(); })}>Удалить</button>}
+          {!servers.length && g.name !== 'default' && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void run(async () => { await api.del(`/api/v1/groups/${encodeURIComponent(g.name)}`); toast(`Группа ${g.name} удалена`); onSaved(); })}>Удалить</button>}
         </span>
       </div>
       <div className="grid g2">
@@ -102,7 +102,7 @@ function GroupRow({ g, servers, onSaved }: { g: Conn['groups'][number]; servers:
         <label className="fld">Связность нод<select className="inp" value={v.peerScope} onChange={(e) => setV({ ...v, peerScope: e.target.value })}><option value="services">сервисные порты</option><option value="chain">только цепочка</option><option value="all">все порты</option><option value="none">нет</option></select></label>
       </div>
       <label className="fld">Разрешённый диапазон портов<input className="inp mono" value={v.portRange} onChange={(e) => setV({ ...v, portRange: e.target.value })} /></label>
-      {dirty && <div><button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/groups', { name: g.name, ...v }); onSaved(); })}>Сохранить</button></div>}
+      {dirty && <div><button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/groups', { name: g.name, ...v }); toast(`Политика группы ${g.name} сохранена`); onSaved(); })}>Сохранить</button></div>}
       <ErrorBox error={error} />
     </div>
   );

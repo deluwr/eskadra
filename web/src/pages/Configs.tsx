@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, ago, type Job, type Server, type Template } from '../api';
-import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, useAsync, usePoll, ask } from '../ui';
+import { CopyBlock, ErrorBox, Icon, Info, Seg, Switch, Tag, toast, useAsync, usePoll, ask } from '../ui';
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
 /** Имя конфигурации: строчная латиница, цифры и дефис — регистр и пробелы исправляются сами, кириллица транслитерируется. */
@@ -27,10 +27,17 @@ const CERT_LABEL: Record<CertMode, string> = {
   ip: 'Let\'s Encrypt на IP сервера (рекомендуется)', domain: 'Свой домен на каждом сервере', custom: 'Загрузить свой (общий домен или wildcard)', self: 'Самоподписанный (без домена, с привязкой отпечатка)',
 };
 
+type AutoMode = 'smart' | 'order' | 'random';
+const AUTO_HINT: Record<AutoMode, string> = {
+  smart: 'Трафик идёт через выход, который проходит пороги задержки и скорости. Пока он их проходит — не меняется; перестал — вход переключается на самый быстрый из подходящих.',
+  order: 'Трафик идёт через первый выход в списке, который проходит пороги. Перестал — через следующий; первый снова в норме — трафик возвращается к нему.',
+  random: 'Каждое соединение — через любой выход наугад. Без проверок задержки и скорости.',
+};
+
 interface Settings {
   security: Security; transport: Transport; flow: string; path: string; host: string; serviceName: string; xhttpMode: string;
   alpn: string[]; certMode: CertMode; domain: string; domains: Record<string, string>; ssMethod: string; hy2Obfs: string; mtDomain: string; sniffing: boolean;
-  autoMode: 'random' | 'smart'; maxRttMs: number; minMbps: number; checkMin: number; testMB: number;
+  autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number;
 }
 
 interface Draft {
@@ -43,7 +50,7 @@ const defaults = (p: Protocol): Settings => ({
   security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
-  autoMode: 'smart', maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5,
+  autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5,
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -90,7 +97,7 @@ export function ConfigsPage() {
             <button key={t.id} className={`tpl ${draft?.id === t.id ? 'on' : ''}`} onClick={() => { setDraft(toDraft(t)); setJobId(null); }}>
               <span className="flex" style={{ justifyContent: 'space-between', width: '100%' }}><b className="small">{t.name}</b><Tag>{t.core}</Tag></span>
               <span className="k mono">{describe(t)} · :{t.port}{t.entry_id ? ` · вход :${t.entry_port}` : ''}</span>
-              <span className="k">{t.inbounds.filter((i) => i.state === 'active').length} активно · ревизия {t.revision}{t.applied_revision < t.revision ? ' · не выкачена' : ''}</span>
+              <span className="flex" style={{ gap: 6 }}><span className="k">серверов: {t.inbounds.filter((i) => i.state === 'active').length}</span>{t.applied_revision < t.revision && <Tag kind="warn">не выкачена</Tag>}</span>
             </button>
           ))}
           {!templates?.length && <p className="k" style={{ padding: 8 }}>Конфигураций пока нет.</p>}
@@ -99,7 +106,7 @@ export function ConfigsPage() {
           {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current}
             onSaved={(t) => { void reload(); setDraft(toDraft(t)); }} onRollout={(id) => setJobId(id)} onDeleted={() => { setDraft(null); void reload(); }} />}
           {jobId && <JobLog id={jobId} onDone={() => void reload()} />}
-          {current?.entry_id && current.spec.autoMode === 'smart' && <ExitHealth t={current} />}
+          {current?.entry_id && current.spec.autoMode !== 'random' && <ExitHealth t={current} />}
           {current && <Preview t={current} servers={servers ?? []} />}
         </div>
       </div>
@@ -191,6 +198,7 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
   draft: Draft; servers: Server[]; current: Template | null; onSaved: (t: Template) => void; onRollout: (jobId: number) => void; onDeleted: () => void;
 }) {
   const [d, setD] = useState(draft);
+  useEffect(() => setD(draft), [draft]);   // после сохранения — то, что вернул сервер
   const { busy, error, run } = useAsync();
   const managed = servers.filter((s) => s.sudo_mode === 'restricted');
   const info = PROTO[d.protocol];
@@ -198,6 +206,15 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
   const setSt = (patch: Partial<Settings>) => setD({ ...d, st: { ...st, ...patch } });
   const tls = st.security === 'tls' || d.protocol === 'hysteria2';
   const usedIds = [...d.nodeIds, ...(d.entryId ? [d.entryId] : [])];
+  // выходы «Авто»: серверы конфигурации кроме входа — в заданном порядке (новые — в конце)
+  const rank = (id: string) => (st.exitOrder.includes(id) ? st.exitOrder.indexOf(id) : st.exitOrder.length);
+  const exits = managed.filter((s) => d.nodeIds.includes(s.id) && s.id !== d.entryId).sort((a, b) => rank(a.id) - rank(b.id));
+  const move = (i: number, dir: -1 | 1) => {
+    const ids = exits.map((s) => s.id);
+    [ids[i], ids[i + dir]] = [ids[i + dir]!, ids[i]!];
+    setSt({ exitOrder: ids });
+  };
+  const dirty = JSON.stringify(d) !== JSON.stringify(draft);
   const body = () => ({
     name: d.name, protocol: d.protocol, port: Number(d.port), sni: d.sni.split(/[\s,]+/).filter(Boolean), fingerprint: d.fingerprint, ech: d.ech,
     nodeIds: d.nodeIds, entryId: d.entryId || null, entryPort: d.entryId ? Number(d.entryPort) : null,
@@ -206,7 +223,7 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
-      autoMode: st.autoMode, maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5,
+      autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5,
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -215,12 +232,14 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
     onSaved(t);
     return t;
   };
-  const save = () => run(saveT);
+  const save = () => run(async () => { await saveT(); toast('Черновик сохранён — на серверах прежняя версия'); });
   const rollout = () => run(async () => {
     const t = await saveT();
     const r = await api.post<{ jobId: number }>(`/api/v1/templates/${t.id}/rollout`);
     onRollout(r.jobId);
+    toast('Сохранено, выкат начался', 'info');
   });
+  const pending = !!current && current.applied_revision < current.revision;
   const toggleNode = (id: string) => setD({ ...d, nodeIds: d.nodeIds.includes(id) ? d.nodeIds.filter((x) => x !== id) : [...d.nodeIds, id] });
   const stateOf = (sid: string, kind: string) => current?.inbounds.find((i) => i.server_id === sid && i.kind === kind);
   const pickProtocol = (p: Protocol) => setD({ ...d, protocol: p, port: PROTO[p].port, st: defaults(p), entryId: PROTO[p].relay ? d.entryId : '' });
@@ -228,8 +247,8 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
   return (
     <section className="card pad stack" style={{ gap: 18 }}>
       <div className="flex" style={{ justifyContent: 'space-between' }}>
-        <div><h2>{d.id ? d.name : 'Новая конфигурация'}</h2>{current && <span className="k">ревизия {current.revision}, выкачена {current.applied_revision || '—'}</span>}</div>
-        {d.id && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask('Снять конфигурацию со всех серверов и удалить?')) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); onDeleted(); }); }}>Удалить</button>}
+        <h2>{d.id ? d.name : 'Новая конфигурация'}</h2>
+        {current && (pending ? <Tag kind="warn">черновик не выкачен</Tag> : current.applied_revision ? <Tag kind="ok" dot>выкачена</Tag> : <Tag>ещё не выкатывалась</Tag>)}
       </div>
 
       <div className="grid g3">
@@ -329,9 +348,23 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
           </div>
           {d.entryId && (
             <div className="stack" style={{ gap: 8 }}>
-              <span className="k">Профиль «вход → авто» выбирает выход <Info>Случайно — на каждое соединение любой выход. По качеству — вход раз в минуту проверяет задержку выходов и не ведёт трафик через выходы медленнее порога; панель по расписанию меряет скорость скачивания через каждый выход и переключает вход, если текущий выход медленнее порога по задержке или скорости. Переключение — без разрыва соединений.</Info></span>
-              <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['random', 'случайно']]} />
-              {st.autoMode === 'smart' && (
+              <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
+              <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ['random', 'случайно']]} />
+              <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}</span>
+              {st.autoMode === 'order' && (
+                exits.length ? (
+                  <ol className="order" aria-label="Порядок выходов">
+                    {exits.map((s, i) => (
+                      <li key={s.id}>
+                        <b>{s.name}</b>{i === 0 && <span className="k">основной</span>}
+                        <button type="button" className="btn ghost icon" disabled={i === 0} onClick={() => move(i, -1)} aria-label={`${s.name} выше`}>{Icon.up}</button>
+                        <button type="button" className="btn ghost icon" disabled={i === exits.length - 1} onClick={() => move(i, 1)} aria-label={`${s.name} ниже`}>{Icon.down}</button>
+                      </li>
+                    ))}
+                  </ol>
+                ) : <span className="k">Отметьте выше серверы-выходы — здесь появится их порядок.</span>
+              )}
+              {st.autoMode !== 'random' && (
                 <div className="grid g4">
                   <label className="fld">Задержка не больше, мс<input className="inp mono" inputMode="numeric" value={st.maxRttMs} onChange={(e) => setSt({ maxRttMs: Number(e.target.value.replace(/\D/g, '')) })} /></label>
                   <label className="fld">Скорость не меньше, Мбит/с<input className="inp mono" inputMode="decimal" value={st.minMbps} onChange={(e) => setSt({ minMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} /></label>
@@ -391,12 +424,15 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
         </details>
       )}
 
-      <div className="flex">
-        <button className="btn pri" disabled={busy || !d.name || (!d.nodeIds.length && !d.entryId)} onClick={() => void rollout()}>Сохранить и выкатить</button>
-        <button className="btn" disabled={busy || !d.name} onClick={() => void save()}>Сохранить черновик</button>
-        <Info>Выкат идёт по одному серверу: проверка конфига на сервере, открытие порта, проверка снаружи. Ошибка — откат и остановка.</Info>
-      </div>
       <ErrorBox error={error} />
+      <div className="savebar">
+        <button className="btn pri" disabled={busy || !d.name || (!d.nodeIds.length && !d.entryId)} onClick={() => void rollout()}>{dirty || !d.id ? 'Сохранить и выкатить' : 'Выкатить'}</button>
+        <button className="btn" disabled={busy || !d.name || (!dirty && !!d.id)} onClick={() => void save()}>Сохранить черновик</button>
+        <Info>Выкат идёт по одному серверу: проверка конфига на сервере, открытие порта, проверка снаружи. Ошибка — откат и остановка. Черновик сохраняется в панели, серверы его не получают.</Info>
+        {dirty && d.id && <><span className="dirty"><span className="dot" />Есть несохранённые изменения</span><button className="btn ghost sm" onClick={() => setD(draft)}>Отменить</button></>}
+        <span className="spacer" />
+        {d.id && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Снять «${d.name}» со всех серверов и удалить? Профили этой конфигурации пропадут из подписок.`)) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); toast(`«${d.name}» удалена`); onDeleted(); }); }}>Удалить</button>}
+      </div>
     </section>
   );
 }

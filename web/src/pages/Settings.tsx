@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { ErrorBox, Info, Switch, useAsync, usePoll } from '../ui';
+import { ErrorBox, Info, Switch, useAsync, usePoll, toast } from '../ui';
 
 interface S {
   executorIps: string[];
@@ -35,7 +35,7 @@ function Executor({ s, onSaved }: { s: S; onSaved: () => void }) {
       <p className="small muted">С этих адресов панель ходит на узлы по SSH. Они попадают в <code>from=</code> ключа панели и в защищённый набор firewall. Меняйте по схеме «добавить → проверить → убрать старый» (§7.10).</p>
       <textarea className="inp mono" rows={3} value={ips} onChange={(e) => setIps(e.target.value)} placeholder="по одному IP в строке" />
       <div className="flex">
-        <button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/executor', { ips: ips.split(/[\s,]+/).filter(Boolean) }); onSaved(); })}>Сохранить</button>
+        <button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/executor', { ips: ips.split(/[\s,]+/).filter(Boolean) }); toast('Адреса исполнителя сохранены'); onSaved(); })}>Сохранить</button>
         <button className="btn" disabled={busy} onClick={() => void run(async () => setDetected((await api.post<{ ip: string }>('/api/v1/settings/executor/detect')).ip))}>Определить мой внешний IP</button>
         {detected && <span className="small">Внешний IP: <code>{detected}</code> {!ips.includes(detected) && <button className="link" onClick={() => setIps((v) => (v ? v + '\n' : '') + detected)}>добавить</button>}</span>}
       </div>
@@ -46,7 +46,6 @@ function Executor({ s, onSaved }: { s: S; onSaved: () => void }) {
 
 function General({ s }: { s: S }) {
   const [v, setV] = useState({ failThresholdMin: s.failThresholdMin, knockTtlHours: s.knockTtlHours });
-  const [saved, setSaved] = useState(false);
   const { busy, error, run } = useAsync();
   return (
     <section className="card pad stack">
@@ -58,7 +57,7 @@ function General({ s }: { s: S }) {
         <label className="fld">Сколько живёт IP после knock
           <select className="inp" value={v.knockTtlHours} onChange={(e) => setV({ ...v, knockTtlHours: Number(e.target.value) })}>{[6, 12, 24, 48].map((h) => <option key={h} value={h}>{h} ч</option>)}</select></label>
       </div>
-      <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/general', v); setSaved(true); })}>Сохранить</button>{saved && <span className="k">Сохранено</span>}</div>
+      <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/general', v); toast('Настройки сохранены'); })}>Сохранить</button></div>
       <ErrorBox error={error} />
     </section>
   );
@@ -71,7 +70,7 @@ function BotCard({ s, onSaved }: { s: S; onSaved: () => void }) {
   return (
     <section className="card pad stack">
       <h2>Telegram-бот</h2>
-      <p className="small muted">Бот работает через long polling — входящий порт не нужен. Он присылает бэкапы получателям, уведомляет админов и отвечает пользователям на /sub, /links, /access. Telegram ID админов и получателей задаются в «Права и роли».</p>
+      <p className="small muted" style={{ maxWidth: '72ch' }}>Админам бот показывает состояние серверов, то, что требует внимания, выходы «Авто» и запускает бэкап; пользователям — подписку, ссылки на профили и их трафик. Всё — кнопками под сообщением. Отвечает только привязанным: незнакомец увидит лишь свой Telegram ID. Привязка — кнопкой «Привязать» в «Права и роли» и в карточке пользователя. Входящий порт не нужен.</p>
       <div className="flex">
         <input className="inp mono" style={{ flex: 1, minWidth: 260 }} type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder={s.bot.configured ? 'токен задан — введите новый, чтобы заменить' : '123456:ABC… от @BotFather'} aria-label="Токен бота" autoComplete="off" />
         <button className="btn pri" disabled={busy || !token} onClick={() => void run(async () => { const r = await api.put<{ username: string | null }>('/api/v1/settings/bot', { token }); setInfo(r.username ? `Бот @${r.username} подключён` : 'Сохранено'); setToken(''); onSaved(); })}>Сохранить</button>
@@ -133,9 +132,7 @@ function BotProxy() {
 
 function BackupCard({ s }: { s: S }) {
   const [v, setV] = useState({ recipients: s.backup.recipients.join('\n'), time: s.backup.time, enabled: s.backup.enabled });
-  const [saved, setSaved] = useState(false);
   const { busy, error, run } = useAsync();
-  useEffect(() => setSaved(false), [v]);
   return (
     <section className="card pad stack">
       <h2>Бэкапы</h2>
@@ -145,7 +142,7 @@ function BackupCard({ s }: { s: S }) {
         <label className="fld">Ежедневно в (UTC)<input className="inp mono" style={{ width: 120 }} value={v.time} onChange={(e) => setV({ ...v, time: e.target.value })} /></label>
         <span className="flex small" style={{ marginTop: 22 }}><Switch label="Включено" on={v.enabled} onChange={(x) => setV({ ...v, enabled: x })} />по расписанию</span>
       </div>
-      <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/backup', { recipients: v.recipients.split(/\s+/).filter(Boolean), time: v.time, enabled: v.enabled }); setSaved(true); })}>Сохранить</button>{saved && <span className="k">Сохранено</span>}<a href="#/backups">История бэкапов</a></div>
+      <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/backup', { recipients: v.recipients.split(/\s+/).filter(Boolean), time: v.time, enabled: v.enabled }); toast('Настройки бэкапов сохранены'); })}>Сохранить</button><a href="#/backups">История бэкапов</a></div>
       <ErrorBox error={error} />
     </section>
   );

@@ -42,6 +42,7 @@ code { background: var(--surface2); padding: .05em .35em; border-radius: 4px; ov
 .side { flex: 1 1 248px; background: var(--side); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 2px; }
 .brand { display: flex; align-items: center; gap: 12px; padding: 2px 10px 22px; color: var(--text) !important; text-decoration: none !important; }
 .brand-mark { width: 38px; height: 38px; border-radius: 10px; background: var(--accent-bg); color: var(--accent); display: grid; place-items: center; flex: none; }
+.brand-text { display: flex; flex-direction: column; }
 .brand-name { font-weight: 700; font-size: 18px; line-height: 1.2; }
 .nav { display: flex; align-items: center; gap: 10px; padding: 0 12px; border-radius: 8px; color: var(--muted) !important; font-size: 14px; min-height: 40px; text-decoration: none !important; }
 .nav { transition-property: background-color, color; transition-duration: 150ms; }
@@ -204,3 +205,48 @@ pre.code { margin: 0; background: var(--code); color: var(--code-text); border-r
 .qr { background: #fff; border-radius: 10px; padding: 6px; outline: 1px solid oklch(1 0 0 / 0.1); outline-offset: -1px; }
 :root[data-theme='light'] .qr { outline-color: oklch(0 0 0 / 0.1); }
 .qr svg { width: 100%; height: 100%; display: block; }
+
+/* уведомления о результате действия */
+.toasts { position: fixed; bottom: 20px; left: 50%; translate: -50% 0; z-index: 60; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+.toast { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 10px; background: var(--surface); color: var(--text); font-size: 14px; box-shadow: 0 0 0 1px var(--line), 0 8px 24px rgb(0 0 0 / .28); animation: toast-in 200ms cubic-bezier(0.2, 0, 0, 1); }
+.toast.ok .dot { color: var(--ok); } .toast.fail .dot { color: var(--fail); } .toast.info .dot { color: var(--info); }
+@keyframes toast-in { from { opacity: 0; translate: 0 8px; } }
+
+/* панель сохранения внизу редактора: видно, что есть несохранённые изменения */
+.savebar { position: sticky; bottom: 0; z-index: 4; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--surface); border-radius: 0 0 12px 12px; }
+.savebar .dirty { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--warn); }
+.savebar .spacer { flex: 1; }
+
+/* «Дополнительно» и вручную */
+details.more > summary { cursor: pointer; font-size: 13px; color: var(--muted); list-style: none; display: inline-flex; align-items: center; gap: 6px; min-height: 32px; }
+details.more > summary::before { content: ''; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; rotate: -45deg; transition: rotate 150ms; }
+details.more[open] > summary::before { rotate: 45deg; }
+details.more > summary:hover { color: var(--text); }
+
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin 800ms linear infinite; display: inline-block; flex: none; }
+@keyframes spin { to { rotate: 360deg; } }
+
+/* порядок выходов «Авто» */
+.order { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; counter-reset: ord; }
+.order li { display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); counter-increment: ord; }
+.order li::before { content: counter(ord); width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 600; background: var(--surface2); color: var(--muted); flex: none; }
+.order li:first-child::before { background: var(--accent-bg); color: var(--accent); }
+.order li b { flex: 1; font-weight: 500; }
+.order .btn.icon { width: 32px; min-height: 32px; }
+
+@media (prefers-reduced-motion: reduce) { .toast, .spin { animation: none; } }
+
+/* узкий экран: меню — строкой сверху, а не во весь экран перед содержимым */
+@media (max-width: 900px) {
+  .shell { flex-direction: column; flex-wrap: nowrap; }
+  .side { flex: none; flex-direction: row; align-items: center; gap: 2px; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); overflow-x: auto; position: sticky; top: 0; z-index: 6; scrollbar-width: none; }
+  .side::-webkit-scrollbar { display: none; }
+  .brand { padding: 0 8px 0 0; }
+  .brand-text, .side-foot { display: none; }
+  .brand-mark { width: 34px; height: 34px; }
+  .nav { flex: none; min-height: 36px; padding: 0 10px; }
+  .side-sep { width: 1px; height: 20px; margin: 0 4px; flex: none; }
+  .topbar { position: static; padding: 8px 16px; gap: 8px; }
+  .topbar .who { display: none; }
+}
+.card.pad > .savebar { margin: 4px -20px -18px; }

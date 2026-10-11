@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, fmtTime } from '../api';
-import { CopyButton, ErrorBox, Switch, Tag, useAsync, usePoll, ask } from '../ui';
+import { CopyButton, ErrorBox, Switch, Tag, TgBind, toast, useAsync, usePoll, ask } from '../ui';
 import type { AuthState } from '../App';
 
 interface Admin { id: number; username: string; role: string; totp_enabled: number; tg_id: string | null; backup_recipient: number; last_login_at: string | null }
@@ -26,12 +26,12 @@ const MATRIX: Array<[string, Array<[string, string, string, string]>]> = [
 const cell = (v: string) => <td style={{ textAlign: 'center', color: v === '✓' ? 'var(--ok)' : v === '—' ? 'var(--muted)' : 'var(--warn)', fontWeight: 700, fontSize: v === '2FA' ? 12 : 14 }}>{v}</td>;
 
 export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () => void }) {
-  const { data: admins, setData } = usePoll(() => api.get<Admin[]>('/api/v1/admins'), null);
+  const { data: admins, setData, reload } = usePoll(() => api.get<Admin[]>('/api/v1/admins'), null);
   const { busy, error, run } = useAsync();
   const [nu, setNu] = useState({ username: '', role: 'admin' });
   const [created, setCreated] = useState<{ username: string; password: string } | null>(null);
   const isOwner = auth.role === 'owner';
-  const patch = (id: number, body: object) => run(async () => setData(await api.patch<Admin[]>(`/api/v1/admins/${id}`, body)));
+  const patch = (id: number, body: object, done?: string) => run(async () => { setData(await api.patch<Admin[]>(`/api/v1/admins/${id}`, body)); if (done) toast(done); });
 
   return (
     <>
@@ -41,22 +41,23 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
         <div className="card-head"><h2>Администраторы</h2><span className="k">Личный флот: реселлеров нет</span></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
           <table>
-            <thead><tr><th>Учётная запись</th><th>Роль</th><th>2FA</th><th>Telegram ID</th><th>Получает бэкапы</th><th>Последний вход</th><th /></tr></thead>
+            <thead><tr><th>Учётная запись</th><th>Роль</th><th>2FA</th><th>Telegram</th><th>Получает бэкапы</th><th>Последний вход</th><th /></tr></thead>
             <tbody>{admins?.map((a) => (
               <tr key={a.id}>
-                <td><b>{a.username}</b></td>
-                <td>{isOwner ? <select className="inp" style={{ width: 'auto' }} value={a.role} onChange={(e) => void patch(a.id, { role: e.target.value })}>{['owner', 'admin', 'operator'].map((r) => <option key={r}>{r}</option>)}</select> : <Tag kind="acc">{a.role}</Tag>}</td>
+                <td><b>{a.username}</b>{a.username === auth.username && <> <span className="k">(вы)</span></>}</td>
+                <td>{isOwner ? <select className="inp" style={{ width: 'auto' }} value={a.role} aria-label={`Роль ${a.username}`} onChange={(e) => void patch(a.id, { role: e.target.value }, `${a.username}: роль ${e.target.value} сохранена`)}>{['owner', 'admin', 'operator'].map((r) => <option key={r}>{r}</option>)}</select> : <Tag kind="acc">{a.role}</Tag>}</td>
                 <td>{a.totp_enabled ? <Tag kind="ok">TOTP</Tag> : <Tag kind="warn">не включена</Tag>}</td>
-                <td>{isOwner ? <TgInput value={a.tg_id} onSave={(v) => void patch(a.id, { tgId: v })} /> : <span className="mono small">{a.tg_id ?? '—'}</span>}</td>
-                <td><Switch label="Получает бэкапы" on={!!a.backup_recipient} disabled={!isOwner || busy} onChange={(v) => void patch(a.id, { backupRecipient: v })} /></td>
+                <td><TgBind tgId={a.tg_id} canEdit={isOwner || a.username === auth.username} linkUrl={`/api/v1/admins/${a.id}/tg-link`} onChanged={() => void reload()}
+                  onSaveId={(v) => (isOwner ? api.patch(`/api/v1/admins/${a.id}`, { tgId: v }) : api.patch('/api/v1/me', { tgId: v }))} /></td>
+                <td><Switch label="Получает бэкапы" on={!!a.backup_recipient} disabled={!isOwner || busy} onChange={(v) => void patch(a.id, { backupRecipient: v }, v ? `${a.username} получает бэкапы` : `${a.username} больше не получает бэкапы`)} /></td>
                 <td className="k">{fmtTime(a.last_login_at)}</td>
-                <td>{isOwner && a.username !== auth.username && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} onClick={async () => { if (await ask(`Удалить ${a.username}?`)) void run(async () => setData(await api.del<Admin[]>(`/api/v1/admins/${a.id}`))); }}>Удалить</button>}</td>
+                <td>{isOwner && a.username !== auth.username && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} onClick={async () => { if (await ask(`Удалить ${a.username}?`)) void run(async () => { setData(await api.del<Admin[]>(`/api/v1/admins/${a.id}`)); toast(`${a.username} удалён`); }); }}>Удалить</button>}</td>
               </tr>
             ))}</tbody>
           </table>
         </div>
         {isOwner && (
-          <form className="row" onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = await api.post<{ username: string; password: string; admins: Admin[] }>('/api/v1/admins', nu); setCreated(r); setData(r.admins); setNu({ username: '', role: 'admin' }); }); }}>
+          <form className="row" onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = await api.post<{ username: string; password: string; admins: Admin[] }>('/api/v1/admins', nu); setCreated(r); setData(r.admins); setNu({ username: '', role: 'admin' }); toast(`${r.username} приглашён`); }); }}>
             <div className="flex"><input className="inp" style={{ width: 200 }} value={nu.username} onChange={(e) => setNu({ ...nu, username: e.target.value })} placeholder="логин" aria-label="Логин" />
               <select className="inp" style={{ width: 'auto' }} value={nu.role} onChange={(e) => setNu({ ...nu, role: e.target.value })} aria-label="Роль"><option value="admin">admin</option><option value="operator">operator</option></select>
               <button className="btn pri" disabled={busy || nu.username.length < 3}>Пригласить</button></div>
@@ -76,11 +77,6 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
       </section>
     </>
   );
-}
-
-function TgInput({ value, onSave }: { value: string | null; onSave: (v: string | null) => void }) {
-  const [v, setV] = useState(value ?? '');
-  return <form className="flex" onSubmit={(e) => { e.preventDefault(); onSave(v.trim() || null); }}><input className="inp mono" style={{ width: 150 }} value={v} onChange={(e) => setV(e.target.value)} placeholder="ID из /start" aria-label="Telegram ID" />{v !== (value ?? '') && <button className="btn sm">OK</button>}</form>;
 }
 
 function MySecurity({ auth, onChange }: { auth: AuthState; onChange: () => void }) {

@@ -15,6 +15,7 @@ import { publicView, stageOf } from './servers.js';
 import { Vpn, period } from '../vpn.js';
 import type { Backups } from '../backup.js';
 import type { Bot } from '../bot.js';
+import { attentionOf } from '../attention.js';
 import type { SubService } from '../subsvc.js';
 
 async function detectEgressIp(): Promise<string> {
@@ -35,19 +36,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     const users = vpn.users();
     const traffic = db.prepare('SELECT COALESCE(SUM(up + down), 0) AS t FROM traffic WHERE period = ?').get(period()) as { t: number };
     const lastBackup = db.prepare('SELECT * FROM backups ORDER BY id DESC LIMIT 1').get();
-    const attention: Array<{ level: 'fail' | 'warn' | 'info'; title: string; detail: string; serverId?: string }> = [];
-    for (const s of servers) {
-      const protect = s.protection_target !== 'P1';   // при обычной защите про firewall и проверку не напоминаем
-      if (s.fail_since) attention.push({ level: 'fail', title: `${s.name}: нет связи`, detail: `с ${s.fail_since}`, serverId: s.id });
-      if (protect && s.ufw_active) attention.push({ level: 'warn', title: `${s.name}: включён ufw/firewalld`, detail: 'Он мешает защите Эскадры — выключите его на вкладке «Хост».', serverId: s.id });
-      if (s.fw_mode === 'pending') attention.push({ level: 'warn', title: `${s.name}: защита ждёт подтверждения`, detail: `до ${s.fw_pending_until}`, serverId: s.id });
-      if (protect && s.fw_mode !== 'enforced' && s.sudo_mode === 'restricted' && !s.checklist_passed_at)
-        attention.push({ level: 'info', title: `${s.name}: защита не включена`, detail: 'Отметьте проверку доступа на вкладке «Защита», затем включите защиту.', serverId: s.id });
-      for (const ib of vpn.inbounds(`server_id = ? AND state = 'error'`, s.id))
-        attention.push({ level: 'warn', title: `${s.name}: конфигурация не поднялась`, detail: ib.error ?? '', serverId: s.id });
-    }
-    const recipients = db.prepare(`SELECT COUNT(*) AS n FROM admins WHERE backup_recipient = 1 AND tg_id IS NOT NULL`).get() as { n: number };
-    if (recipients.n < 2) attention.push({ level: 'warn', title: 'Бэкапы: меньше двух получателей', detail: 'Если единственный получатель удалит чат, копии пропадут.' });
+    const attention = attentionOf(ctx, vpn);
     return {
       servers: servers.map((s) => ({ ...publicView(ctx, s), stage: stageOf(s) })),
       counts: { servers: servers.length, online: servers.filter((s) => s.last_seen_at && !s.fail_since).length, users: users.length, activeUsers: users.filter((u) => u.status === 'active').length },
@@ -134,6 +123,21 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     audit(db, who(req), 'admin.delete', String(id));
     return adminView();
   });
+
+  // Привязка Telegram одноразовой ссылкой: человек открывает её и нажимает «Старт» в боте
+  app.post<{ Params: { id: string } }>('/api/v1/admins/:id/tg-link', async (req) => {
+    const id = Number(req.params.id);
+    if (id !== req.admin!.id && req.admin!.role !== 'owner') throw new HttpError(403, 'привязать чужой Telegram может только owner');
+    if (!db.prepare('SELECT 1 FROM admins WHERE id = ?').get(id)) throw new HttpError(404, 'нет такого администратора');
+    try { return await deps.bot.bindLink('admin', String(id)); } catch (e) { throw new HttpError(409, (e as Error).message); }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/v1/users/:id/tg-link', { preHandler: guard(ctx, 'operator') }, async (req) => {
+    if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(req.params.id)) throw new HttpError(404, 'нет такого пользователя');
+    try { return await deps.bot.bindLink('user', req.params.id); } catch (e) { throw new HttpError(409, (e as Error).message); }
+  });
+
+  app.get<{ Params: { code: string } }>('/api/v1/tg-link/:code', async (req) => ({ state: deps.bot.bindState(req.params.code) }));
 
   // Свой профиль: Telegram ID, 2FA, пароль, сессии
   app.patch('/api/v1/me', async (req) => {
