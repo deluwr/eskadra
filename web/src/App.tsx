@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api, ApiError, setOtpProvider } from './api';
-import { CopyButton, ErrorBox, Icon, Info, Modal, useAsync } from './ui';
+import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, useAsync } from './ui';
 import { OverviewPage } from './pages/Overview';
 import { ServersPage } from './pages/Servers';
 import { ServerDetailPage } from './pages/ServerDetail';
@@ -29,6 +29,7 @@ export function App() {
   const [route, setRoute] = useState<Route>(parseHash);
   const [theme, setTheme] = useState<Theme>(readTheme);
   const [otpAsk, setOtpAsk] = useState<((code: string | null) => void) | null>(null);
+  const [confirmAsk, setConfirmAsk] = useState<{ text: string; done: (ok: boolean) => void } | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -37,6 +38,7 @@ export function App() {
 
   useEffect(() => {
     setOtpProvider(() => new Promise<string | null>((resolve) => setOtpAsk(() => resolve)));
+    setConfirmProvider((text) => new Promise<boolean>((resolve) => setConfirmAsk({ text, done: resolve })));
   }, []);
 
   const refreshAuth = useCallback(() => api.get<AuthState>('/api/v1/auth/state').then(setAuth), []);
@@ -93,6 +95,15 @@ export function App() {
         </main>
       </div>
       {otpAsk && <OtpModal onDone={(code) => { otpAsk(code); setOtpAsk(null); }} />}
+      {confirmAsk && (
+        <Modal title="Подтверждение" onClose={() => { confirmAsk.done(false); setConfirmAsk(null); }}>
+          <p>{confirmAsk.text}</p>
+          <div className="flex">
+            <button className="btn pri" autoFocus onClick={() => { confirmAsk.done(true); setConfirmAsk(null); }}>Да</button>
+            <button className="btn ghost" onClick={() => { confirmAsk.done(false); setConfirmAsk(null); }}>Отмена</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

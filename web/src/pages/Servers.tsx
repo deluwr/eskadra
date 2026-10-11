@@ -63,6 +63,7 @@ function SelfNodeButton({ onDone }: { onDone: (id: string) => void }) {
 function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => void; onCancel: () => void }) {
   const [f, setF] = useState({ name: '', host: '', sshPort: '22', role: 'exit', group: 'default', mgmtMode: 'direct', user: 'root', method: 'password', password: '', privateKey: '', passphrase: '' });
   const { busy, error, run } = useAsync();
+  const { data: groups } = usePoll(() => api.get<Array<{ name: string }>>('/api/v1/groups'), null);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const create = (manual: boolean) => run(async () => {
     const auth = manual ? undefined : f.method === 'password'
@@ -84,6 +85,9 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
         <label className="fld">Порт SSH<input className="inp mono" value={f.sshPort} onChange={set('sshPort')} inputMode="numeric" required /></label>
         <label className="fld"><span>Роль <Info>Выход — сервер, через который трафик уходит в интернет. Вход — сервер, к которому подключаются пользователи; он может пересылать их на выходы. Подробнее — в «Справке».</Info></span>
           <select className="inp" value={f.role} onChange={set('role')}><option value="exit">выход</option><option value="entry">вход</option></select>
+        </label>
+        <label className="fld"><span>Группа <Info>Группа задаёт политику портов и связности. Создать новую — в «Портах и связности».</Info></span>
+          <select className="inp" value={f.group} onChange={set('group')}>{(groups ?? [{ name: 'default' }]).map((g) => <option key={g.name} value={g.name}>{g.name}</option>)}</select>
         </label>
       </div>
 

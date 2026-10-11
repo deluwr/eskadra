@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, fmtTime } from '../api';
-import { CopyButton, ErrorBox, Switch, Tag, useAsync, usePoll } from '../ui';
+import { CopyButton, ErrorBox, Switch, Tag, useAsync, usePoll, ask } from '../ui';
 import type { AuthState } from '../App';
 
 interface Admin { id: number; username: string; role: string; totp_enabled: number; tg_id: string | null; backup_recipient: number; last_login_at: string | null }
@@ -50,7 +50,7 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
                 <td>{isOwner ? <TgInput value={a.tg_id} onSave={(v) => void patch(a.id, { tgId: v })} /> : <span className="mono small">{a.tg_id ?? '—'}</span>}</td>
                 <td><Switch label="Получает бэкапы" on={!!a.backup_recipient} disabled={!isOwner || busy} onChange={(v) => void patch(a.id, { backupRecipient: v })} /></td>
                 <td className="k">{fmtTime(a.last_login_at)}</td>
-                <td>{isOwner && a.username !== auth.username && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} onClick={() => { if (confirm(`Удалить ${a.username}?`)) void run(async () => setData(await api.del<Admin[]>(`/api/v1/admins/${a.id}`))); }}>Удалить</button>}</td>
+                <td>{isOwner && a.username !== auth.username && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} onClick={async () => { if (await ask(`Удалить ${a.username}?`)) void run(async () => setData(await api.del<Admin[]>(`/api/v1/admins/${a.id}`))); }}>Удалить</button>}</td>
               </tr>
             ))}</tbody>
           </table>

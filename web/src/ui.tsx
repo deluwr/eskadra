@@ -37,6 +37,14 @@ export function usePoll<T>(load: () => Promise<T>, ms: number | null, deps: unkn
   return { data, error, reload, setData };
 }
 
+/**
+ * Подтверждение внутри панели вместо window.confirm: встроенные браузеры (например, в приложении Claude)
+ * системные окна не показывают, и confirm() молча возвращает «нет».
+ */
+let confirmProvider: ((text: string) => Promise<boolean>) | null = null;
+export const setConfirmProvider = (p: (text: string) => Promise<boolean>) => { confirmProvider = p; };
+export const ask = (text: string): Promise<boolean> => (confirmProvider ? confirmProvider(text) : Promise.resolve(window.confirm(text)));
+
 export function ErrorBox({ error }: { error: string | null | undefined }) {
   return error ? <div className="alert fail" role="alert">{error}</div> : null;
 }

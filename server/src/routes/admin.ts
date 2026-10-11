@@ -69,6 +69,19 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     };
   });
 
+  /** Группы и их серверы: политика (скрытность, связность, диапазон портов) задаётся на группу. */
+  app.get('/api/v1/groups', async () =>
+    db.prepare(`SELECT g.*, (SELECT COUNT(*) FROM servers s WHERE s.group_name = g.name) AS servers FROM groups g ORDER BY g.name`).all());
+
+  app.delete<{ Params: { name: string } }>('/api/v1/groups/:name', { preHandler: guard(ctx, 'admin') }, async (req) => {
+    const name = req.params.name;
+    if (name === 'default') throw new HttpError(409, 'группу default удалить нельзя');
+    if (db.prepare('SELECT 1 FROM servers WHERE group_name = ?').get(name)) throw new HttpError(409, 'в группе есть серверы — сначала перенесите их в другую группу');
+    db.prepare('DELETE FROM groups WHERE name = ?').run(name);
+    audit(db, who(req), 'group.delete', name);
+    return db.prepare('SELECT * FROM groups ORDER BY name').all();
+  });
+
   app.put('/api/v1/groups', { preHandler: guard(ctx, 'admin') }, async (req) => {
     const b = z.object({
       name: z.string().trim().min(1).max(32),
@@ -173,6 +186,8 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     executorIps: ctx.executorIps(),
     sub: { host: getSetting(db, 'sub.host', ''), port: getSetting(db, 'sub.port', 0), scheme: getSetting(db, 'sub.scheme', 'http') },
     knockTtlHours: getSetting(db, 'knock.ttlHours', 12),
+    // белый список IP пользователей — дополнительная опция: включается скрытностью группы S3/S4
+    whitelistOn: !!db.prepare(`SELECT 1 FROM groups WHERE stealth IN ('S3','S4')`).get(),
     failThresholdMin: getSetting(db, 'check.failThresholdMin', 120),
     bot: { configured: !!getSetting(db, 'bot.token', '') },
     backup: deps.backups.settings(),

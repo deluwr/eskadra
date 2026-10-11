@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, fmtBytes, fmtTime, type Server, type User } from '../api';
-import { CopyButton, ErrorBox, Modal, Seg, Tag, useAsync, usePoll } from '../ui';
+import { CopyButton, ErrorBox, Modal, Seg, Tag, useAsync, usePoll, ask, Info } from '../ui';
 
 interface Form {
   name: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
@@ -15,6 +15,8 @@ const num = (s: string) => (s.trim() === '' ? null : Number(s));
 
 export function UsersPage() {
   const { data: users, reload } = usePoll(() => api.get<User[]>('/api/v1/users'), 30_000);
+  const { data: st } = usePoll(() => api.get<{ whitelistOn: boolean }>('/api/v1/settings'), null);
+  const wlOn = !!st?.whitelistOn;
   const { data: servers } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
   const [sel, setSel] = useState<string | 'new' | null>(null);
   const [filter, setFilter] = useState<'all' | 'active' | 'expiring' | 'disabled'>('all');
@@ -28,7 +30,7 @@ export function UsersPage() {
   return (
     <>
       <div className="page-head">
-        <div><h1>Пользователи и ограничения</h1><p>Лимиты, режимы подключения, доступные узлы, белый список IP, подписка и отдельные ссылки</p></div>
+        <div><h1>Пользователи</h1><p>Лимиты, режимы подключения, подписки и ссылки</p></div>
         <div className="flex"><button className="btn" onClick={() => setGroups(true)}>Группы лимитов</button><button className="btn pri" onClick={() => setSel('new')}>Новый пользователь</button></div>
       </div>
       <SubServiceCard />
@@ -37,7 +39,7 @@ export function UsersPage() {
           <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
           <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
             <table>
-              <thead><tr><th>Пользователь</th><th>Трафик за месяц</th><th>Срок</th><th>Режимы</th><th>Профилей</th><th>Whitelist</th></tr></thead>
+              <thead><tr><th>Пользователь</th><th>Трафик за месяц</th><th>Срок</th><th>Режимы</th><th>Профилей</th>{wlOn && <th>Белый список</th>}</tr></thead>
               <tbody>
                 {list.map((u) => {
                   const used = u.traffic.up + u.traffic.down;
@@ -49,17 +51,17 @@ export function UsersPage() {
                       <td>{u.effective.expireAt ? <span className={soon(u) ? 'tag warn' : 'k'}>до {u.effective.expireAt.slice(0, 10)}</span> : <span className="k">бессрочно</span>}</td>
                       <td><span className="flex" style={{ gap: 4 }}>{u.modes.map((m) => <Tag key={m}>{m === 'via' ? 'вход' : 'напрямую'}</Tag>)}</span></td>
                       <td className="mono small">{u.profiles}</td>
-                      <td><Tag>{u.wl_mode === 'exact' ? '/32' : u.wl_mode === 'prefix' ? '/24' : 'ASN'}</Tag></td>
+                      {wlOn && <td><Tag>{u.wl_mode === 'exact' ? '/32' : u.wl_mode === 'prefix' ? '/24' : 'ASN'}</Tag></td>}
                     </tr>
                   );
                 })}
-                {users && !list.length && <tr><td colSpan={6} className="empty">Пользователей нет</td></tr>}
+                {users && !list.length && <tr><td colSpan={wlOn ? 6 : 5} className="empty">Пользователей нет</td></tr>}
               </tbody>
             </table>
           </div>
         </section>
-        {servers && (sel === 'new' ? <UserCard key="new" user={null} servers={servers} onSaved={(u) => { void reload(); setSel(u.id); }} onDeleted={() => { setSel(null); void reload(); }} />
-          : user && <UserCard key={user.id} user={user} servers={servers} onSaved={() => void reload()} onDeleted={() => { setSel(null); void reload(); }} />)}
+        {servers && (sel === 'new' ? <UserCard key="new" user={null} servers={servers} wlOn={wlOn} onSaved={(u) => { void reload(); setSel(u.id); }} onDeleted={() => { setSel(null); void reload(); }} />
+          : user && <UserCard key={user.id} user={user} servers={servers} wlOn={wlOn} onSaved={() => void reload()} onDeleted={() => { setSel(null); void reload(); }} />)}
       </div>
       {groups && <LimitGroups onClose={() => setGroups(false)} />}
     </>
@@ -85,7 +87,7 @@ function SubServiceCard() {
   );
 }
 
-function UserCard({ user, servers, onSaved, onDeleted }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void }) {
+function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; wlOn: boolean }) {
   const [f, setF] = useState<Form>(user ? toForm(user) : emptyForm);
   const { data: groups } = usePoll(() => api.get<Array<{ name: string; traffic_gb: number | null; days: number | null; devices: number | null }>>('/api/v1/limit-groups'), null);
   const [mode, setMode] = useState<'sub' | 'links'>('sub');
@@ -140,8 +142,8 @@ function UserCard({ user, servers, onSaved, onDeleted }: { user: User | null; se
         <span className="k">Доступные узлы</span>
         <div className="flex">{nodes.map((n) => <label key={n.id} className="cb tag" style={{ minHeight: 36, padding: '0 12px' }}><input type="checkbox" checked={!f.nodeIds || f.nodeIds.includes(n.id)} onChange={() => toggleNode(n.id)} />{n.name}</label>)}</div>
       </div>
-      <div className="row stack" style={{ alignItems: 'stretch' }}>
-        <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Белый список IP</h3><span className="k">TTL по knock — в Настройках</span></div>
+      {wlOn && <div className="row stack" style={{ alignItems: 'stretch' }}>
+        <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Белый список IP <Info>Включён скрытностью группы (раздел «Порты и связность»): к серверам группы пускаются только адреса из списка. Адрес добавляется по персональной ссылке пользователя или вручную.</Info></h3></div>
         <Seg value={f.wlMode} label="Гранулярность" onChange={(v) => setF({ ...f, wlMode: v })} options={[['exact', 'Точный IP'], ['prefix', 'Префикс /24'], ['asn', 'Сеть оператора']]} />
         <span className="k">{f.wlMode === 'exact' ? 'Для домашних: меньше всего чужих адресов проходит фильтр.' : f.wlMode === 'prefix' ? 'Для мобильных, у которых IP меняется внутри пула оператора.' : 'Самый широкий режим (/16): пропускает и чужие адреса той же сети.'}</span>
         {user?.allowedIps.map((a) => (
@@ -152,7 +154,7 @@ function UserCard({ user, servers, onSaved, onDeleted }: { user: User | null; se
         ))}
         {user && <form className="flex" onSubmit={(e) => { e.preventDefault(); void run(async () => { onSaved(await api.post<User>(`/api/v1/users/${user.id}/allowed-ips`, { cidr: ip })); setIp(''); }); }}>
           <input className="inp mono" style={{ flex: 1 }} value={ip} onChange={(e) => setIp(e.target.value)} placeholder="добавить вручную: 198.51.100.7" aria-label="IP" /><button className="btn sm" disabled={!ip || busy}>Добавить</button></form>}
-      </div>
+      </div>}
       {user && (
         <div className="row stack" style={{ alignItems: 'stretch' }}>
           <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Подписка и ссылки</h3><Seg value={mode} onChange={setMode} label="Что выдавать" options={[['sub', 'Подписка'], ['links', 'Отдельные ссылки']]} /></div>
@@ -174,14 +176,14 @@ function UserCard({ user, servers, onSaved, onDeleted }: { user: User | null; se
                 </div>
               ))}
               {links && !links.length && <span className="k">Нет активных профилей: выкатите конфигурацию на доступные узлы.</span>}
-              {links && links.length > 0 && <div className="flex"><CopyButton text={links.map((l) => l.uri).join('\n')} label="Скопировать все" /><button className="btn sm" onClick={() => { if (confirm('Перевыпустить ссылки? Старые перестанут работать.')) void rotate('links'); }}>Перевыпустить ссылки</button></div>}
+              {links && links.length > 0 && <div className="flex"><CopyButton text={links.map((l) => l.uri).join('\n')} label="Скопировать все" /><button className="btn sm" onClick={async () => { if (await ask('Перевыпустить ссылки? Старые перестанут работать.')) void rotate('links'); }}>Перевыпустить ссылки</button></div>}
             </>
           )}
         </div>
       )}
       <div className="row">
         <div className="flex"><button className="btn pri" disabled={busy || !f.name || !f.modes.length} onClick={() => void save()}>Сохранить</button>
-          {user && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={() => { if (confirm(`Удалить ${user.name}?`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); onDeleted(); }); }}>Удалить</button>}</div>
+          {user && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Удалить ${user.name}?`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); onDeleted(); }); }}>Удалить</button>}</div>
         <ErrorBox error={error} />
       </div>
     </section>

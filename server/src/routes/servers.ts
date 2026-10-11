@@ -209,6 +209,9 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       ...(b.protectionTarget ? { protection_target: b.protectionTarget } : {}),
     });
     audit(db, who(req), 'server.update', r.id, b);
+    // конфиг узла меняется (прямой доступ) — применяем сразу в фоне, а не ждём ближайшего цикла синхронизации
+    if (b.directAccess !== undefined && r.sudo_mode === 'restricted')
+      void ctx.onNode(r, (n) => ops.applyServer(ctx.server(r.id), n, () => undefined)).catch(() => undefined);
     return publicView(ctx, ctx.server(r.id));
   });
 

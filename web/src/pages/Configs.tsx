@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, type Job, type Server, type Template } from '../api';
-import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, useAsync, usePoll } from '../ui';
+import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, useAsync, usePoll, ask } from '../ui';
 
 interface Draft {
   id: string | null; name: string; protocol: 'vless-reality' | 'hysteria2'; port: string; sni: string; fingerprint: string;
@@ -85,7 +85,7 @@ function CoresPanel() {
         <span className="flex" style={{ gap: 6 }}><span className="mono small">{c.version}</span>{old && <Tag kind="warn">устарел</Tag>}</span>
         <span className="flex" style={{ gap: 6 }}>
           {old && <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/update`, { version: data.pins[k] ?? 'latest' }); void reload(); })}>Обновить</button>}
-          {c.previous && <button className="btn ghost sm" disabled={busy} onClick={() => { if (confirm(`Вернуть ${k} ${c.previous} на ${s.name}?`)) void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/rollback`); void reload(); }); }}>Откат на {c.previous}</button>}
+          {c.previous && <button className="btn ghost sm" disabled={busy} onClick={async () => { if (await ask(`Вернуть ${k} ${c.previous} на ${s.name}?`)) void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/rollback`); void reload(); }); }}>Откат на {c.previous}</button>}
         </span>
       </span>
     );
@@ -124,7 +124,7 @@ function CoresPanel() {
           <label className="cb small"><input type="checkbox" checked={pre} onChange={(e) => setPre(e.target.checked)} />показывать предрелизы</label>
         </div>
         <div className="flex">
-          <button className="btn pri" disabled={busy} onClick={() => { if (confirm(`Установить или обновить ${core} (${version}) на всех узлах? По одному узлу, первая ошибка останавливает.`)) void run(async () => { const r = await api.post<{ jobId: number }>(`/api/v1/cores/${core}/rollout`, { version }); setJobId(r.jobId); }); }}>Установить или обновить на всех узлах</button>
+          <button className="btn pri" disabled={busy} onClick={async () => { if (await ask(`Установить или обновить ${core} (${version}) на всех узлах? По одному узлу, первая ошибка останавливает.`)) void run(async () => { const r = await api.post<{ jobId: number }>(`/api/v1/cores/${core}/rollout`, { version }); setJobId(r.jobId); }); }}>Установить или обновить на всех узлах</button>
           <button className="btn" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/cores/pin', { core, version }); void reload(); })}>Закрепить для новых узлов</button>
           <span className="k">Сейчас новые узлы получают: {core} {data.pins[core] ?? 'latest'}</span>
         </div>
@@ -163,7 +163,7 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
     <section className="card pad stack" style={{ gap: 18 }}>
       <div className="flex" style={{ justifyContent: 'space-between' }}>
         <div><h2>{d.id ? d.name : 'Новый шаблон'}</h2>{current && <span className="k">ревизия {current.revision}, выкачена {current.applied_revision || '—'}</span>}</div>
-        {d.id && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={() => { if (confirm('Снять шаблон со всех узлов и удалить?')) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); onDeleted(); }); }}>Удалить</button>}
+        {d.id && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask('Снять шаблон со всех узлов и удалить?')) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); onDeleted(); }); }}>Удалить</button>}
       </div>
       <div className="stack" style={{ gap: 8 }}>
         <span className="k">Протокол и ядро</span>

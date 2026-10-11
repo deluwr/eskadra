@@ -1,13 +1,13 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { api, ago, fmtTime, type Check, type Job, type Preflight, type ServerDetail } from '../api';
-import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, Switch, Tag, roleLabel, useAsync, usePoll } from '../ui';
+import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, Switch, Tag, roleLabel, useAsync, usePoll, ask } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
 
 export function ServerDetailPage({ id }: { id: string }) {
   const [fast, setFast] = useState(false);
   const { data: d, error, reload } = usePoll(() => api.get<ServerDetail>(`/api/v1/servers/${id}`), fast ? 2_000 : 15_000, [id]);
-  useEffect(() => setFast(!!d?.onboarding.running), [d?.onboarding.running]);
+  useEffect(() => setFast(!!d?.onboarding.running || !!d?.server.config_dirty), [d?.onboarding.running, d?.server.config_dirty]);
   const [tab, setTab] = useState<Tab>('protect');
   if (!d) return <><ErrorBox error={error} />{!error && <p className="muted">Загрузка…</p>}</>;
   const s = d.server;
@@ -57,8 +57,8 @@ export function ServerDetailPage({ id }: { id: string }) {
 function HeaderActions({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const { busy, error, run } = useAsync();
   const s = d.server;
-  const del = () => {
-    if (!confirm('Удалить сервер из панели? На самом сервере ничего не изменится: пользователь fleet и ключ останутся.')) return;
+  const del = async () => {
+    if (!await ask('Удалить сервер из панели? На самом сервере ничего не изменится: пользователь fleet и ключ останутся.')) return;
     void run(async () => { await api.del(`/api/v1/servers/${s.id}`); location.hash = '#/servers'; });
   };
   return (
@@ -198,7 +198,7 @@ function ManualSnippet({ d, open }: { d: ServerDetail; open: boolean }) {
 const LEVELS = [
   { code: 'P1', name: 'Обычная', desc: 'Сервер как есть, ничего не блокируется.' },
   { code: 'P2', name: 'Средняя', desc: 'Закрыты все порты, кроме нужных.' },
-  { code: 'P3', name: 'Высокая', desc: 'Ещё белые списки адресов и SSH только по ключам.' },
+  { code: 'P3', name: 'Высокая', desc: 'Ещё SSH только с адресов панели и админов и только по ключам.' },
 ] as const;
 
 interface Plan { text: string; lint: string[]; warnings: string[]; summary: { level: string; stealth: string; sshPorts: number[]; svcTcp: number[]; svcUdp: number[]; panel: string[]; admin: string[]; peers: string[]; users: number } }
@@ -363,18 +363,21 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
       {s.ssh_mode === 'shell' && <Terminal id={s.id} />}
       <MgmtRow d={d} onChange={onChange} />
       <div className="row">
-        <div className="row-text"><b>Прямой доступ пользователей</b><span className="k">Профиль «{s.name} · напрямую» попадает в подписки. Узел виден снаружи.</span></div>
-        <Switch label="Прямой доступ" on={!!s.direct_access} disabled={busy} onChange={(v) => void patch({ directAccess: v })} />
+        <div className="row-text"><b>Прямой доступ пользователей <Info>Пользователи подключаются к этому серверу напрямую, а не только через вход: профиль «{s.name} · напрямую» попадает в подписки.</Info></b></div>
+        <span className="flex">
+          {(busy || !!s.config_dirty) && <Tag kind="info" dot>применяется на сервере…</Tag>}
+          <Switch label="Прямой доступ" on={!!s.direct_access} onChange={(v) => void patch({ directAccess: v })} />
+        </span>
       </div>
       <div className="row">
         <div className="row-text"><b>SSH между нодами</b><span className="k">emergency: только проверка связи, allow нового IP панели и временное открытие SSH.</span></div>
         <Seg value={s.peer_ssh as 'off' | 'emergency'} label="SSH между нодами" options={[['off', 'выключен'], ['emergency', 'emergency']]} onChange={(v) => void patch({ peerSsh: v })} />
       </div>
       <div className="row">
-        <div className="row-text"><b>Роль и группа</b><span className="k">Группа задаёт уровень скрытности, связность и диапазон портов (раздел «Порты и связность»).</span></div>
+        <div className="row-text"><b>Роль и группа <Info>Вход принимает пользователей и может пересылать их на выходы; выход выпускает трафик в интернет. Группа задаёт политику: скрытность портов, связь между нодами, диапазон портов — настраивается в «Портах и связности».</Info></b></div>
         <div className="flex">
-          <select className="inp" style={{ width: 'auto' }} value={s.role} onChange={(e) => void patch({ role: e.target.value })} aria-label="Роль">{['entry', 'relay', 'exit', 'control'].map((r) => <option key={r}>{r}</option>)}</select>
-          <GroupInput value={s.group_name} onSave={(g) => void patch({ group: g })} />
+          <select className="inp" style={{ width: 'auto' }} value={s.role === 'exit' ? 'exit' : 'entry'} onChange={(e) => void patch({ role: e.target.value })} aria-label="Роль"><option value="entry">вход</option><option value="exit">выход</option></select>
+          <GroupSelect value={s.group_name} onSave={(g) => void patch({ group: g })} />
         </div>
       </div>
       <div style={{ padding: '0 20px 14px' }}><ErrorBox error={error} /></div>
@@ -427,9 +430,17 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   );
 }
 
-function GroupInput({ value, onSave }: { value: string; onSave: (v: string) => void }) {
-  const [v, setV] = useState(value);
-  return <form className="flex" onSubmit={(e) => { e.preventDefault(); if (v.trim()) onSave(v.trim()); }}><input className="inp" style={{ width: 140 }} value={v} onChange={(e) => setV(e.target.value)} aria-label="Группа" /><button className="btn sm" disabled={v === value}>Сохранить</button></form>;
+/** Группа сервера — из существующих; новые создаются в «Портах и связности». */
+function GroupSelect({ value, onSave }: { value: string; onSave: (v: string) => void }) {
+  const { data } = usePoll(() => api.get<Array<{ name: string }>>('/api/v1/groups'), null);
+  return (
+    <span className="flex" style={{ gap: 6 }}>
+      <select className="inp" style={{ width: 'auto' }} value={value} onChange={(e) => onSave(e.target.value)} aria-label="Группа">
+        {(data ?? [{ name: value }]).map((g) => <option key={g.name} value={g.name}>{g.name}</option>)}
+      </select>
+      <a className="k" href="#/ports">настроить группы</a>
+    </span>
+  );
 }
 
 function Terminal({ id }: { id: string }) {
@@ -469,7 +480,7 @@ function SosTab({ d }: { d: ServerDetail }) {
         <div className="card pad stack">
           <h3>Аварийно отключить блокировки</h3>
           <span className="k">Удаляет таблицу firewall и снимает from=. VPN-пользователи подключаются без whitelist. Возврат — заново по протоколу.</span>
-          <div><button className="btn danger" disabled={busy} onClick={() => { if (confirm('Снять все блокировки на узле?')) void run(async () => setMsg((await api.post<{ output: string }>(`/api/v1/servers/${s.id}/emergency-open`)).output)); }}>Отключить блокировки…</button></div>
+          <div><button className="btn danger" disabled={busy} onClick={async () => { if (await ask('Снять все блокировки на узле?')) void run(async () => setMsg((await api.post<{ output: string }>(`/api/v1/servers/${s.id}/emergency-open`)).output)); }}>Отключить блокировки…</button></div>
         </div>
         <div className="card pad stack">
           <h3>Команда для KVM хостера</h3>
@@ -480,7 +491,7 @@ function SosTab({ d }: { d: ServerDetail }) {
           <h3>Консольный пользователь fleetadmin</h3>
           <span className="k">Break-glass для консоли хостера. SSH-вход ему запрещён. Пароль покажется один раз — сохраните офлайн.</span>
           {fa ? <div className="alert warn">Логин <code>{fa.username}</code>, пароль <code>{fa.password}</code></div> :
-            <div><button className="btn" disabled={busy} onClick={() => { if (confirm('Создать (или сменить пароль) fleetadmin?')) void run(async () => setFa(await api.post(`/api/v1/servers/${s.id}/fleetadmin`))); }}>Создать / сменить пароль</button></div>}
+            <div><button className="btn" disabled={busy} onClick={async () => { if (await ask('Создать (или сменить пароль) fleetadmin?')) void run(async () => setFa(await api.post(`/api/v1/servers/${s.id}/fleetadmin`))); }}>Создать / сменить пароль</button></div>}
         </div>
       </div>
       {msg && <pre className="code">{msg}</pre>}
@@ -500,7 +511,7 @@ function HostTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
       {s.ufw_active ? (
         <div className="card pad flex" style={{ justifyContent: 'space-between', background: 'var(--warn-bg)', borderColor: 'transparent' }}>
           <div className="row-text"><b style={{ color: 'var(--warn)' }}>Firewall хоста включён (ufw/firewalld)</b><span className="small">Активный ufw или firewalld перебивает разрешения nftables. Для P2/P3 его выключают; правила сохранятся в baseline.</span></div>
-          <button className="btn" disabled={busy} onClick={() => { if (confirm('Выключить firewall хоста (ufw/firewalld) на узле? Его правила будут сохранены в baseline.')) void run(async () => { await api.post(`/api/v1/servers/${s.id}/ufw-disable`); onChange(); }); }}>Выключить firewall хоста…</button>
+          <button className="btn" disabled={busy} onClick={async () => { if (await ask('Выключить firewall хоста (ufw/firewalld) на узле? Его правила будут сохранены в baseline.')) void run(async () => { await api.post(`/api/v1/servers/${s.id}/ufw-disable`); onChange(); }); }}>Выключить firewall хоста…</button>
         </div>
       ) : null}
       <section className="card pad stack">
@@ -615,9 +626,9 @@ function CoresCard({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         <div className="row" style={{ padding: '12px 0 0' }}>
           <div className="row-text"><b>Конфликт ядер</b><span className="k">Дополнить — оставить как есть (Эскадра не запустит второе ядро того же типа). Удалить 3x-ui — его база сохранится в baseline узла, пользователи 3x-ui потеряют доступ.</span></div>
           <div className="flex">
-            {hasXui && <button className="btn danger" disabled={busy} onClick={() => { if (confirm('Удалить 3x-ui с узла? Его пользователи потеряют доступ; база сохранится в /var/lib/fleet/baseline.')) void run(async () => { setMsg((await api.post<{ output: string }>(`/api/v1/servers/${s.id}/xui-remove`)).output); onChange(); }); }}>Удалить 3x-ui</button>}
+            {hasXui && <button className="btn danger" disabled={busy} onClick={async () => { if (await ask('Удалить 3x-ui с узла? Его пользователи потеряют доступ; база сохранится в /var/lib/fleet/baseline.')) void run(async () => { setMsg((await api.post<{ output: string }>(`/api/v1/servers/${s.id}/xui-remove`)).output); onChange(); }); }}>Удалить 3x-ui</button>}
             {s.external_cores.filter((c) => ['xray', 'sing-box', 'v2ray', 'hysteria-server'].includes(c.name) && c.active === 'active').map((c) => (
-              <button key={c.name} className="btn" disabled={busy} onClick={() => { if (confirm(`Остановить и отключить ${c.name}.service? Файлы не удаляются.`)) void run(async () => { setMsg((await api.post<{ output: string }>(`/api/v1/servers/${s.id}/foreign-stop`, { name: c.name })).output); onChange(); }); }}>Остановить {c.name}</button>
+              <button key={c.name} className="btn" disabled={busy} onClick={async () => { if (await ask(`Остановить и отключить ${c.name}.service? Файлы не удаляются.`)) void run(async () => { setMsg((await api.post<{ output: string }>(`/api/v1/servers/${s.id}/foreign-stop`, { name: c.name })).output); onChange(); }); }}>Остановить {c.name}</button>
             ))}
           </div>
         </div>

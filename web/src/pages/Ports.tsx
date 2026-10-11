@@ -9,7 +9,7 @@ interface Conn {
   groups: Array<{ name: string; stealth: string; peer_scope: string; port_range: string }>;
 }
 
-const STEALTH: Record<string, string> = { S0: 'S0 · открыто всем', S1: 'S1 · + rate-limit', S2: 'S2 · + гео/ASN', S3: 'S3 · whitelist пользователей', S4: 'S4 · скрытые exit' };
+const STEALTH: Record<string, string> = { S0: 'открыто всем (по умолчанию)', S1: '+ ограничение частоты', S2: '+ фильтр по стране/оператору', S3: 'только белый список IP', S4: 'S4 · скрытые exit' };
 
 export function PortsPage() {
   const { data: d, reload } = usePoll(() => api.get<Conn>('/api/v1/connectivity'), 30_000);
@@ -41,7 +41,8 @@ export function PortsPage() {
         </section>
         <section className="card narrow">
           <div className="card-head"><h2>Политика групп <Info>Группа задаёт скрытность портов, связь между нодами и разрешённый диапазон портов. Новая нода попадает в наборы соседей сама.</Info></h2></div>
-          {d.groups.map((g) => <GroupRow key={g.name} g={g} servers={d.servers.filter((s) => s.group === g.name).map((s) => s.name)} onSaved={reload} />)}
+          {d.groups.map((g) => <GroupRow key={g.name} g={g} servers={d.servers.filter((s) => s.group === g.name)} onSaved={reload} />)}
+          <NewGroup onSaved={reload} />
         </section>
       </div>
       <section className="card">
@@ -70,13 +71,32 @@ export function PortsPage() {
   );
 }
 
-function GroupRow({ g, servers, onSaved }: { g: Conn['groups'][number]; servers: string[]; onSaved: () => void }) {
+/** Новая группа со своей политикой; серверы переносятся в неё в карточке сервера (вкладка «Доступ»). */
+function NewGroup({ onSaved }: { onSaved: () => void }) {
+  const [name, setName] = useState('');
+  const { busy, error, run } = useAsync();
+  return (
+    <form className="row stack" style={{ alignItems: 'stretch' }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.put('/api/v1/groups', { name: name.trim(), stealth: 'S0', peerScope: 'services', portRange: '443,1024-65535' }); setName(''); onSaved(); }); }}>
+      <b>Новая группа <Info>Например, «de» или «мобильные». После создания настройте политику выше и перенесите серверы в группу в их карточках (вкладка «Доступ»).</Info></b>
+      <div className="flex"><input className="inp" style={{ flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="имя группы" maxLength={32} aria-label="Имя новой группы" /><button className="btn sm" disabled={busy || !name.trim()}>Создать</button></div>
+      <ErrorBox error={error} />
+    </form>
+  );
+}
+
+function GroupRow({ g, servers, onSaved }: { g: Conn['groups'][number]; servers: Conn['servers']; onSaved: () => void }) {
   const [v, setV] = useState({ stealth: g.stealth, peerScope: g.peer_scope, portRange: g.port_range });
   const { busy, error, run } = useAsync();
   const dirty = v.stealth !== g.stealth || v.peerScope !== g.peer_scope || v.portRange !== g.port_range;
   return (
     <div className="row stack" style={{ alignItems: 'stretch' }}>
-      <div className="flex" style={{ justifyContent: 'space-between' }}><b>{g.name}</b><span className="k">{servers.join(', ') || 'нет узлов'}</span></div>
+      <div className="flex" style={{ justifyContent: 'space-between' }}>
+        <b>{g.name}</b>
+        <span className="flex" style={{ gap: 6 }}>
+          {servers.length ? servers.map((x) => <a key={x.id} className="tag" href={`#/server/${x.id}`}>{x.name}</a>) : <span className="k">нет серверов</span>}
+          {!servers.length && g.name !== 'default' && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void run(async () => { await api.del(`/api/v1/groups/${encodeURIComponent(g.name)}`); onSaved(); })}>Удалить</button>}
+        </span>
+      </div>
       <div className="grid g2">
         <label className="fld">Скрытность<select className="inp" value={v.stealth} onChange={(e) => setV({ ...v, stealth: e.target.value })}>{Object.entries(STEALTH).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></label>
         <label className="fld">Связность нод<select className="inp" value={v.peerScope} onChange={(e) => setV({ ...v, peerScope: e.target.value })}><option value="services">сервисные порты</option><option value="chain">только цепочка</option><option value="all">все порты</option><option value="none">нет</option></select></label>
