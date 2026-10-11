@@ -197,7 +197,7 @@ test('первичный доступ через конфигурацию фло
   db.prepare(`UPDATE servers SET mgmt_mode = 'direct' WHERE id = 'n1'`).run();
   db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids) VALUES ('t1', 'rv', 'xray', 'vless-reality', 8443, '["sni.example"]', '["n1"]')`).run();
   db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, private_key_sealed, public_key, short_id) VALUES ('ib1', 't1', 'n1', 'direct', 8443, 'tcp', 'active', ?, 'PUB', 'aa11')`).run(ctx.seal('PRIV'));
-  const { viaOutbound } = await import('./onboard.js');
+  const { viaOutbound } = await import('./via.js');
   const o = viaOutbound(ctx, { kind: 'fleet', serverId: 'n1', templateId: 't1' }).outbound as any;
   const x = new Vpn(ctx).renderXray(ctx.server('n1')) as any;
   const svc = x.inbounds.find((i: any) => i.tag === 'in-ib1').settings.clients.find((c: any) => c.email === 'svc.mgmt');
@@ -220,4 +220,28 @@ test('пользователь получает профили только вы
   const emails = (vpn.renderXray(ctx.server('n1')) as any).inbounds.find((i: any) => i.tag === 'in-ib1').settings.clients.map((c: any) => c.email);
   assert.ok(emails.includes('u1.d-t1'));
   assert.ok(!emails.some((e: string) => e.startsWith('u2.')), 'и на сервере его клиента нет');
+});
+
+test('туннель через прокси: соединение к узлу идёт через dialerProxy, прокси — отдельный outbound', () => {
+  const t = newTunnel([]);
+  const cfg = clientConfig([{ id: 'lv', host: '203.0.113.9', sshPort: 22, creds: t, via: { protocol: 'vless', settings: {} } }]) as any;
+  const out = cfg.outbounds.find((o: any) => o.tag === 'out-lv');
+  assert.equal(out.streamSettings.sockopt.dialerProxy, 'via-lv');
+  assert.equal(cfg.outbounds.find((o: any) => o.tag === 'via-lv').protocol, 'vless');
+  const direct = clientConfig([{ id: 'de', host: '203.0.113.2', sshPort: 22, creds: t }]) as any;
+  assert.equal(direct.outbounds.find((o: any) => o.tag === 'out-de').streamSettings.sockopt, undefined);
+});
+
+test('отпечаток конфигов узла стабилен и меняется вместе с конфигом', async () => {
+  const { ctx, db } = fixture();
+  const { renderHash } = await import('./ops.js');
+  db.prepare(`UPDATE servers SET mgmt_mode = 'direct' WHERE id = 'n1'`).run();
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids) VALUES ('t1', 'rv', 'xray', 'vless-reality', 8443, '["sni.example"]', '["n1"]')`).run();
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, private_key_sealed, public_key, short_id) VALUES ('ib1', 't1', 'n1', 'direct', 8443, 'tcp', 'active', ?, 'PUB', 'aa11')`).run(ctx.seal('PRIV'));
+  const vpn = new Vpn(ctx);
+  const a = renderHash(vpn, ctx.server('n1'));
+  assert.equal(renderHash(vpn, ctx.server('n1')), a, 'тот же конфиг — тот же отпечаток');
+  db.prepare(`UPDATE templates SET port = 9443 WHERE id = 't1'`).run();
+  db.prepare(`UPDATE inbounds SET port = 9443 WHERE id = 'ib1'`).run();
+  assert.notEqual(renderHash(vpn, ctx.server('n1')), a);
 });

@@ -270,6 +270,9 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE users ADD COLUMN template_ids TEXT;
   `,
+  `
+  ALTER TABLE servers ADD COLUMN mgmt_via TEXT;
+  `,
 ];
 
 export type Db = DatabaseSync;

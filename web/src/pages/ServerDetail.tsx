@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { HostStatsPanel } from '../HostStats';
-import { ViaPicker, viaBody, viaReady, type Via } from '../ViaPicker';
+import { ViaPicker, viaBody, viaOnly, viaReady, type Via } from '../ViaPicker';
 import { api, ago, fmtTime, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
 import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, StageHelp, Switch, Tag, RoleTag, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
 
@@ -146,11 +146,18 @@ function Onboarding({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
 
       {!running && (failed || !job) && (
         <div className="stack">
+          {/* первичный доступ прошёл, а туннель с главного сервера до узла не доходит — сервер недоступен из РФ целиком */}
+          {failed && reached === 2 && s.mgmt_mode === 'tunnel' && !askAuth && (
+            <div className="alert warn stack">
+              <span>Туннель управления не дошёл до сервера. Если сервер недоступен из РФ целиком (а не только по SSH), пустите туннель через прокси за границей — например, через конфигурацию на другом выходе — и повторите.</span>
+              <TunnelVia s={s} onSaved={() => void api.post(`/api/v1/servers/${s.id}/onboard`, {}).then(onChange)} saveLabel="Сохранить и повторить" />
+            </div>
+          )}
           {askAuth || (failed && reached <= 1)
             ? <AuthForm id={s.id} mgmtMode={s.mgmt_mode} onStarted={() => { setAskAuth(false); onChange(); }} />
             : <div className="flex">
                 <ConnectButton id={s.id} label={job ? 'Повторить' : 'Подключить'} onStarted={onChange} />
-                <button className="link" onClick={() => setAskAuth(true)}>Ввести логин и пароль</button>
+                <button className="link" onClick={() => setAskAuth(true)}>{failed ? 'Начать заново с первичного доступа' : 'Ввести логин и пароль'}</button>
               </div>}
           <ManualSnippet d={d} open={!job} />
         </div>
@@ -173,12 +180,14 @@ function ConnectButton({ id, label, onStarted }: { id: string; label: string; on
 function AuthForm({ id, mgmtMode, onStarted }: { id: string; mgmtMode: string; onStarted: () => void }) {
   const [f, setF] = useState({ user: 'root', method: 'password', password: '', privateKey: '' });
   const [via, setVia] = useState<Via>({ kind: 'direct' });
+  const [channel, setChannel] = useState<'direct' | 'tunnel'>(mgmtMode === 'tunnel' ? 'tunnel' : 'direct');
   const { busy, error, run } = useAsync();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   return (
     <form className="stack" autoComplete="off" onSubmit={(e) => {
       e.preventDefault();
       void run(async () => {
+        if (mgmtMode !== 'local' && channel !== mgmtMode) await api.patch(`/api/v1/servers/${id}`, { mgmtMode: channel });
         const auth = { ...(f.method === 'password' ? { user: f.user, password: f.password } : { user: f.user, privateKey: f.privateKey }), ...viaBody(via) };
         await api.post(`/api/v1/servers/${id}/onboard`, { auth });
         onStarted();
@@ -190,7 +199,13 @@ function AuthForm({ id, mgmtMode, onStarted }: { id: string; mgmtMode: string; o
         {f.method === 'password' && <label className="fld" style={{ gridColumn: 'span 2' }}><span>Пароль <Info>Используется один раз и не сохраняется.</Info></span><input className="inp" type="password" value={f.password} onChange={set('password')} autoComplete="new-password" /></label>}
       </div>
       {f.method === 'key' && <label className="fld">Приватный ключ<textarea className="inp mono" rows={4} value={f.privateKey} onChange={set('privateKey')} spellCheck={false} /></label>}
-      <ViaPicker value={via} onChange={setVia} exclude={id} mgmtMode={mgmtMode} />
+      {mgmtMode !== 'local' && (
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="k">Канал управления <Info>Как панель будет ходить на сервер после настройки. Туннель — если главный сервер в РФ: SSH идёт внутри VLESS-REALITY.</Info></span>
+          <Seg value={channel} label="Канал управления" onChange={setChannel} options={[['direct', 'напрямую по SSH'], ['tunnel', 'через туннель']]} />
+        </div>
+      )}
+      <ViaPicker value={via} onChange={(v) => { setVia(v); if (v.kind !== 'direct' && mgmtMode !== 'local') setChannel('tunnel'); }} exclude={id} mgmtMode={channel} />
       <div><button className="btn pri" disabled={busy || !(f.method === 'password' ? f.password : f.privateKey.trim()) || !viaReady(via)}>Подключить</button></div>
       <ErrorBox error={error} />
     </form>
@@ -428,6 +443,22 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
 }
 
 /** Канал управления (§5.8): напрямую или через служебный туннель. Смена требует повторного сниппета на узле. */
+/** Прокси туннеля управления: цепочка панель → прокси → туннель сервера (сервер недоступен из РФ целиком). */
+function TunnelVia({ s, onSaved, saveLabel = 'Сохранить' }: { s: Server; onSaved: () => void; saveLabel?: string }) {
+  const [v, setV] = useState<Via>({ kind: 'direct' });
+  const { busy, error, run } = useAsync();
+  return (
+    <div className="stack" style={{ gap: 10 }}>
+      <ViaPicker value={v} onChange={setV} exclude={s.id} mgmtMode="tunnel" mode="tunnel" />
+      <div className="flex">
+        <button className="btn pri sm" disabled={busy || !viaReady(v)} onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { mgmtVia: viaOnly(v) }); toast(v.kind === 'direct' ? 'Туннель идёт напрямую' : 'Туннель пойдёт через прокси'); onSaved(); })}>{saveLabel}</button>
+        {s.mgmt.via && <span className="k">{`сейчас: через ${s.mgmt.via}`}</span>}
+      </div>
+      <ErrorBox error={error} />
+    </div>
+  );
+}
+
 function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
@@ -445,7 +476,7 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
           <b>Канал управления</b>
           <span className="k">
             {s.mgmt_mode === 'tunnel'
-              ? <>SSH панели идёт внутри VLESS-REALITY: порт узла <code>{s.mgmt.port}/tcp</code>, маскировка под <code>{s.mgmt.sni}</code>. {st ? (st.running ? `Клиент туннелей работает (Xray ${st.version ?? '?'}).` : st.error ? `Клиент туннелей: ${st.error}` : 'Клиент туннелей запустится при первом подключении.') : ''}</>
+              ? <>SSH панели идёт внутри VLESS-REALITY: порт узла <code>{s.mgmt.port}/tcp</code>, маскировка под <code>{s.mgmt.sni}</code>{s.mgmt.via ? <>, цепочкой через <b>{s.mgmt.via}</b></> : ''}. {st ? (st.running ? `Клиент туннелей работает (Xray ${st.version ?? '?'}).` : st.error ? `Клиент туннелей: ${st.error}` : 'Клиент туннелей запустится при первом подключении.') : ''}</>
               : 'SSH напрямую с адреса главного сервера. Если главный сервер в РФ и SSH режется — переключите на туннель.'}
           </span>
         </div>
@@ -460,6 +491,7 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
           </div>
         </div>
       )}
+      {mode === 'tunnel' && !ask && <details className="more"><summary>{s.mgmt.via ? 'Изменить прокси туннеля' : 'Сервер недоступен из РФ целиком? Пустить туннель через прокси'}</summary><div style={{ marginTop: 10 }}><TunnelVia s={s} onSaved={onChange} /></div></details>}
       {switched && (
         <div className="stack">
           <b className="small">Перенастроить доступ</b>
@@ -707,7 +739,7 @@ function CoreRows({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
 
 function CoresCard({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
-  const [f, setF] = useState({ user: s.xui_user ?? '', pass: '' });
+  const [f, setF] = useState({ by: s.xui_user === '@token' ? 'token' : 'password', user: s.xui_user === '@token' ? '' : s.xui_user ?? '', pass: '', token: '' });
   const [msg, setMsg] = useState<string | null>(null);
   const { busy, error, run } = useAsync();
   const hasXui = s.external_cores.some((c) => c.name === '3x-ui');
@@ -739,13 +771,16 @@ function CoresCard({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         </div>
       )}
       {(s.coreModeEffective === 'xui' || hasXui) && (
-        <form className="stack" onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = await api.put<{ info: { port: number; version: string | null } }>(`/api/v1/servers/${s.id}/xui`, f); setMsg(`Вход в 3x-ui ${r.info.version ?? ''} проверен (панель 3x-ui на порту ${r.info.port}).`); setF({ ...f, pass: '' }); onChange(); }); }}>
+        <form className="stack" onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = await api.put<{ info: { port: number; version: string | null } }>(`/api/v1/servers/${s.id}/xui`, f.by === 'token' ? { token: f.token } : { user: f.user, pass: f.pass }); setMsg(`Вход в 3x-ui ${r.info.version ?? ''} проверен (панель 3x-ui на порту ${r.info.port}).`); setF({ ...f, pass: '', token: '' }); onChange(); }); }}>
           <h3>Доступ к 3x-ui {s.xuiConfigured && <Tag kind="ok">задан</Tag>}</h3>
-          <span className="k">Логин и пароль 3x-ui нужны, чтобы управлять своими inbounds через его API. Запрос идёт с самого узла на 127.0.0.1; пароль хранится зашифрованным. Чужие inbounds 3x-ui не трогаются.</span>
+          <span className="k">Логин и пароль или API-токен 3x-ui нужны, чтобы управлять своими inbounds через его API. Запрос идёт с самого узла на 127.0.0.1; секрет хранится зашифрованным. Чужие inbounds 3x-ui не трогаются.</span>
+          <Seg value={f.by} label="Вход в 3x-ui" onChange={(v) => setF({ ...f, by: v })} options={[['password', 'логин и пароль'], ['token', 'API-токен']]} />
           <div className="flex">
-            <input className="inp" style={{ width: 200 }} value={f.user} onChange={(e) => setF({ ...f, user: e.target.value })} placeholder="логин 3x-ui" aria-label="Логин 3x-ui" autoComplete="off" />
-            <input className="inp" type="password" style={{ width: 200 }} value={f.pass} onChange={(e) => setF({ ...f, pass: e.target.value })} placeholder="пароль 3x-ui" aria-label="Пароль 3x-ui" autoComplete="new-password" />
-            <button className="btn" disabled={busy || !f.user || !f.pass}>Проверить и сохранить</button>
+            {f.by === 'password' ? <>
+              <input className="inp" style={{ width: 200 }} value={f.user} onChange={(e) => setF({ ...f, user: e.target.value })} placeholder="логин 3x-ui" aria-label="Логин 3x-ui" autoComplete="off" />
+              <input className="inp" type="password" style={{ width: 200 }} value={f.pass} onChange={(e) => setF({ ...f, pass: e.target.value })} placeholder="пароль 3x-ui" aria-label="Пароль 3x-ui" autoComplete="new-password" />
+            </> : <input className="inp mono" type="password" style={{ width: 420, maxWidth: '100%' }} value={f.token} onChange={(e) => setF({ ...f, token: e.target.value.trim() })} placeholder="API-токен из настроек 3x-ui" aria-label="API-токен 3x-ui" autoComplete="off" />}
+            <button className="btn" disabled={busy || (f.by === 'token' ? f.token.length < 8 : !f.user || !f.pass)}>Проверить и сохранить</button>
           </div>
         </form>
       )}

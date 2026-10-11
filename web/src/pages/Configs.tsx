@@ -497,7 +497,9 @@ function ExitHealth({ t }: { t: Template }) {
           </tbody>
         </table>
       </div>
-      {!data?.selected && !!data?.rows.length && <div className="k" style={{ padding: '10px 20px' }}>Выход не закреплён: {order ? 'ни один выход не отвечает.' : 'Xray выбирает по наименьшей задержке.'}</div>}
+      {order
+        ? !!data?.rows.length && !data.rows.some((r) => r.ok) && <div className="k" style={{ padding: '10px 20px' }}>Ни один выход не отвечает — вход держит трафик на первом по порядку.</div>
+        : !data?.selected && !!data?.rows.length && <div className="k" style={{ padding: '10px 20px' }}>Выход не закреплён: Xray выбирает по наименьшей задержке.</div>}
       <div style={{ padding: '0 20px' }}><ErrorBox error={error} /></div>
     </section>
   );

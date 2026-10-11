@@ -16,6 +16,7 @@ import { getSetting, setSetting } from './db.js';
 import type { Ctx, ServerRow } from './ctx.js';
 import { releaseFor } from './releases.js';
 import { botProxyClientPart } from './botproxy.js';
+import { mgmtVia, viaOutbound } from './via.js';
 
 /** Сайты для маскировки REALITY: TLS 1.3 + HTTP/2. Проверены с Xray 26.3: с www.microsoft.com рукопожатие REALITY не проходит. */
 export const MGMT_SNIS = ['www.apple.com', 'dl.google.com', 'www.cloudflare.com', 'www.samsung.com'];
@@ -61,7 +62,8 @@ export function nodeConfig(t: TunnelCreds, sshPort: number): object {
   };
 }
 
-export interface TunnelNode { id: string; host: string; sshPort: number; creds: TunnelCreds }
+/** via — outbound прокси, через который идёт туннель к узлу (узел недоступен с главного сервера напрямую). */
+export interface TunnelNode { id: string; host: string; sshPort: number; creds: TunnelCreds; via?: Record<string, unknown> | null }
 
 export interface ClientExtra { inbound: object; outbound: object; rule: object }
 
@@ -76,14 +78,19 @@ export function clientConfig(nodes: TunnelNode[], extra?: ClientExtra | ClientEx
     }))],
     outbounds: [
       ...extras.map((e) => e.outbound),
-      ...nodes.map((n) => ({
-        tag: `out-${n.id}`, protocol: 'vless',
-        settings: { vnext: [{ address: n.host, port: n.creds.port, users: [{ id: n.creds.uuid, encryption: 'none', flow: 'xtls-rprx-vision' }] }] },
-        streamSettings: {
-          network: 'tcp', security: 'reality',
-          realitySettings: { serverName: n.creds.sni, fingerprint: 'chrome', publicKey: n.creds.publicKey, shortId: n.creds.shortId },
+      ...nodes.flatMap((n) => [
+        {
+          tag: `out-${n.id}`, protocol: 'vless',
+          settings: { vnext: [{ address: n.host, port: n.creds.port, users: [{ id: n.creds.uuid, encryption: 'none', flow: 'xtls-rprx-vision' }] }] },
+          streamSettings: {
+            network: 'tcp', security: 'reality',
+            realitySettings: { serverName: n.creds.sni, fingerprint: 'chrome', publicKey: n.creds.publicKey, shortId: n.creds.shortId },
+            // цепочка: соединение туннеля к узлу идёт через прокси (узел недоступен с главного сервера напрямую)
+            ...(n.via ? { sockopt: { dialerProxy: `via-${n.id}` } } : {}),
+          },
         },
-      })),
+        ...(n.via ? [{ ...n.via, tag: `via-${n.id}` }] : []),
+      ]),
       { tag: 'block', protocol: 'blackhole' },
     ],
     routing: { rules: [...extras.map((e) => e.rule), ...nodes.map((n) => ({ type: 'field', inboundTag: [`in-${n.id}`], outboundTag: `out-${n.id}` }))] },
@@ -187,8 +194,13 @@ export class Mgmt {
   private nodes(): TunnelNode[] {
     return this.ctx.servers()
       .filter((r) => r.mgmt_mode === 'tunnel')
-      .map((r) => ({ id: r.id, host: r.host, sshPort: r.ssh_port, creds: credsOf(this.ctx, r) }))
-      .filter((n): n is TunnelNode => !!n.creds);
+      .map((r) => {
+        const v = mgmtVia(this.ctx, r);
+        let via: Record<string, unknown> | null = null;
+        if (v) try { via = viaOutbound(this.ctx, v).outbound; } catch (e) { this.log.warn(`${r.name}: прокси управления недоступен — ${(e as Error).message}`); }
+        return { id: r.id, host: r.host, sshPort: r.ssh_port, creds: credsOf(this.ctx, r)!, via };
+      })
+      .filter((n) => !!n.creds);
   }
 
   /** Поднять (или перезапустить с новым конфигом) клиента туннелей. Вызывается перед каждым SSH к туннельному узлу. */

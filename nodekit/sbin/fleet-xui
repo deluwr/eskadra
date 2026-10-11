@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """/usr/local/sbin/fleet-xui — работа Эскадры через уже установленный 3x-ui (без второго Xray).
 
-stdin: JSON {"user": "...", "pass": "...", "code": "", "action": "...", ...}
+stdin: JSON {"user": "...", "pass": "...", "code": "", "token": "", "action": "...", ...}
+  token — API-токен 3x-ui вместо логина и пароля (заголовок Authorization: Bearer)
   info                         порт/путь/версия 3x-ui (логин не нужен)
   x25519                       ключи REALITY бинарником Xray из 3x-ui
   list                         inbounds Эскадры (remark начинается с eskadra-) и статистика клиентов
@@ -10,7 +11,7 @@ stdin: JSON {"user": "...", "pass": "...", "code": "", "action": "...", ...}
   listening {"port": N}        слушается ли порт
 Чужие inbounds (без префикса eskadra-) не читаются для изменения и не трогаются.
 """
-import glob, http.cookiejar, json, os, re, sqlite3, ssl, subprocess, sys, urllib.parse, urllib.request
+import glob, http.cookiejar, json, os, re, sqlite3, ssl, subprocess, sys, urllib.error, urllib.parse, urllib.request
 
 DB = "/etc/x-ui/x-ui.db"
 PREFIX = "eskadra-"
@@ -31,7 +32,8 @@ def settings():
     tls = bool(rows.get("webCertFile"))
     listen = rows.get("webListen") or "127.0.0.1"
     host = "127.0.0.1" if listen in ("", "0.0.0.0", "::") else listen
-    return {"port": port, "base": base, "tls": tls, "host": host}
+    # webDomain: 3x-ui отвечает 403 на запросы не к своему домену — шлём его в Host
+    return {"port": port, "base": base, "tls": tls, "host": host, "domain": (rows.get("webDomain") or "").strip()}
 
 
 def version():
@@ -45,14 +47,21 @@ def version():
 
 
 class Panel:
-    def __init__(self, s, user, pw, code=""):
+    def __init__(self, s, user, pw, code="", token=""):
         scheme = "https" if s["tls"] else "http"
         self.root = f"{scheme}://{s['host']}:{s['port']}{s['base']}"
+        self.extra = {}
+        if s.get("domain"):
+            self.extra["Host"] = s["domain"] if s["port"] in (80, 443) else f"{s['domain']}:{s['port']}"
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE   # локальный 127.0.0.1, сертификат выписан на домен 3x-ui
         self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
                                               urllib.request.HTTPSHandler(context=ctx))
+        if token:
+            self.extra["Authorization"] = f"Bearer {token}"
+            self.call("panel/api/inbounds/list")   # проверка токена
+            return
         data = {"username": user, "password": pw}
         if code:
             data["twoFactorCode"] = code
@@ -62,7 +71,7 @@ class Panel:
 
     def call(self, path, form=None, body=None, method=None):
         url = self.root + path
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", **self.extra}
         data = None
         if form is not None:
             data = urllib.parse.urlencode(form).encode()
@@ -71,8 +80,18 @@ class Panel:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method or ("POST" if data is not None else "GET"))
-        with self.op.open(req, timeout=20) as resp:
-            return json.loads(resp.read().decode() or "{}")
+        try:
+            with self.op.open(req, timeout=20) as resp:
+                text = resp.read().decode()
+        except urllib.error.HTTPError as e:
+            hint = {401: "токен или сессия не приняты", 403: "доступ запрещён — проверьте логин и пароль, API-токен или домен панели (webDomain)", 404: f"нет такого адреса — проверьте путь панели ({self.root})"}.get(e.code, e.reason)
+            raise SystemExit(f"3x-ui ответил {e.code} на {path}: {hint}")
+        except urllib.error.URLError as e:
+            raise SystemExit(f"3x-ui недоступен по {self.root}: {e.reason}")
+        try:
+            return json.loads(text or "{}")
+        except ValueError:
+            raise SystemExit(f"3x-ui вернул не JSON на {path} — возможно, неверный путь панели")
 
     def ours(self):
         r = self.call("panel/api/inbounds/list")
@@ -111,7 +130,7 @@ def main():
         print("yes" if re.search(rf":{port}\s", out) else "no")
         return
 
-    p = Panel(s, req.get("user", ""), req.get("pass", ""), req.get("code", ""))
+    p = Panel(s, req.get("user", ""), req.get("pass", ""), req.get("code", ""), req.get("token", ""))
     if action == "list":
         res = []
         for i in p.ours():

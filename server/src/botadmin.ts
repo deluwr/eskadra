@@ -447,6 +447,8 @@ export class AdminFlows {
       auth: {
         user: d.user, ...(d.key ? { privateKey: d.key } : { password: d.password }),
         ...(d.viaLink ? { via: { kind: 'link', link: d.viaLink } } : d.viaServer ? { via: { kind: 'fleet', serverId: d.viaServer, templateId: d.viaTpl } } : {}),
+        // через прокси и с туннелем — туннель управления дальше тоже идёт через этот прокси (сервер недоступен из РФ)
+        ...((d.viaLink || d.viaServer) && d.mgmt === 'tunnel' ? { keepVia: true } : {}),
       },
     });
     if (!parsed.success) { await this.io.show(chatId, { text: `Данные не подошли: ${esc(parsed.error.issues.map((i) => i.message).join('; '))}` }, mid); return; }

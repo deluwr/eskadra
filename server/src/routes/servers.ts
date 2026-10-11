@@ -13,22 +13,23 @@ import { credsFields, credsOf, newTunnel } from '../mgmt.js';
 import { checkLogin, installNodekit, onboardingRunning, runPreflight, snippetOf, startOnboarding } from '../onboard.js';
 import { fetchHostKey, withNodeLock, withSession } from '../ssh/executor.js';
 import { kitVersion } from '../nodekit.js';
-import { Ops, startJob } from '../ops.js';
+import { Ops, startJob, XUI_TOKEN } from '../ops.js';
 import { json } from '../vpn.js';
 import { CHECKLIST, renderPlan } from '../firewall.js';
 import { certProblems } from '../certs.js';
 import { localRaw, parseHostStat } from '../hoststats.js';
 import { botProxyOptions } from '../botproxy.js';
+import { mgmtVia, viaLabel, viaOutbound } from '../via.js';
 
 const sshUtils = ssh2.utils;
 /** entry — вход (к нему подключаются пользователи, он же пересылает на выходы); exit — выход в интернет. relay/control — старые значения. */
 const ROLES = ['entry', 'exit', 'relay', 'control'] as const;
 
 export function publicView(ctx: Ctx, r: ServerRow) {
-  const { key_priv_sealed: _secret, fw_plan: _plan, xui_pass_sealed: _xp, mgmt_key_sealed: _mk, mgmt_uuid: _mu, ...rest } = r;
+  const { key_priv_sealed: _secret, fw_plan: _plan, xui_pass_sealed: _xp, mgmt_key_sealed: _mk, mgmt_uuid: _mu, mgmt_via: _mv, ...rest } = r;
   return {
     ...rest,
-    mgmt: { mode: r.mgmt_mode, port: r.mgmt_port, sni: r.mgmt_sni, localPort: r.mgmt_local_port, client: r.mgmt_mode === 'tunnel' ? ctx.mgmt?.status() ?? null : null },
+    mgmt: { via: viaLabel(ctx, mgmtVia(ctx, r)), mode: r.mgmt_mode, port: r.mgmt_port, sni: r.mgmt_sni, localPort: r.mgmt_local_port, client: r.mgmt_mode === 'tunnel' ? ctx.mgmt?.status() ?? null : null },
     external_cores: json(r.external_cores, []),
     coreModeEffective: coreMode(r),
     xuiConfigured: !!r.xui_user && !!r.xui_pass_sealed,
@@ -72,6 +73,8 @@ export const createBody = z.object({
       z.object({ kind: z.literal('fleet'), serverId: z.string().max(64), templateId: z.string().max(64) }),
       z.object({ kind: z.literal('link'), link: z.string().trim().min(10).max(8192) }),
     ]).optional(),
+    /** и дальше вести туннель управления через этот прокси (сервер недоступен из РФ целиком) */
+    keepVia: z.boolean().optional(),
   }).refine((a) => !!a.password || !!a.privateKey, 'нужен пароль или ключ').optional(),
 });
 
@@ -85,6 +88,11 @@ const patchBody = z.object({
   peerSsh: z.enum(['off', 'emergency']).optional(),
   protectionTarget: z.enum(['P1', 'P2', 'P3']).optional(),
   mgmtMode: z.enum(['direct', 'tunnel']).optional(),
+  /** прокси для туннеля управления; null — напрямую */
+  mgmtVia: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('fleet'), serverId: z.string().max(64), templateId: z.string().max(64) }),
+    z.object({ kind: z.literal('link'), link: z.string().trim().min(10).max(8192) }),
+  ]).nullable().optional(),
 });
 
 const RANK: Record<Role, number> = { operator: 1, admin: 2, owner: 3 };
@@ -216,6 +224,10 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       // ключи туннеля сохраняются при переключениях: повторный сниппет не меняет конфиг узла
       ctx.updateServer(r.id, { mgmt_mode: b.mgmtMode, ...(b.mgmtMode === 'tunnel' && !credsOf(ctx, r) ? tunnelFields() : {}) });
     }
+    if (b.mgmtVia !== undefined) {
+      if (b.mgmtVia) viaOutbound(ctx, b.mgmtVia);   // проверка: конфигурация выкачена, ссылка разбирается
+      ctx.updateServer(r.id, { mgmt_via: b.mgmtVia ? ctx.seal(JSON.stringify(b.mgmtVia)) : null });
+    }
     ctx.updateServer(r.id, {
       ...(b.name ? { name: b.name } : {}),
       ...(b.role ? { role: b.role } : {}),
@@ -224,7 +236,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       ...(b.peerSsh ? { peer_ssh: b.peerSsh } : {}),
       ...(b.protectionTarget ? { protection_target: b.protectionTarget } : {}),
     });
-    audit(db, who(req), 'server.update', r.id, b);
+    audit(db, who(req), 'server.update', r.id, { ...b, ...(b.mgmtVia?.kind === 'link' ? { mgmtVia: { kind: 'link' } } : {}) });
     // конфиг узла меняется (прямой доступ) — применяем сразу в фоне, а не ждём ближайшего цикла синхронизации
     if (b.directAccess !== undefined && r.sudo_mode === 'restricted')
       void ctx.onNode(r, (n) => ops.applyServer(ctx.server(r.id), n, () => undefined)).catch(() => undefined);
@@ -375,17 +387,22 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   app.put<{ Params: { id: string } }>('/api/v1/servers/:id/xui', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
-    const b = z.object({ user: z.string().min(1).max(128), pass: z.string().min(1).max(256) }).parse(req.body);
-    const probe = { ...r, xui_user: b.user, xui_pass_sealed: ctx.seal(b.pass) };
+    const b = z.union([
+      z.object({ token: z.string().trim().min(8).max(1024) }),
+      z.object({ user: z.string().min(1).max(128), pass: z.string().min(1).max(256) }),
+    ]).parse(req.body);
+    const byToken = 'token' in b;
+    const probe = { ...r, xui_user: byToken ? XUI_TOKEN : b.user, xui_pass_sealed: ctx.seal(byToken ? b.token : b.pass) };
     const info = await ctx.onNode(r, async (n) => {
+      await ops.ensureKit(r, n, () => undefined);   // новый fleet-xui: домен панели, API-токен, понятные ошибки
       const i = await ops.xui<{ port: number; base: string; version: string | null }>(probe, n, 'info');
       await ops.xui(probe, n, 'list'); // проверка входа
       return i;
     });
     const cores = json<Record<string, unknown>>(r.cores, {});
     cores.xui = { version: (info as { xrayVersion?: string }).xrayVersion ?? '?', panel: info.version };
-    ctx.updateServer(r.id, { xui_user: b.user, xui_pass_sealed: probe.xui_pass_sealed, cores: JSON.stringify(cores) });
-    audit(db, who(req), 'server.xui_credentials', r.id, { user: b.user, version: info.version });
+    ctx.updateServer(r.id, { xui_user: probe.xui_user, xui_pass_sealed: probe.xui_pass_sealed, cores: JSON.stringify(cores) });
+    audit(db, who(req), 'server.xui_credentials', r.id, { by: byToken ? 'token' : 'password', ...(byToken ? {} : { user: b.user }), version: info.version });
     return { ok: true, info };
   });
 

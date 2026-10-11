@@ -19,6 +19,8 @@ export interface ServerRow {
   core_mode: 'auto' | 'own' | 'xui'; xui_user: string | null; xui_pass_sealed: string | null; external_cores: string;
   /** Канал управления (§5.8): SSH напрямую или внутри служебного туннеля VLESS-REALITY. */
   mgmt_mode: 'direct' | 'tunnel' | 'local'; mgmt_port: number | null; mgmt_uuid: string | null; mgmt_key_sealed: string | null;
+  /** прокси, через который идёт туннель управления (JSON BootstrapVia, зашифрован; via.ts) */
+  mgmt_via: string | null;
   mgmt_pub: string | null; mgmt_sid: string | null; mgmt_sni: string | null; mgmt_local_port: number | null;
   /** сертификаты узла и результат последнего продления (certs.ts, JSON) */
   tls_state: string | null;

@@ -12,34 +12,13 @@ import { fetchHostKey, fingerprintOf, HostKeyError, mask, withNodeLock, withSess
 import { parseSections, summarize } from './preflight.js';
 import { buildInstallScript, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from './nodekit.js';
 import { Ops, startJob, type JobHandle } from './ops.js';
-import { parseProxyLink } from './proxylink.js';
-import { Vpn } from './vpn.js';
-import { specOf, xrayOutbound } from './protocols.js';
-import { mgmtCredKey } from './botproxy.js';
+import { viaOutbound, type BootstrapVia } from './via.js';
 
 const { Client } = ssh2;
 
-/** Одноразовый доступ к узлу для первичной настройки. */
-/**
- * Как дойти до SSH сервера при первичном доступе: напрямую (по умолчанию) или через прокси — конфигурацию флота
- * (служебный клиент svc.mgmt) либо свою ссылку vless://, trojan://, vmess://, ss://. Нужно, когда главный сервер
- * в РФ и SSH до сервера за границей режется: панель заходит через прокси, а дальше узел работает по своему туннелю.
- */
-export type BootstrapVia = { kind: 'fleet'; serverId: string; templateId: string } | { kind: 'link'; link: string };
-export interface BootstrapAuth { user: string; password?: string; privateKey?: string; passphrase?: string; via?: BootstrapVia }
-
-/** Outbound Xray для первичного доступа через прокси. */
-export function viaOutbound(ctx: Ctx, via: BootstrapVia): { outbound: Record<string, unknown>; label: string } {
-  if (via.kind === 'link') {
-    try { return { outbound: parseProxyLink(via.link, 'boot-out'), label: 'свою ссылку' }; } catch (e) { throw new HttpError(400, `ссылка прокси: ${(e as Error).message}`); }
-  }
-  const vpn = new Vpn(ctx);
-  const t = vpn.template(via.templateId);
-  const s = ctx.servers().find((x) => x.id === via.serverId);
-  const ib = t && s ? vpn.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct' AND state = 'active'`, t.id, s.id)[0] : undefined;
-  if (!t || !s || !ib) throw new HttpError(400, 'выбранная конфигурация не выкачена на этот сервер — выберите другую');
-  return { outbound: xrayOutbound(specOf(t), ib, 'boot-out', s.host, vpn.svcCred(mgmtCredKey(t.id, s.id)), s.id), label: `${s.name} · ${t.name}` };
-}
+/** Одноразовый доступ к узлу для первичной настройки; via — зайти через прокси (via.ts). */
+export interface BootstrapAuth { user: string; password?: string; privateKey?: string; passphrase?: string; via?: BootstrapVia; keepVia?: boolean }
+export type { BootstrapVia };
 
 type Log = (line: string) => void;
 
@@ -121,6 +100,11 @@ export async function bootstrapWithAuth(ctx: Ctx, r: ServerRow, auth: BootstrapA
       client.end();
     }
     ctx.updateServer(r.id, { host_key_fp: seenFp, host_key_pending_fp: null, host_key_algo: 'ssh-ed25519' });
+    // сервер недоступен из РФ целиком: туннель управления дальше идёт через тот же прокси (цепочка в mgmt.ts)
+    if (auth.via && auth.keepVia && r.mgmt_mode === 'tunnel') {
+      ctx.updateServer(r.id, { mgmt_via: ctx.seal(JSON.stringify(auth.via)) });
+      log('туннель управления будет идти через этот же прокси');
+    }
   } finally {
     await via?.close();
   }

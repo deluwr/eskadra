@@ -56,7 +56,7 @@ export interface Server {
   certProblems: Array<{ key: string; level: 'fail' | 'warn'; title: string; detail: string }>;
   external_cores: Array<{ name: string; active: string; version: string }>;
   mgmt_mode: 'direct' | 'tunnel' | 'local'; config_dirty: number;
-  mgmt: { mode: 'direct' | 'tunnel' | 'local'; port: number | null; sni: string | null; localPort: number | null; client: { running: boolean; version: string | null; error: string | null } | null };
+  mgmt: { via: string | null; mode: 'direct' | 'tunnel' | 'local'; port: number | null; sni: string | null; localPort: number | null; client: { running: boolean; version: string | null; error: string | null } | null };
 }
 
 export interface Preflight { checks: Check[]; sshPorts: number[]; clientIp: string | null; ufwActive: boolean; blocking: boolean; baselinePath?: string; created_at?: string }

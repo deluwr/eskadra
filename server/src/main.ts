@@ -7,6 +7,8 @@ import { ZodError } from 'zod';
 import { config } from './config.js';
 import { getSetting, openDb, setSetting } from './db.js';
 import { Vpn } from './vpn.js';
+import { renderHash } from './ops.js';
+import { coreMode } from './ctx.js';
 import { loadOrCreateMasterKey, Sealer } from './lib/crypto.js';
 import { Ctx, HttpError } from './ctx.js';
 import { authRoutes, requireAdmin } from './routes/auth.js';
@@ -57,7 +59,13 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) process.once(sig, () => { mgmt
 process.once('exit', () => mgmt.stop());
 
 // v0.17: в inbounds Xray узлов добавлен служебный клиент svc.mgmt (первичный доступ через прокси) — переприменить один раз
-if (!getSetting(db, 'migrate.svcMgmt', false)) { new Vpn(ctx).markDirty(); setSetting(db, 'migrate.svcMgmt', true); }
+// конфиги узлов, которые эта версия панели формирует иначе, чем выкачено, — переприменить (фоновая синхронизация)
+{
+  const vpn = new Vpn(ctx);
+  const stale = ctx.servers().filter((s) => s.sudo_mode === 'restricted' && coreMode(s) !== 'xui'
+    && getSetting<string>(db, `applied.${s.id}`, '') !== renderHash(vpn, s)).map((s) => s.id);
+  if (stale.length) { vpn.markDirty(stale); console.log(`конфиги ${stale.length} узл. изменились в этой версии — будут переприменены`); }
+}
 
 const bot = new Bot(ctx, app.log);
 const backups = new Backups(ctx, bot);

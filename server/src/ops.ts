@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { coreMode, foreignCore, panelPorts, type Ctx, type InboundRow, type NodeSession, type ServerRow, type TemplateRow } from './ctx.js';
 import { getSetting, setSetting } from './db.js';
 import { json, Vpn } from './vpn.js';
@@ -8,6 +8,19 @@ import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
 
 /** Ядра узла, остановленные вручную на вкладке «Хост». */
 export const coresOff = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx.db, `core.off.${serverId}`, []);
+
+/**
+ * Отпечаток конфигов ядер, которые панель сейчас сформировала бы для узла. Хранится после выката; при запуске
+ * панели (в т. ч. после обновления) узлы с другим отпечатком переприменяются сами — новая версия Эскадры
+ * доходит до серверов без ручного «Выкатить».
+ */
+export function renderHash(vpn: Vpn, s: ServerRow): string {
+  const part = (f: () => unknown) => { try { return JSON.stringify(f()); } catch (e) { return `error:${(e as Error).message}`; } };
+  return createHash('sha256').update([part(() => vpn.renderXray(s)), part(() => vpn.renderSingbox(s)), part(() => vpn.renderTelemt(s))].join('\n')).digest('hex');
+}
+
+/** Метка в xui_user: для 3x-ui сохранён API-токен, а не логин и пароль. */
+export const XUI_TOKEN = '@token';
 
 export interface BalancerState { override: string | null; selected: string | null }
 
@@ -78,8 +91,11 @@ export class Ops {
   /** Вызов fleet-xui на узле: учётные данные 3x-ui идут через stdin, не через argv. */
   async xui<T = unknown>(s: ServerRow, n: NodeSession, action: string, extra: Record<string, unknown> = {}): Promise<T> {
     const needsLogin = !['info', 'x25519', 'listening'].includes(action);
-    if (needsLogin && (!s.xui_user || !s.xui_pass_sealed)) throw new Error(`${s.name}: укажите логин и пароль 3x-ui (вкладка «Хост»)`);
-    const payload = JSON.stringify({ action, ...extra, ...(needsLogin ? { user: s.xui_user, pass: this.ctx.open(s.xui_pass_sealed!) } : {}) });
+    if (needsLogin && (!s.xui_user || !s.xui_pass_sealed)) throw new Error(`${s.name}: укажите логин и пароль или API-токен 3x-ui (вкладка «Хост»)`);
+    // xui_user = '@token' — вместо логина и пароля сохранён API-токен 3x-ui
+    const secret = needsLogin ? this.ctx.open(s.xui_pass_sealed!) : '';
+    const auth = !needsLogin ? {} : s.xui_user === XUI_TOKEN ? { token: secret } : { user: s.xui_user, pass: secret };
+    const payload = JSON.stringify({ action, ...extra, ...auth });
     const out = await n.must(['xui'], { stdin: payload, timeoutMs: 60_000 });
     try { return JSON.parse(out) as T; } catch { return out.trim() as T; }
   }
@@ -292,6 +308,7 @@ export class Ops {
       if (coresOff(this.ctx, s.id).includes(core)) { await n.op(['core-stop', core]); log(`${core}: остановлен вручную — не запускаю`); }
     }
     this.ctx.updateServer(s.id, { config_dirty: 0 });
+    if (!xuiMode) setSetting(this.ctx.db, `applied.${s.id}`, renderHash(this.vpn, s));
     // перезапуск Xray сбрасывает переключение балансировщика — возвращаем выбранные выходы «Авто» входа
     // (с повтором: сразу после перезапуска API Xray может ещё не отвечать) и сверяем с тем, что реально выбрано
     if (!xuiMode) for (const t of this.vpn.templates().filter((x) => x.entry_id === s.id)) {
