@@ -274,6 +274,16 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return parseHostStat(r.id, raw);
   });
 
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/restart', { preHandler: guard(ctx, 'admin') }, async (req) => {
+    const r = ctx.server(req.params.id);
+    const { what } = z.object({ what: z.enum(['cores', 'host']) }).parse(req.body);
+    requireKit(r);
+    let out: string;
+    try { out = await new Ops(ctx).restart(r, what); } catch (e) { throw new HttpError(502, (e as Error).message); }
+    audit(db, who(req), what === 'host' ? 'server.reboot' : 'server.cores_restart', r.id, { out });
+    return { output: out };
+  });
+
   // TLS-сертификаты узла: проверить сроки или продлить сейчас (узел продлевает и сам, по таймеру)
   app.post<{ Params: { id: string; act: string } }>('/api/v1/servers/:id/certs/:act', { preHandler: guard(ctx, 'operator') }, async (req) => {
     const r = ctx.server(req.params.id);

@@ -351,7 +351,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
           <RouteMap
             entry={
               <>
-                <span className="k">{d.entryId ? 'Вход' : 'Пользователи'}</span>
+                <span className="k">{d.entryId ? 'Relay (вход)' : 'Пользователи'}</span>
                 {info.relay ? (
                   <select className="inp" value={d.entryId} onChange={(e) => setD({ ...d, entryId: e.target.value })} aria-label="Сервер-вход">
                     <option value="">напрямую</option>

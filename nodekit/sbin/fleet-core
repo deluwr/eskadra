@@ -407,6 +407,8 @@ case "${1:-}" in
   apply)   cmd_apply "${2:?}" "${3:?}" ;;
   status)  cmd_status "${2:?}" ;;
   stop)    systemctl disable --now "$(unit_of "${2:?}")" 2>/dev/null || true; echo stopped ;;
+  restart) systemctl is-enabled --quiet "$(unit_of "${2:?}")" || die "$2 не запущен — перезапускать нечего"
+           systemctl restart "$(unit_of "$2")"; sleep 1; systemctl is-active --quiet "$(unit_of "$2")" || die "$2 не поднялся после перезапуска: $(journalctl -u "$(unit_of "$2")" -n 3 --no-pager 2>/dev/null)"; echo restarted ;;
   start)   [ -s "$(cfg_of "${2:?}")" ] || die "у $2 нет конфига — выкатите конфигурацию"
            systemctl enable --now "$(unit_of "$2")" >/dev/null 2>&1 || die "$2 не запустился: $(systemctl status "$(unit_of "$2")" 2>&1 | tail -3)"
            sleep 1; systemctl is-active --quiet "$(unit_of "$2")" || die "$2 не запустился: $(journalctl -u "$(unit_of "$2")" -n 3 --no-pager 2>/dev/null)"; echo started ;;

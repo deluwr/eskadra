@@ -329,6 +329,22 @@ export class Ops {
     return out.trim();
   }
 
+  /** Быстрые действия из списка серверов: перезапуск работающих ядер или перезагрузка хоста (через 5 секунд). */
+  async restart(s: ServerRow, what: 'cores' | 'host'): Promise<string> {
+    return this.ctx.onNode(s, async (n) => {
+      await this.ensureKit(s, n, () => undefined);   // core-restart и host-reboot появились в nodekit 0.16
+      if (what === 'host') return (await n.must(['host-reboot'])).trim();
+      const done: string[] = [];
+      for (const core of ['xray', 'sing-box', 'telemt'] as const) {
+        const st = await n.op(['core-status', core]);
+        if (/^version=none/m.test(st.stdout) || !/^active=active/m.test(st.stdout)) continue;   // не установлено или выключено (в т. ч. вручную)
+        await n.must(['core-restart', core], { timeoutMs: 60_000 });
+        done.push(core);
+      }
+      return done.length ? `перезапущено: ${done.join(', ')}` : 'работающих ядер нет';
+    });
+  }
+
   /** Состояние ядер узла: работает ли каждое установленное. */
   async coreStates(s: ServerRow): Promise<Record<string, { active: boolean; manualOff: boolean }>> {
     const off = coresOff(this.ctx, s.id);

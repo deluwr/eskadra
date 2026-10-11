@@ -1,13 +1,12 @@
 import { useState, type FormEvent } from 'react';
 import { api, ago, type Server } from '../api';
-import { ErrorBox, Icon, Info, Level, StageHelp, Seg, StagePip, Tag, roleLabel, useAsync, usePoll, Addr } from '../ui';
-import { HostStatsPanel } from '../HostStats';
+import { ErrorBox, Info, Seg, useAsync, usePoll } from '../ui';
+import { ServerTable } from '../ServerTable';
 
 export function ServersPage() {
   const { data: servers, error, reload } = usePoll(() => api.get<Server[]>('/api/v1/servers'), 30_000);
   const [adding, setAdding] = useState(false);
   const [filter, setFilter] = useState<'all' | 'entry' | 'exit' | 'attn'>('all');
-  const [open, setOpen] = useState<Set<string>>(new Set());   // серверы с раскрытой статистикой
   const self = servers?.find((s) => s.mgmt_mode === 'local');
   const list = (servers ?? []).filter((s) =>
     filter === 'all' ? true : filter === 'attn' ? !!s.fail_since || s.stage < 2 : filter === 'exit' ? s.role === 'exit' : s.role !== 'exit');
@@ -24,29 +23,11 @@ export function ServersPage() {
       {servers && !self && <SelfNodeCard onDone={(id) => { void reload(); location.hash = `#/server/${id}`; }} />}
       {adding && <AddServerForm onCreated={(id) => { void reload(); location.hash = `#/server/${id}`; }} onCancel={() => setAdding(false)} />}
       <Seg value={filter} onChange={setFilter} label="Фильтр" options={[
-        ['all', `Все · ${servers?.length ?? 0}`], ['entry', 'Входы'], ['exit', 'Выходы'], ['attn', 'Требуют внимания'],
+        ['all', `Все · ${servers?.length ?? 0}`], ['entry', 'Relay'], ['exit', 'Выходы'], ['attn', 'Требуют внимания'],
       ]} />
-      <section className="card table-wrap">
-        <table>
-          <thead><tr><th>Сервер</th><th>Роль</th><th>Этап <Info label="Что значат этапы"><StageHelp /></Info></th><th>Защита</th><th>Связь</th></tr></thead>
-          <tbody>
-            {list.map((s) => [
-              <tr key={s.id} className="clickable" onClick={() => (location.hash = `#/server/${s.id}`)}>
-                <td><span className="flex" style={{ gap: 0, flexWrap: 'nowrap' }}>
-                  <button type="button" className="xbtn" aria-expanded={open.has(s.id)} aria-label={`Статистика ${s.name}`} disabled={s.sudo_mode !== 'restricted'}
-                    onClick={(e) => { e.stopPropagation(); setOpen((o) => { const n = new Set(o); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); return n; }); }}>{Icon.down}</button>
-                  <span><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k"><Addr value={s.host} /></div></span>
-                </span></td>
-                <td>{roleLabel(s)}{s.mgmt_mode === 'tunnel' && <div className="k">через туннель</div>}</td>
-                <td><StagePip stage={s.stage} /></td>
-                <td><Level value={s.protection_current} /></td>
-                <td>{s.fail_since ? <Tag kind="fail" dot>нет связи</Tag> : <Tag kind={s.last_seen_at ? 'ok' : undefined} dot>{ago(s.last_seen_at)}</Tag>}</td>
-              </tr>,
-              open.has(s.id) && <tr key={`${s.id}-x`} className="srv-x"><td colSpan={5}><HostStatsPanel url={`/api/v1/servers/${s.id}/stats`} pollMs={s.mgmt_mode === 'local' ? 3000 : 5000} /></td></tr>,
-            ])}
-            {servers && !list.length && <tr><td colSpan={5} className="empty">{servers.length ? 'Нет серверов в этом фильтре.' : 'Серверов пока нет. Начните с «Добавить сервер» — порядок действий описан в «Справке».'}</td></tr>}
-          </tbody>
-        </table>
+      <section className="card">
+        {servers && <ServerTable servers={list} onChanged={() => void reload()}
+          empty={servers.length ? 'Нет серверов в этом фильтре.' : 'Серверов пока нет. Начните с «Добавить сервер» — порядок действий описан в «Справке».'} />}
       </section>
     </>
   );
@@ -96,7 +77,7 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
         <label className="fld">IP или домен<input className="inp mono" value={f.host} onChange={set('host')} placeholder="203.0.113.10" required /></label>
         <label className="fld">Порт SSH<input className="inp mono" value={f.sshPort} onChange={set('sshPort')} inputMode="numeric" required /></label>
         <label className="fld"><span>Роль <Info>Выход — сервер, через который трафик уходит в интернет. Вход — сервер, к которому подключаются пользователи; он может пересылать их на выходы. Подробнее — в «Справке».</Info></span>
-          <select className="inp" value={f.role} onChange={set('role')}><option value="exit">выход</option><option value="entry">вход</option></select>
+          <select className="inp" value={f.role} onChange={set('role')}><option value="exit">Выход</option><option value="entry">Relay</option></select>
         </label>
         <label className="fld"><span>Группа <Info>Группа задаёт политику портов и связности. Создать новую — в «Портах и связности».</Info></span>
           <select className="inp" value={f.group} onChange={set('group')}>{(groups ?? [{ name: 'default' }]).map((g) => <option key={g.name} value={g.name}>{g.name}</option>)}</select>

@@ -330,7 +330,7 @@ export class AdminFlows {
   }
 
   private serverCard(a: AdminRow, s: ServerRow): Screen {
-    const role = s.mgmt_mode === 'local' ? 'главный · вход' : s.role === 'exit' ? 'выход' : 'вход';
+    const role = (s.mgmt_mode === 'local' ? 'Исполнитель (главный)' : s.role === 'exit' ? 'Выход' : 'Relay') + (s.mgmt_mode === 'tunnel' ? ' · туннель' : '');
     const lines = [
       `<b>${esc(s.name)}</b> — ${role}`,
       s.fail_since ? `🔴 нет связи с ${esc(s.fail_since.slice(0, 16).replace('T', ' '))}` : s.last_seen_at ? '🟢 на связи' : '⚪️ ещё не подключён',
@@ -372,7 +372,7 @@ export class AdminFlows {
     const d = f.data;
     return {
       text: [`<b>Подключить сервер?</b>`, `Имя: ${esc(d.name!)}`, `Адрес: <code>${esc(d.host!)}:${d.port}</code>`, `Вход: ${esc(d.user!)} по ${d.key ? 'ключу' : 'паролю'}`,
-        `Роль: ${d.role === 'exit' ? 'выход' : 'вход'}`, `Канал: ${d.mgmt === 'tunnel' ? 'через туннель' : 'напрямую'}`, '', 'Панель зайдёт один раз, поставит свой ключ и служебные скрипты, затем доступ по паролю ей больше не нужен.'].join('\n'),
+        `Роль: ${d.role === 'exit' ? 'Выход' : 'Relay'}`, `Канал: ${d.mgmt === 'tunnel' ? 'через туннель' : 'напрямую'}`, '', 'Панель зайдёт один раз, поставит свой ключ и служебные скрипты, затем доступ по паролю ей больше не нужен.'].join('\n'),
       kb: [[cb('Подключить', 'fok'), cb('Отмена', 'fx')]],
     };
   }
@@ -402,7 +402,7 @@ export class AdminFlows {
         await this.io.drop(chatId, messageId);   // пароль не остаётся в чате
         if (raw.includes('PRIVATE KEY')) d.key = raw.trim(); else d.password = raw.replace(/\r?\n$/, '');
         f.step = 'role';
-        await this.io.show(chatId, { text: 'Принято, сообщение удалено. Роль сервера:', kb: [[cb('Вход', 'fr:entry'), cb('Выход', 'fr:exit')], [cb('Отмена', 'fx')]] });
+        await this.io.show(chatId, { text: 'Принято, сообщение удалено. Роль сервера:', kb: [[cb('Relay (вход)', 'fr:entry'), cb('Выход', 'fr:exit')], [cb('Отмена', 'fx')]] });
         return;
       default:
         await this.io.send(chatId, 'Выберите вариант кнопкой выше или /cancel.');

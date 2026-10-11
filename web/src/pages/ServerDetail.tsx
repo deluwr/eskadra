@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { HostStatsPanel } from '../HostStats';
 import { api, ago, fmtTime, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
-import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, StageHelp, Switch, Tag, roleLabel, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
+import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, StageHelp, Switch, Tag, RoleTag, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
 
@@ -22,7 +22,7 @@ export function ServerDetailPage({ id }: { id: string }) {
           <a href="#/servers" className="k">← Серверы</a>
           <h1><ServerName id={s.id} name={s.name} onSaved={reload} /> <StagePip stage={s.stage} /><Info label="Что значат этапы"><StageHelp /></Info></h1>
           <span className="k">
-            <Addr value={s.host} /> · {roleLabel(s)} · защита <Level value={s.protection_current} />
+            <Addr value={s.host} /> · <RoleTag s={s} /> · защита <Level value={s.protection_current} />
             <Info label="Подробности о сервере">
               SSH-порт {s.ssh_port} · группа {s.group_name} · {s.os_info?.pretty ?? 'ОС не определена'}<br />
               Канал: {s.mgmt_mode === 'tunnel' ? `туннель, порт ${s.mgmt.port}` : s.mgmt_mode === 'local' ? 'локально (это главный сервер)' : 'напрямую'}<br />
@@ -413,9 +413,9 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         <Seg value={s.peer_ssh as 'off' | 'emergency'} label="SSH между нодами" options={[['off', 'выключен'], ['emergency', 'emergency']]} onChange={(v) => void patch({ peerSsh: v })} />
       </div>
       <div className="row">
-        <div className="row-text"><b>Роль и группа <Info>Вход принимает пользователей и может пересылать их на выходы; выход выпускает трафик в интернет. Группа задаёт политику: скрытность портов, связь между нодами, диапазон портов — настраивается в «Портах и связности».</Info></b></div>
+        <div className="row-text"><b>Роль и группа <Info>Relay (вход) принимает пользователей и может пересылать их на выходы; выход выпускает трафик в интернет. Группа задаёт политику: скрытность портов, связь между нодами, диапазон портов — настраивается в «Портах и связности».</Info></b></div>
         <div className="flex">
-          <select className="inp" style={{ width: 'auto' }} value={s.role === 'exit' ? 'exit' : 'entry'} onChange={(e) => void patch({ role: e.target.value })} aria-label="Роль"><option value="entry">вход</option><option value="exit">выход</option></select>
+          <select className="inp" style={{ width: 'auto' }} value={s.role === 'exit' ? 'exit' : 'entry'} onChange={(e) => void patch({ role: e.target.value })} aria-label="Роль"><option value="entry">Relay</option><option value="exit">Выход</option></select>
           <GroupSelect value={s.group_name} onSave={(g) => void patch({ group: g })} />
         </div>
       </div>

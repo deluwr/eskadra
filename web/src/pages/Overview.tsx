@@ -1,7 +1,8 @@
 import { api, ago, fmtBytes, fmtTime, type Server } from '../api';
-import { ErrorBox, Info, Level, StageHelp, StagePip, Tag, roleLabel, usePoll, Addr } from '../ui';
+import { ErrorBox, Info, usePoll } from '../ui';
 import { RouteMap, exitView } from '../RouteMap';
 import { HostStatsPanel } from '../HostStats';
+import { ServerTable } from '../ServerTable';
 
 type Health = { rtt_ms: number | null; mbps: number | null; ok: number; error: string | null };
 interface Route { id: string; name: string; entryId: string; autoMode: string; selected: string | null; exits: Array<{ id: string; health: Health | null }> }
@@ -42,7 +43,7 @@ export function OverviewPage() {
                   <div key={r.id}>
                     <div className="route-title"><b>{r.name}</b><span>«Авто» выбирает выход {MODE[r.autoMode] ?? r.autoMode}</span><a href="#/configs" style={{ marginLeft: 'auto' }}>Настроить</a></div>
                     <RouteMap
-                      entry={<><b>{entry?.name ?? '?'}</b>{entry?.fail_since ? <span className="k" style={{ color: 'var(--fail)' }}>вход · нет связи</span> : <span className="k">{`вход · ${ago(entry?.last_seen_at ?? null)}`}</span>}</>}
+                      entry={<><b>{entry?.name ?? '?'}</b>{entry?.fail_since ? <span className="k" style={{ color: 'var(--fail)' }}>Relay · нет связи</span> : <span className="k">{`Relay · ${ago(entry?.last_seen_at ?? null)}`}</span>}</>}
                       exits={r.exits.map((x) => {
                         const s = byId.get(x.id);
                         const lead = r.autoMode !== 'random' && (r.selected ? r.selected === x.id : r.exits.find((e) => e.health?.ok)?.id === x.id);
@@ -83,23 +84,7 @@ export function OverviewPage() {
 
           <section className="card">
             <div className="card-head"><h2>Узлы</h2><a href="#/servers">Все серверы</a></div>
-            <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
-              <table>
-                <thead><tr><th>Узел</th><th>Роль</th><th>Этап <Info label="Что значат этапы"><StageHelp /></Info></th><th>Защита</th><th>Связь</th></tr></thead>
-                <tbody>
-                  {d.servers.map((s) => (
-                    <tr key={s.id} className="clickable" onClick={() => (location.hash = `#/server/${s.id}`)}>
-                      <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k"><Addr value={s.host} /></div></td>
-                      <td>{roleLabel(s)}</td>
-                      <td><StagePip stage={s.stage} /></td>
-                      <td><Level value={s.protection_current} /></td>
-                      <td>{s.fail_since ? <Tag kind="fail" dot>нет связи</Tag> : <Tag kind={s.last_seen_at ? 'ok' : undefined} dot>{ago(s.last_seen_at)}</Tag>}</td>
-                    </tr>
-                  ))}
-                  {!d.servers.length && <tr><td colSpan={5} className="empty">Серверов пока нет</td></tr>}
-                </tbody>
-              </table>
-            </div>
+            <div style={{ borderTop: '1px solid var(--line)' }}><ServerTable servers={d.servers} /></div>
           </section>
 
         </>

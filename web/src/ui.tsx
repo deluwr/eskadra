@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import qrcode from 'qrcode-generator';
 import { api } from './api';
 
@@ -104,6 +105,8 @@ export const Icon = {
   help: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01" /></svg>,
   eye: <svg width="14" height="14" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></svg>,
   eyeOff: <svg width="14" height="14" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M3 3l18 18M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7c1.8 0 3.4-.5 4.8-1.3M9.9 9.9a3 3 0 0 0 4.2 4.2" /></svg>,
+  restart: <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>,
+  power: <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0" /></svg>,
   up: <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M6 15l6-6 6 6" /></svg>,
   down: <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>,
   moon: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" /></svg>,
@@ -134,19 +137,60 @@ function StagePipBar({ stage }: { stage: number }) {
 }
 
 /** Подсказка (i): текст по наведению, фокусу или нажатию — вместо абзацев пояснений в интерфейсе. */
+/**
+ * Подсказка (i): окно поверх страницы (портал, position: fixed), поэтому таблицы и карточки с прокруткой
+ * его не обрезают и не растягиваются. Открывается наведением или нажатием, закрывается уходом, Esc, прокруткой.
+ */
 export function Info({ children, label = 'Подсказка' }: { children: ReactNode; label?: string }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ x: number; y: number; up: boolean } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const pop = useRef<HTMLSpanElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const show = () => {
+    if (timer.current) clearTimeout(timer.current);
+    const r = btn.current?.getBoundingClientRect();
+    if (!r) return;
+    const up = innerHeight - r.bottom < 260 && r.top > innerHeight - r.bottom;
+    setPos({ x: r.left + r.width / 2, y: up ? r.top - 8 : r.bottom + 8, up });
+    setOpen(true);
+  };
+  const hide = (delay = 120) => { if (timer.current) clearTimeout(timer.current); timer.current = setTimeout(() => setOpen(false), delay); };
+  // не выходить за края окна
+  useLayoutEffect(() => {
+    const el = pop.current;
+    if (!open || !el || !pos) return;
+    const w = el.offsetWidth;
+    el.style.left = `${Math.min(Math.max(pos.x - w / 2, 12), innerWidth - w - 12)}px`;
+  }, [open, pos]);
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    const key = (e: KeyboardEvent) => e.key === 'Escape' && close();
+    addEventListener('scroll', close, true); addEventListener('resize', close); addEventListener('keydown', key);
+    return () => { removeEventListener('scroll', close, true); removeEventListener('resize', close); removeEventListener('keydown', key); };
+  }, [open]);
   return (
-    <span className={`info ${open ? 'open' : ''}`} onMouseLeave={() => setOpen(false)}>
-      <button type="button" className="info-i" aria-label={label} aria-expanded={open} onClick={(e) => { e.preventDefault(); e.stopPropagation(); setOpen((v) => !v); }} onBlur={() => setOpen(false)}>i</button>
-      <span className="info-pop" role="tooltip">{children}</span>
+    <span className="info" onMouseEnter={show} onMouseLeave={() => hide()}>
+      <button ref={btn} type="button" className="info-i" aria-label={label} aria-expanded={open}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (open) setOpen(false); else show(); }} onBlur={() => hide(200)}>i</button>
+      {open && pos && createPortal(
+        <span ref={pop} className="info-float" role="tooltip" style={{ top: pos.y, ...(pos.up ? { transform: 'translateY(-100%)' } : {}) }}
+          onMouseEnter={() => { if (timer.current) clearTimeout(timer.current); }} onMouseLeave={() => hide()} onClick={(e) => e.stopPropagation()}>{children}</span>,
+        document.body,
+      )}
     </span>
   );
 }
 
 /** Роли узлов по-человечески. relay/control — старые значения, показываются как вход/главный. */
-export const ROLE_LABEL: Record<string, string> = { entry: 'вход', relay: 'вход', exit: 'выход', control: 'главный' };
-export const roleLabel = (s: { role: string; mgmt_mode?: string }) => (s.mgmt_mode === 'local' ? 'главный · вход' : ROLE_LABEL[s.role] ?? s.role);
+export const ROLE_LABEL: Record<string, string> = { entry: 'Relay', relay: 'Relay', exit: 'Выход', control: 'Исполнитель (главный)' };
+/** Роль сервера одним названием: главный сервер (панель на нём же) — «Исполнитель (главный)», вход — Relay, выход — «Выход». */
+export const roleLabel = (s: { role: string; mgmt_mode?: string }) => (s.mgmt_mode === 'local' ? ROLE_LABEL.control! : ROLE_LABEL[s.role] ?? s.role);
+/** Роль и, отдельно, канал управления через туннель. */
+export function RoleTag({ s }: { s: { role: string; mgmt_mode?: string } }) {
+  return <span className="flex" style={{ gap: 6 }}>{roleLabel(s)}{s.mgmt_mode === 'tunnel' && <span className="tag info" title="Панель управляет сервером через служебный туннель VLESS-REALITY">туннель</span>}</span>;
+}
 
 /** Уровни защиты хоста одним словом. */
 export const LEVEL_LABEL: Record<string, string> = { P1: 'обычная', P2: 'средняя', P3: 'высокая' };

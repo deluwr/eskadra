@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { api, ApiError, setOtpProvider } from './api';
-import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync, Addr } from './ui';
+import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync } from './ui';
 import { OverviewPage } from './pages/Overview';
 import { ServersPage } from './pages/Servers';
 import { ServerDetailPage } from './pages/ServerDetail';
@@ -82,7 +82,7 @@ export function App() {
         {nav.map(([id, label, icon]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{icon}{label}</a>)}
         <div className="side-sep" />
         {nav2.map(([id, label, icon]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{icon}{label}</a>)}
-        <ExecutorFoot ver={ver} owner={auth.role === 'owner'} />
+        <SideFoot ver={ver} owner={auth.role === 'owner'} />
       </aside>
       <div className="main">
         <header className="topbar">
@@ -129,15 +129,13 @@ export function App() {
 
 type Ver = { version: string; latest: string | null; updateAvailable: boolean };
 
-function ExecutorFoot({ ver, owner }: { ver: Ver | null; owner: boolean }) {
-  const [ips, setIps] = useState<string[] | null>(null);
+/** Низ меню: только когда есть обновление (версия — под логотипом). */
+function SideFoot({ ver, owner }: { ver: Ver | null; owner: boolean }) {
   const [open, setOpen] = useState(false);
-  useEffect(() => { api.get<{ executorIps: string[] }>('/api/v1/settings').then((s) => setIps(s.executorIps)).catch(() => undefined); }, []);
+  if (!ver?.updateAvailable) return null;
   return (
     <div className="side-foot">
-      <span className="k">Исполнитель</span>
-      <span className="small"><Addr value={ips?.length ? ips.join(', ') : null} empty="не задан" /></span>
-      {ver?.updateAvailable && (
+      {ver.updateAvailable && (
         <div className="upd">
           <span className="small">{`Доступна версия ${ver.latest}`}</span>
           {owner ? <button className="btn sm pri" onClick={() => setOpen(true)}>Обновить</button> : <span className="k">Обновляет владелец</span>}
