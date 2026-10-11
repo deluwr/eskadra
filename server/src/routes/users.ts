@@ -20,6 +20,8 @@ export const userBody = z.object({
   overAction: z.enum(['disable', 'notify']).default('disable'),
   modes: z.array(z.enum(['direct', 'via'])).min(1).default(['direct', 'via']),
   nodeIds: z.array(z.string()).nullable().default(null),
+  /** Конфигурации, профили которых попадают в подписку; null — все. */
+  templateIds: z.array(z.string()).nullable().default(null),
   wlMode: z.enum(['exact', 'prefix', 'asn']).default('exact'),
   status: z.enum(['active', 'disabled']).default('active'),
 });
@@ -37,22 +39,29 @@ export function saveUser(ctx: Ctx, id: string | null, b: z.infer<typeof userBody
   const { db } = ctx;
   if (b.nodeIds) for (const n of b.nodeIds) ctx.server(n);
   if (!db.prepare('SELECT 1 FROM limit_groups WHERE name = ?').get(b.limitGroup)) throw new HttpError(400, 'нет такой группы лимитов');
+  if (b.templateIds) for (const t of b.templateIds) if (!db.prepare('SELECT 1 FROM templates WHERE id = ?').get(t)) throw new HttpError(400, 'нет такой конфигурации');
   const vals = [b.name, b.tgId, b.limitGroup, b.trafficLimitGb, b.expireAt, b.deviceLimit, b.overAction, JSON.stringify(b.modes),
-    b.nodeIds ? JSON.stringify(b.nodeIds) : null, b.wlMode, b.status];
+    b.nodeIds ? JSON.stringify(b.nodeIds) : null, b.templateIds ? JSON.stringify(b.templateIds) : null, b.wlMode, b.status];
   if (id) {
-    db.prepare(`UPDATE users SET name=?, tg_id=?, limit_group=?, traffic_limit_gb=?, expire_at=?, device_limit=?, over_action=?, modes=?, node_ids=?, wl_mode=?, status=?,
+    db.prepare(`UPDATE users SET name=?, tg_id=?, limit_group=?, traffic_limit_gb=?, expire_at=?, device_limit=?, over_action=?, modes=?, node_ids=?, template_ids=?, wl_mode=?, status=?,
       disabled_reason = CASE WHEN ? = 'active' THEN NULL ELSE disabled_reason END WHERE id=?`).run(...vals, b.status, id);
     return id;
   }
   const nid = 'u-' + randomBytes(4).toString('hex');
-  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, wl_mode, status, id, sub_token, knock_token)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18));
+  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18));
   return nid;
 }
 
 export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
   const { db } = ctx;
   const vpn = new Vpn(ctx);
+  /** Конфигурации и профили, которые каждая даст пользователю в подписке (с учётом режимов и серверов, без учёта выбора конфигураций). */
+  const configsOf = (u: UserRow) => {
+    const allowed = json<string[] | null>(u.template_ids, null);
+    const all = vpn.profiles({ ...u, template_ids: null });
+    return vpn.templates().map((t) => ({ id: t.id, name: t.name, allowed: !allowed || allowed.includes(t.id), profiles: all.filter((p) => p.template.id === t.id).map((p) => p.name) }));
+  };
   const getUser = (id: string) => {
     const u = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
     if (!u) throw new HttpError(404, 'пользователь не найден');
@@ -68,7 +77,8 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     return {
       id: u.id, name: u.name, tg_id: u.tg_id, status: u.status, disabled_reason: u.disabled_reason,
       limit_group: u.limit_group, traffic_limit_gb: u.traffic_limit_gb, expire_at: u.expire_at, device_limit: u.device_limit,
-      over_action: u.over_action, modes: json<string[]>(u.modes, []), node_ids: json<string[] | null>(u.node_ids, null), wl_mode: u.wl_mode,
+      over_action: u.over_action, modes: json<string[]>(u.modes, []), node_ids: json<string[] | null>(u.node_ids, null), template_ids: json<string[] | null>(u.template_ids, null), wl_mode: u.wl_mode,
+      configs: configsOf(u),
       effective: lim,
       traffic: { up: t?.up ?? 0, down: t?.down ?? 0, period: period() },
       allowedIps: ips,

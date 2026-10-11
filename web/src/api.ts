@@ -82,7 +82,8 @@ export interface Template {
 export interface User {
   id: string; name: string; tg_id: string | null; status: 'active' | 'disabled'; disabled_reason: string | null; limit_group: string;
   traffic_limit_gb: number | null; expire_at: string | null; device_limit: number | null; over_action: string;
-  modes: string[]; node_ids: string[] | null; wl_mode: 'exact' | 'prefix' | 'asn';
+  modes: string[]; node_ids: string[] | null; template_ids: string[] | null; wl_mode: 'exact' | 'prefix' | 'asn';
+  configs: Array<{ id: string; name: string; allowed: boolean; profiles: string[] }>;
   effective: { trafficGb: number | null; devices: number | null; expireAt: string | null };
   traffic: { up: number; down: number; period: string };
   allowedIps: Array<{ id: number; cidr: string; source: string; expires_at: string }>;

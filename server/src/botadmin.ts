@@ -155,19 +155,19 @@ export class AdminFlows {
         await this.io.send(chatId, `<b>${esc(p.name)}</b> · ${esc(u.name)}\n<code>${esc(vpn.link(u, p))}</code>`);
         return true;
       }
-      case 'usrv': {
+      case 'utpl': case 'usrv': {
         const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
-        if (args[1]) {
-          const nodes = this.ctx.servers().map((s) => s.id);
-          const cur = json<string[] | null>(u.node_ids, null) ?? nodes;
+        if (act === 'utpl' && args[1]) {
+          const all = this.vpn().templates().map((t) => t.id);
+          const cur = json<string[] | null>(u.template_ids, null) ?? all;
           const next = cur.includes(args[1]) ? cur.filter((x) => x !== args[1]) : [...cur, args[1]];
-          const val = next.length >= nodes.length && nodes.every((n) => next.includes(n)) ? null : next;
-          db.prepare('UPDATE users SET node_ids = ? WHERE id = ?').run(val ? JSON.stringify(val) : null, u.id);
+          const val = all.every((n) => next.includes(n)) ? null : next;
+          db.prepare('UPDATE users SET template_ids = ? WHERE id = ?').run(val ? JSON.stringify(val) : null, u.id);
           this.vpn().markDirty();
-          audit(db, a.username, 'user.update', u.id, { nodeIds: val, via: 'bot' });
+          audit(db, a.username, 'user.update', u.id, { templateIds: val, via: 'bot' });
           await toast('Сохранено');
         } else await toast();
-        await this.io.show(chatId, this.userServers(this.user(u.id)!), mid);
+        await this.io.show(chatId, this.userConfigs(this.user(u.id)!), mid);
         return true;
       }
       case 'uon': {
@@ -270,30 +270,37 @@ export class AdminFlows {
   private userCard(a: AdminRow, u: UserRow): Screen {
     const lim = effectiveLimits(this.ctx, u);
     const t = this.ctx.db.prepare('SELECT up, down FROM traffic WHERE user_id = ? AND period = ?').get(u.id, period()) as { up: number; down: number } | undefined;
-    const nodes = json<string[] | null>(u.node_ids, null);
+    const tpls = json<string[] | null>(u.template_ids, null);
     const lines = [
       `<b>${esc(u.name)}</b> — ${u.status === 'active' ? 'доступ активен' : `отключён${u.disabled_reason ? ` (${esc(u.disabled_reason)})` : ''}`}`,
       `Трафик за месяц: ${gb((t?.up ?? 0) + (t?.down ?? 0))}${lim.trafficGb ? ` из ${lim.trafficGb} ГБ` : ''}`,
       `Срок: ${lim.expireAt ? lim.expireAt.slice(0, 10) : 'без срока'}`,
-      `Серверы: ${nodes ? nodes.map((id) => this.server(id)?.name ?? id).join(', ') || 'нет' : 'все'}`,
+      `Конфигурации: ${tpls ? tpls.map((id) => this.vpn().template(id)?.name ?? id).join(', ') || 'нет' : 'все'}`,
       `Telegram: ${u.tg_id ? `<code>${u.tg_id}</code> — может писать боту /sub` : 'не привязан'}`,
     ];
     return {
       text: lines.join('\n'),
       kb: [
         [cb('Подписка', `usub:${u.id}`), cb('Отдельные ссылки', `ulnk:${u.id}`)],
-        [cb('Серверы', `usrv:${u.id}`), cb(u.status === 'active' ? 'Отключить' : 'Включить', `uon:${u.id}`)],
+        [cb('Конфигурации', `utpl:${u.id}`), cb(u.status === 'active' ? 'Отключить' : 'Включить', `uon:${u.id}`)],
         [...(can(a, 'admin') ? [cb('Удалить', `udel:${u.id}`)] : []), back('ul:0')],
       ],
     };
   }
 
-  private userServers(u: UserRow): Screen {
-    const nodes = json<string[] | null>(u.node_ids, null);
-    const servers = this.ctx.servers();
+  /** Конфигурации пользователя: какие дают профили в подписку (с примером профилей каждой). */
+  private userConfigs(u: UserRow): Screen {
+    const tpls = json<string[] | null>(u.template_ids, null);
+    const vpn = this.vpn();
+    const all = vpn.profiles({ ...u, template_ids: null });
+    const list = vpn.templates();
+    const lines = list.map((t) => {
+      const ps = all.filter((p) => p.template.id === t.id).map((p) => p.name);
+      return `<b>${esc(t.name)}</b>: ${ps.length ? esc(ps.slice(0, 6).join(', ')) + (ps.length > 6 ? ` и ещё ${ps.length - 6}` : '') : 'профилей нет'}`;
+    });
     return {
-      text: `Серверы, доступные <b>${esc(u.name)}</b>. Нажмите, чтобы включить или выключить:`,
-      kb: [...servers.map((s) => [cb(`${!nodes || nodes.includes(s.id) ? '✅' : '⬜'} ${s.name}`, `usrv:${u.id}:${s.id}`)]), [back(`uc:${u.id}`)]],
+      text: `Конфигурации <b>${esc(u.name)}</b> — какие попадут в подписку. Нажмите, чтобы включить или выключить:\n\n${lines.join('\n')}`,
+      kb: [...list.map((t) => [cb(`${!tpls || tpls.includes(t.id) ? '✅' : '⬜'} ${t.name}`, `utpl:${u.id}:${t.id}`)]), [back(`uc:${u.id}`)]],
     };
   }
 

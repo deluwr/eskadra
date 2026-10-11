@@ -60,8 +60,8 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
         {isOwner && (
           <form className="row" onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = await api.post<{ username: string; password: string; admins: Admin[] }>('/api/v1/admins', nu); setCreated(r); setData(r.admins); setNu({ username: '', role: 'admin' }); toast(`${r.username} приглашён`); }); }}>
             <div className="flex"><input className="inp" style={{ width: 200 }} value={nu.username} onChange={(e) => setNu({ ...nu, username: e.target.value })} placeholder="логин" aria-label="Логин" />
-              <select className="inp" style={{ width: 'auto' }} value={nu.role} onChange={(e) => setNu({ ...nu, role: e.target.value })} aria-label="Роль"><option value="admin">admin</option><option value="operator">operator</option></select>
-              <button className="btn pri" disabled={busy || nu.username.length < 3}>Пригласить</button></div>
+              <select className="inp" style={{ width: 'auto' }} value={nu.role} onChange={(e) => setNu({ ...nu, role: e.target.value })} aria-label="Роль"><option value="owner">owner</option><option value="admin">admin</option><option value="operator">operator</option></select>
+              <button className="btn pri" disabled={busy || nu.username.length < 3}>Пригласить</button>{nu.role === 'owner' && <span className="small" style={{ color: 'var(--warn)' }}>owner получает все права, включая управление администраторами и бэкапами</span>}</div>
             {created && <div className="alert warn">Временный пароль для <code>{created.username}</code>: <code>{created.password}</code> — покажется один раз. <CopyButton text={created.password} /></div>}
           </form>
         )}

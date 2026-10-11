@@ -72,7 +72,7 @@ export interface InboundRow {
 export interface UserRow {
   id: string; name: string; tg_id: string | null; status: 'active' | 'disabled'; limit_group: string;
   traffic_limit_gb: number | null; expire_at: string | null; device_limit: number | null; over_action: string;
-  modes: string; node_ids: string | null; wl_mode: 'exact' | 'prefix' | 'asn'; sub_token: string; knock_token: string;
+  modes: string; node_ids: string | null; template_ids: string | null; wl_mode: 'exact' | 'prefix' | 'asn'; sub_token: string; knock_token: string;
   disabled_reason: string | null; created_at: string;
 }
 

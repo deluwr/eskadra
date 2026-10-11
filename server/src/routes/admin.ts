@@ -109,7 +109,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   app.get('/api/v1/admins', async () => adminView());
 
   app.post('/api/v1/admins', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
-    const b = z.object({ username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/), role: z.enum(['admin', 'operator']) }).parse(req.body);
+    const b = z.object({ username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/), role: z.enum(['owner', 'admin', 'operator']) }).parse(req.body);
     if (db.prepare('SELECT 1 FROM admins WHERE username = ?').get(b.username)) throw new HttpError(409, 'такой логин уже есть');
     const password = randomBytes(15).toString('base64url');
     db.prepare('INSERT INTO admins (username, pw_hash, role) VALUES (?, ?, ?)').run(b.username, hashPassword(password), b.role);

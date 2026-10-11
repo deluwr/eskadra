@@ -267,6 +267,9 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE admins ADD COLUMN notify_off TEXT NOT NULL DEFAULT '[]';
   `,
+  `
+  ALTER TABLE users ADD COLUMN template_ids TEXT;
+  `,
 ];
 
 export type Db = DatabaseSync;

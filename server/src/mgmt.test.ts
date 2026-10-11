@@ -206,3 +206,18 @@ test('первичный доступ через конфигурацию фло
   assert.equal(o.settings.vnext[0].address, '203.0.113.7');
   assert.throws(() => viaOutbound(ctx, { kind: 'fleet', serverId: 'n1', templateId: 'nope' }), /не выкачена/);
 });
+
+test('пользователь получает профили только выбранных конфигураций', () => {
+  const { ctx, db } = fixture();
+  db.prepare(`UPDATE servers SET mgmt_mode = 'direct' WHERE id = 'n1'`).run();
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids) VALUES ('t1', 'rv', 'xray', 'vless-reality', 8443, '["sni.example"]', '["n1"]')`).run();
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, private_key_sealed, public_key, short_id) VALUES ('ib1', 't1', 'n1', 'direct', 8443, 'tcp', 'active', ?, 'PUB', 'aa11')`).run(ctx.seal('PRIV'));
+  db.prepare(`INSERT INTO users (id, name, sub_token, knock_token, template_ids) VALUES ('u1', 'a', 's1', 'k1', NULL), ('u2', 'b', 's2', 'k2', '["t-other"]')`).run();
+  const vpn = new Vpn(ctx);
+  const u = (id: string) => db.prepare('SELECT * FROM users WHERE id = ?').get(id) as any;
+  assert.equal(vpn.profiles(u('u1')).length, 1);
+  assert.equal(vpn.profiles(u('u2')).length, 0, 'конфигурация не выбрана — профиля нет');
+  const emails = (vpn.renderXray(ctx.server('n1')) as any).inbounds.find((i: any) => i.tag === 'in-ib1').settings.clients.map((c: any) => c.email);
+  assert.ok(emails.includes('u1.d-t1'));
+  assert.ok(!emails.some((e: string) => e.startsWith('u2.')), 'и на сервере его клиента нет');
+});

@@ -88,9 +88,13 @@ test('bot: operator добавляет пользователя по Telegram ID
   // пользователь пишет /sub — получает свою ссылку, а не админское меню
   await f.b.onMessage('555123', '555123', '/sub');
   assert.match(String(f.last().body.text), /Подписки пока не настроены|\/s\//);
-  // выключить пользователю один сервер
-  await f.press('77', `usrv:${u.id}:srv-a`);
-  assert.deepEqual(JSON.parse((f.db.prepare('SELECT node_ids FROM users WHERE id = ?').get(u.id) as { node_ids: string }).node_ids), ['srv-b']);
+  // выключить пользователю одну конфигурацию: в подписку попадут профили только второй
+  f.db.prepare(`INSERT INTO templates (id, name, core, protocol, port, node_ids) VALUES ('t1', 'main', 'xray', 'vless', 443, '["srv-a"]'), ('t2', 'hy', 'sing-box', 'hysteria2', 8443, '["srv-b"]')`).run();
+  await f.press('77', `utpl:${u.id}:t1`);
+  assert.deepEqual(JSON.parse((f.db.prepare('SELECT template_ids FROM users WHERE id = ?').get(u.id) as { template_ids: string }).template_ids), ['t2']);
+  assert.match(String(f.last().body.text), /Конфигурации <b>boris<\/b>/);
+  await f.press('77', `utpl:${u.id}:t1`);   // обратно — снова все
+  assert.equal((f.db.prepare('SELECT template_ids FROM users WHERE id = ?').get(u.id) as { template_ids: string | null }).template_ids, null);
   // operator не удаляет и не подключает серверы
   await f.press('77', `udelok:${u.id}`);
   assert.ok(f.db.prepare('SELECT 1 FROM users WHERE id = ?').get(u.id));

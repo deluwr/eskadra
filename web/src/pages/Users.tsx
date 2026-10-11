@@ -4,12 +4,12 @@ import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll
 
 interface Form {
   name: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
-  overAction: string; modes: string[]; nodeIds: string[] | null; wlMode: 'exact' | 'prefix' | 'asn'; status: 'active' | 'disabled';
+  overAction: string; modes: string[]; nodeIds: string[] | null; templateIds: string[] | null; wlMode: 'exact' | 'prefix' | 'asn'; status: 'active' | 'disabled';
 }
-const emptyForm: Form = { name: '', tgId: '', limitGroup: 'default', trafficLimitGb: '', expireAt: '', deviceLimit: '', overAction: 'disable', modes: ['direct', 'via'], nodeIds: null, wlMode: 'exact', status: 'active' };
+const emptyForm: Form = { name: '', tgId: '', limitGroup: 'default', trafficLimitGb: '', expireAt: '', deviceLimit: '', overAction: 'disable', modes: ['direct', 'via'], nodeIds: null, templateIds: null, wlMode: 'exact', status: 'active' };
 const toForm = (u: User): Form => ({
   name: u.name, tgId: u.tg_id ?? '', limitGroup: u.limit_group, trafficLimitGb: u.traffic_limit_gb?.toString() ?? '', expireAt: u.expire_at?.slice(0, 10) ?? '',
-  deviceLimit: u.device_limit?.toString() ?? '', overAction: u.over_action, modes: u.modes, nodeIds: u.node_ids, wlMode: u.wl_mode, status: u.status,
+  deviceLimit: u.device_limit?.toString() ?? '', overAction: u.over_action, modes: u.modes, nodeIds: u.node_ids, templateIds: u.template_ids, wlMode: u.wl_mode, status: u.status,
 });
 const num = (s: string) => (s.trim() === '' ? null : Number(s));
 
@@ -101,7 +101,7 @@ function importLinks(url: string, name: string): Array<[string, string]> {
 }
 
 const bodyOf = (f: Form) => ({ name: f.name, tgId: f.tgId || null, limitGroup: f.limitGroup, trafficLimitGb: num(f.trafficLimitGb), expireAt: f.expireAt ? new Date(f.expireAt + 'T23:59:59Z').toISOString() : null,
-  deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, wlMode: f.wlMode, status: f.status });
+  deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, templateIds: f.templateIds, wlMode: f.wlMode, status: f.status });
 
 function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; wlOn: boolean }) {
   const [f, setF] = useState<Form>(user ? toForm(user) : emptyForm);
@@ -110,12 +110,15 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
   const [links, setLinks] = useState<Array<{ key: string; name: string; uri: string }> | null>(null);
   const [ip, setIp] = useState('');
   const { busy, error, run } = useAsync();
-  const nodes = servers.filter((s) => s.role !== 'control');
   const toggleMode = (m: string) => setF({ ...f, modes: f.modes.includes(m) ? f.modes.filter((x) => x !== m) : [...f.modes, m] });
-  const toggleNode = (id: string) => {
-    const cur = f.nodeIds ?? nodes.map((n) => n.id);
+  // конфигурации, профили которых попадут в подписку (у существующего пользователя — с примером профилей)
+  const { data: tpls } = usePoll(() => api.get<Array<{ id: string; name: string }>>('/api/v1/templates'), null);
+  const configs = user?.configs ?? tpls?.map((t) => ({ id: t.id, name: t.name, allowed: true, profiles: [] as string[] })) ?? [];
+  const toggleTpl = (id: string) => {
+    const all = configs.map((c) => c.id);
+    const cur = f.templateIds ?? all;
     const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
-    setF({ ...f, nodeIds: next.length === nodes.length ? null : next });
+    setF({ ...f, templateIds: all.every((x) => next.includes(x)) ? null : next });
   };
   const save = () => run(async () => {
     // Telegram существующего пользователя меняется привязкой (кнопка «Привязать») — здесь берём сохранённый
@@ -158,11 +161,32 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
         <span className="k">Пустое поле — значение из группы. Трафик считается по Xray; лимит устройств пока только отображается.</span>
       </div>
       <div className="row stack" style={{ alignItems: 'stretch' }}>
-        <h3>Режимы подключения</h3>
-        <label className="cb"><input type="checkbox" checked={f.modes.includes('via')} onChange={() => toggleMode('via')} />Через универсальный вход</label>
-        <label className="cb"><input type="checkbox" checked={f.modes.includes('direct')} onChange={() => toggleMode('direct')} />Напрямую к серверу</label>
-        <span className="k">Доступные узлы</span>
-        <div className="flex">{nodes.map((n) => <label key={n.id} className="cb tag" style={{ minHeight: 36, padding: '0 12px' }}><input type="checkbox" checked={!f.nodeIds || f.nodeIds.includes(n.id)} onChange={() => toggleNode(n.id)} />{n.name}</label>)}</div>
+        <h3>Что попадёт в подписку</h3>
+        <div className="flex" style={{ gap: 18 }}>
+          <label className="cb"><input type="checkbox" checked={f.modes.includes('via')} onChange={() => toggleMode('via')} />Через Relay (вход)</label>
+          <label className="cb"><input type="checkbox" checked={f.modes.includes('direct')} onChange={() => toggleMode('direct')} />Напрямую к серверу</label>
+        </div>
+        <span className="k">Конфигурации <Info>Отмеченные конфигурации дают пользователю свои профили; у снятой — ни одного. Профили зависят ещё и от режимов выше.</Info></span>
+        {configs.length ? (
+          <ul className="cfg-pick">
+            {configs.map((c) => {
+              const on = !f.templateIds || f.templateIds.includes(c.id);
+              return (
+                <li key={c.id} className={on ? '' : 'off'}>
+                  <label className="cb"><input type="checkbox" checked={on} onChange={() => toggleTpl(c.id)} /><b>{c.name}</b></label>
+                  {user && (c.profiles.length
+                    ? <span className="cfg-profiles">{c.profiles.map((p) => <span key={p} className="tag">{p}</span>)}</span>
+                    : <span className="k">профилей нет: проверьте режимы и выкат конфигурации</span>)}
+                </li>
+              );
+            })}
+          </ul>
+        ) : <span className="k">Конфигураций пока нет — создайте их в разделе «Конфигурации».</span>}
+        {!user && <span className="k">Профили каждой конфигурации появятся здесь после создания пользователя.</span>}
+        {f.nodeIds && <div className="alert warn small flex" style={{ justifyContent: 'space-between' }}>
+          <span>{`Задано и ограничение по серверам: ${f.nodeIds.map((id) => servers.find((s) => s.id === id)?.name ?? id).join(', ') || 'ни одного'}`}</span>
+          <button type="button" className="btn ghost sm" onClick={() => setF({ ...f, nodeIds: null })}>Снять</button>
+        </div>}
       </div>
       {wlOn && <div className="row stack" style={{ alignItems: 'stretch' }}>
         <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Белый список IP <Info>Включён скрытностью группы (раздел «Порты и связность»): к серверам группы пускаются только адреса из списка. Адрес добавляется по персональной ссылке пользователя или вручную.</Info></h3></div>

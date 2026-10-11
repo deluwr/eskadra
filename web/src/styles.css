@@ -326,3 +326,11 @@ span.rm-pick { cursor: default; }
 .srv-acts .sm-icon:hover:not(:disabled) { color: var(--text); }
 .srv-acts .xbtn { margin: 0 0 0 4px; }
 .srv-table tr.open td { border-bottom-color: transparent; }
+
+/* конфигурации пользователя и их профили */
+.cfg-pick { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cfg-pick li { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.cfg-pick li.off { border-style: dashed; }
+.cfg-pick li.off .cfg-profiles { opacity: .45; }
+.cfg-profiles { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 28px; }
+.cfg-profiles .tag { font-weight: 500; }
