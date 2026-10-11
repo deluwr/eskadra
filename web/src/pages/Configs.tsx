@@ -77,7 +77,7 @@ const describe = (t: Template) => {
 
 export function ConfigsPage() {
   const { data: templates, reload } = usePoll(() => api.get<Template[]>('/api/v1/templates'), 20_000);
-  const { data: servers } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
+  const { data: servers, reload: reloadServers } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [jobId, setJobId] = useState<number | null>(null);
 
@@ -105,7 +105,7 @@ export function ConfigsPage() {
           {!templates?.length && <p className="k" style={{ padding: 8 }}>Конфигураций пока нет.</p>}
         </section>
         <div className="wide stack" style={{ gap: 20 }}>
-          {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current}
+          {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current} onServers={() => void reloadServers()}
             onSaved={(t) => { void reload(); setDraft(toDraft(t)); }} onRollout={(id) => setJobId(id)} onDeleted={() => { setDraft(null); void reload(); }} />}
           {jobId && <JobLog id={jobId} onDone={() => void reload()} />}
           {current?.entry_id && current.spec.autoMode !== 'random' && <ExitHealth t={current} />}
@@ -196,8 +196,8 @@ export function CoresPanel() {
   );
 }
 
-function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
-  draft: Draft; servers: Server[]; current: Template | null; onSaved: (t: Template) => void; onRollout: (jobId: number) => void; onDeleted: () => void;
+function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDeleted }: {
+  draft: Draft; servers: Server[]; current: Template | null; onServers: () => void; onSaved: (t: Template) => void; onRollout: (jobId: number) => void; onDeleted: () => void;
 }) {
   const [d, setD] = useState(draft);
   useEffect(() => setD(draft), [draft]);   // после сохранения — то, что вернул сервер
@@ -258,7 +258,17 @@ function Editor({ draft, servers, current, onSaved, onRollout, onDeleted }: {
       return { id: x.id, name: x.name, ...exitView(h, { lead: lead === x.id, mode: st.autoMode }) };
     }),
     ...managed.filter((s) => s.id !== d.entryId && !d.nodeIds.includes(s.id)).map((s): MapExit => ({ id: s.id, name: s.name, state: 'off', note: 'не используется' })),
-  ];
+  ].map((x) => {
+    // выход без прямого доступа не попадает в подписку как «… · напрямую» — показываем это и даём открыть
+    const s = managed.find((m) => m.id === x.id);
+    if (!s || s.direct_access || x.state === 'off') return x;
+    return { ...x, extra: (
+      <button type="button" className="btn ghost sm rm-direct" title={`Прямой доступ к ${s.name} выключен: в подписке нет профиля «${s.name} · напрямую»`}
+        onClick={async () => { if (await ask(`Открыть прямой доступ к ${s.name}? В подписках появится профиль «${s.name} · напрямую», сервер начнёт принимать пользователей напрямую.`)) void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { directAccess: true }); toast(`Прямой доступ к ${s.name} открыт`); onServers(); }); }}>
+        только через вход
+      </button>
+    ) };
+  });
   const pickProtocol = (p: Protocol) => setD({ ...d, protocol: p, port: PROTO[p].port, st: defaults(p), entryId: PROTO[p].relay ? d.entryId : '' });
 
   return (

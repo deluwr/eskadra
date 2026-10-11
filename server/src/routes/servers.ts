@@ -116,7 +116,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     db.prepare(
       `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, body.name, body.host, body.sshPort, body.role, body.group, target, body.role === 'exit' ? 0 : 1, keys.public.trim(), ctx.seal(keys.private));
+    ).run(id, body.name, body.host, body.sshPort, body.role, body.group, target, 1, keys.public.trim(), ctx.seal(keys.private));
     if (body.mgmtMode === 'tunnel') ctx.updateServer(id, { mgmt_mode: 'tunnel', ...tunnelFields() });
     audit(db, who(req), 'server.create', id, { host: body.host, port: body.sshPort, role: body.role, mgmt: body.mgmtMode, auto: !!body.auth });
     const r = ctx.server(id);

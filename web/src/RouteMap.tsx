@@ -16,6 +16,8 @@ export interface MapExit {
   /** замер: «48 мс · 212 Мбит/с» */
   metric?: string;
   href?: string;
+  /** элемент в строке после подписи (например, кнопка «открыть напрямую») */
+  extra?: ReactNode;
 }
 
 const ROW = 48;
@@ -64,6 +66,7 @@ export function RouteMap({ entry, entryOff, exits, ordered, onToggle, onMove, em
                   {body}
                 </label>
               ) : x.href ? <a className="rm-pick" href={x.href}>{body}</a> : <span className="rm-pick">{body}</span>}
+              {x.extra}
               {ordered && onMove && x.state !== 'off' && (
                 <span className="rm-ord">
                   <button type="button" className="btn ghost icon" disabled={n === 0} onClick={() => onMove(x.id, -1)} aria-label={`${x.name} выше`}>{Icon.up}</button>

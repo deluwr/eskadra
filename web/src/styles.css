@@ -288,3 +288,4 @@ span.rm-pick { cursor: default; }
 .routes { display: flex; flex-direction: column; gap: 22px; padding: 18px 20px 20px; }
 .route-title { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
 .route-title b { color: var(--text); font-size: 14px; font-weight: 600; }
+.rm-direct { color: var(--warn) !important; font-size: 12px; min-height: 28px; padding: 0 8px; flex: none; }

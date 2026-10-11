@@ -894,4 +894,8 @@ export const EN: Record<string, string> = {
   "успешно": "succeeded",
   "{}: не удалось продлить сертификат": "{}: certificate renewal failed",
   "{}: продление сертификатов выключено": "{}: certificate renewal is off",
+  "Открыть прямой доступ к {}? В подписках появится профиль «{} · напрямую», сервер начнёт принимать пользователей напрямую.": "Open direct access to {}? Subscriptions will get a “{} · direct” profile, and the server will accept users directly.",
+  "Прямой доступ к {} выключен: в подписке нет профиля «{} · напрямую»": "Direct access to {} is off: subscriptions have no “{} · direct” profile",
+  "Прямой доступ к {} открыт": "Direct access to {} opened",
+  "только через вход": "entry only",
 };
