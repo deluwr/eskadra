@@ -14,7 +14,7 @@ const toForm = (u: User): Form => ({
 const num = (s: string) => (s.trim() === '' ? null : Number(s));
 
 export function UsersPage() {
-  const { data: users, reload } = usePoll(() => api.get<User[]>('/api/v1/users'), 30_000);
+  const { data: users, reload, setData: setUsers } = usePoll(() => api.get<User[]>('/api/v1/users'), 30_000);
   const { data: st } = usePoll(() => api.get<{ whitelistOn: boolean }>('/api/v1/settings'), null);
   const wlOn = !!st?.whitelistOn;
   const { data: servers } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
@@ -61,7 +61,7 @@ export function UsersPage() {
           </div>
         </section>
         {servers && (sel === 'new' ? <UserCard key="new" user={null} servers={servers} wlOn={wlOn} onSaved={(u) => { void reload(); setSel(u.id); }} onDeleted={() => { setSel(null); void reload(); }} />
-          : user && <UserCard key={user.id} user={user} servers={servers} wlOn={wlOn} onSaved={() => void reload()} onDeleted={() => { setSel(null); void reload(); }} />)}
+          : user && <UserCard key={user.id} user={user} servers={servers} wlOn={wlOn} onSaved={(u) => setUsers((list) => list?.map((x) => (x.id === u.id ? u : x)) ?? list)} onDeleted={() => { setSel(null); void reload(); }} />)}
       </div>
       {groups && <LimitGroups onClose={() => setGroups(false)} />}
     </>
@@ -123,10 +123,13 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
   const save = () => run(async () => {
     // Telegram существующего пользователя меняется привязкой (кнопка «Привязать») — здесь берём сохранённый
     const body = { ...bodyOf(f), tgId: user ? user.tg_id : f.tgId || null };
-    onSaved(user ? await api.put<User>(`/api/v1/users/${user.id}`, body) : await api.post<User>('/api/v1/users', body));
+    const saved = user ? await api.put<User>(`/api/v1/users/${user.id}`, body) : await api.post<User>('/api/v1/users', body);
+    // форма — ровно то, что сохранил сервер (он, например, обрезает пробелы у комментария), иначе «несохранённые изменения» остаются
+    setF(toForm(saved));
+    onSaved(saved);
     toast(user ? 'Изменения сохранены' : `Пользователь ${f.name} создан`);
   });
-  const dirty = !user || JSON.stringify({ ...f, tgId: '' }) !== JSON.stringify({ ...toForm(user), tgId: '' });
+  const dirty = !user || JSON.stringify({ ...f, tgId: '', note: f.note.trim() }) !== JSON.stringify({ ...toForm(user), tgId: '' });
   const loadLinks = () => run(async () => user && setLinks(await api.get(`/api/v1/users/${user.id}/links`)));
   useEffect(() => { if (mode === 'links' && user) void loadLinks(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [mode, user?.id]);
   const rotate = (what: string) => run(async () => { if (!user) return; onSaved(await api.post<User>(`/api/v1/users/${user.id}/rotate`, { what })); if (what === 'links') void loadLinks(); });
