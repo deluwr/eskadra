@@ -33,7 +33,8 @@ function fixture() {
       if (a[0] === 'version') return ok(kitVersion());
       if (a[0] === 'exit-probe') { const x = Object.keys(alive).find((k) => probePort('t', k) === a[1])!; return ok(alive[x] ? `rtt_ms=180\n${Number(a[2]) > 0 ? 'mbps=50\n' : ''}` : 'rtt_ms=fail\nmbps=fail\n'); }
       if (a[0] === 'xray-bo') { xray.override = a[2] === 'clear' ? null : String(a[2]); return ok('ok'); }
-      if (a[0] === 'xray-bi') { const sel = xray.override ?? (alive.pl ? 'to-t-pl' : 'to-t-fi'); return ok(`  - Selecting Override:\n    1   ${xray.override ?? ''}\n  - Selects:\n    1   ${sel}\n`); }
+      // как настоящий Xray «по порядку»: балансировщик видит только первый выход; не отвечает — «Selects» пуст (трафик в fallback)
+      if (a[0] === 'xray-bi') { const sel = xray.override ?? (alive.pl ? 'to-t-pl' : ''); return ok(`  - Selecting Override:\n    1   ${xray.override ?? ''}\n  - Selects:\n${sel ? `    1   ${sel}\n` : ''}`); }
       return ok('');
     },
     must: async () => 'ok',
@@ -72,12 +73,30 @@ test('«Авто» по качеству: выбор назначается вх
   assert.equal(f.xray.override, chosen);
 });
 
-test('рендер входа «по порядку»: веса по порядку выходов и частое наблюдение', async () => {
+test('рендер входа «по порядку»: балансировщик видит первый выход, второй — fallback; частое наблюдение', async () => {
   const f = fixture();
   f.db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, public_key, short_id) VALUES ('ib-r', 't', 'relay', 'relay', 9443, 'tcp', 'active', 'P', 'a')`).run();
   const { Vpn } = await import('./vpn.js');
   const x = new Vpn(f.ctx).renderXray(f.ctx.server('relay')) as any;
   const bal = x.routing.balancers.find((b: any) => b.tag === 'bal-t');
-  assert.deepEqual(bal.strategy.settings.costs.map((c: any) => [c.match, c.value]), [['to-t-pl', 1], ['to-t-fi', 100]]);
+  assert.deepEqual(bal.selector, ['to-t-pl']);
+  assert.equal(bal.fallbackTag, 'to-t-fi');
+  assert.equal(bal.strategy.settings.costs, undefined, 'веса leastLoad множат разброс задержки — порядок по ним скачет');
   assert.equal(x.burstObservatory.pingConfig.interval, '5s');
+});
+
+test('«Авто» по порядку: не отвечают первые два — панель закрепляет третий, вернулся первый — снимает', async () => {
+  const f = fixture();
+  f.db.prepare(`INSERT INTO servers (id, name, host, role, key_pub, key_priv_sealed, sudo_mode) VALUES ('es', 'es', '203.0.113.1', 'exit', 'k', 'x', 'restricted')`).run();
+  f.db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, public_key, short_id) VALUES ('ib-es', 't', 'es', 'direct', 8443, 'tcp', 'active', 'P', 'a')`).run();
+  f.db.prepare(`UPDATE templates SET settings = '{"security":"reality","autoMode":"order","exitOrder":["pl","fi","es"]}' WHERE id = 't'`).run();
+  f.alive.es = true;
+  f.alive.pl = false; f.alive.fi = false;
+  let r = await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.equal(f.xray.override, 'to-t-es');
+  assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-es');
+  f.alive.pl = true;
+  r = await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.equal(f.xray.override, null);
+  assert.deepEqual(r?.switched, { from: 'es', to: 'pl' });
 });

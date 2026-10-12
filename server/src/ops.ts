@@ -427,12 +427,15 @@ export class Ops {
     let actualAfter: string | null = null;
     // по порядку — только «отвечает ли выход» (таймаут = выход недоступен), без замера скорости и порогов
     const order = sp.autoMode === 'order';
+    const tagOf = (exitId: string) => `to-${t.id}-${exitId}`;
+    // по порядку балансировщик видит только первый выход: не выбран он и не закреплён другой — трафик идёт через fallback (второй)
+    const actualOf = (st: BalancerState) => st.override || st.selected || (order ? tagOf((targets[1] ?? targets[0])!.id) : null);
     await this.ctx.onNode(entry, async (n) => {
       await this.ensureKit(entry, n, log);   // проба выходов появилась в nodekit 0.10 — старый nodekit обновляем сам
       // «откуда» — по прошлой проверке: вход переключается сам и раньше, чем панель на него посмотрит
       if (!getSetting<string | null>(this.ctx.db, `auto.actual.${t.id}`, null)) {
         const before = await this.balancerState(n, t.id);
-        if (before) actualBefore = before.override || before.selected;
+        if (before) actualBefore = actualOf(before);
       }
       for (const x of targets) {
         const r = await n.op(['exit-probe', probePort(t.id, x.id), order ? 0 : sp.testMB * 1_000_000], { timeoutMs: order ? 60_000 : 120_000 });
@@ -450,15 +453,15 @@ export class Ops {
       const cur = prev ? results.find((r) => `to-${t.id}-${r.exitId}` === prev) : undefined;
       // по порядку — первый отвечающий выход (вернулся вышестоящий — возвращаемся к нему);
       // по качеству — текущий, пока проходит пороги (без лишних переключений), иначе лучший подходящий; никто — Xray сам
-      // по порядку выбирает сам вход (веса и наблюдение Xray, переключение за секунды) — панель не закрепляет выход,
-      // а только снимает старое закрепление и смотрит, через какой выход реально идёт трафик
-      if (sp.autoMode === 'order') next = null;
+      // по порядку между первым и вторым переключает сам вход (за секунды) — панель не закрепляет выход; только если
+      // не отвечают оба, закрепляет следующий отвечающий по списку (вернулся первый или второй — закрепление снимается)
+      if (order) { const further = !results[0]?.ok && !results[1]?.ok ? results.slice(2).find((r) => r.ok) : undefined; next = further ? tagOf(further.exitId) : null; }
       else next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
       // сверяемся с входом на каждой проверке, а не только при смене: выбор мог сброситься перезапуском Xray
       const st = await this.setOverride(n, t.id, next);
       if (!st) log(`${entry.name}: вход не принял выбор выхода ${next ?? '(по задержке)'} — повторю при следующей проверке`);
       setSetting(this.ctx.db, `auto.override.${t.id}`, next);
-      actualAfter = st ? st.override || st.selected : null;
+      actualAfter = st ? actualOf(st) : null;
       setSetting(this.ctx.db, `auto.actual.${t.id}`, actualAfter);
     });
     setSetting(this.ctx.db, `auto.checked.${t.id}`, new Date().toISOString());

@@ -191,14 +191,16 @@ export class Vpn {
             observeRtt = Math.max(observeRtt, sp.maxRttMs);
             const order = sp.autoMode === 'order';
             if (order) fastObserve = true;
-            balancers.push({
+            balancers.push(order ? {
+              // по порядку: балансировщик видит только первый выход, второй — fallback. Первый жив (хоть одна из двух
+              // последних проверок прошла) — трафик через него; нет — через второй, вернулся — снова через первый, всё
+              // за секунды и без участия панели. Оба не отвечают — панель закрепляет следующий отвечающий (ops.checkExits).
+              // Веса leastLoad для порядка не годятся: Xray умножает на них разброс задержки, а не её саму — выбор скакал
+              tag: `bal-${t.id}`, selector: [`to-${t.id}-${targets[0]!.id}`], fallbackTag: `to-${t.id}-${(targets[1] ?? targets[0])!.id}`,
+              strategy: { type: 'leastLoad', settings: { expected: 1, tolerance: 0.5 } },
+            } : {
               tag: `bal-${t.id}`, selector: [`to-${t.id}-`], fallbackTag: `to-${t.id}-${targets[0]!.id}`,
-              // по порядку порядок держит сам вход: вес выхода растёт в 100 раз с каждой позицией, неотвечающий выход
-              // наблюдение исключает за секунды — трафик уходит на следующий и возвращается без участия панели
-              strategy: { type: 'leastLoad', settings: {
-                expected: 1, tolerance: 0.01,
-                ...(order ? { costs: targets.map((x, i) => ({ regexp: false, match: `to-${t.id}-${x.id}`, value: 100 ** i })) } : { maxRTT: `${sp.maxRttMs}ms` }),
-              } },
+              strategy: { type: 'leastLoad', settings: { expected: 1, tolerance: 0.01, maxRTT: `${sp.maxRttMs}ms` } },
             });
           } else {
             balancers.push({ tag: `bal-${t.id}`, selector: [`to-${t.id}-`], strategy: { type: 'random' } });
