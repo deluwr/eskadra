@@ -368,3 +368,14 @@ span.rm-pick { cursor: default; }
 .dev-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
 .dev { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
 .dev.off { border-style: dashed; }
+
+/* роли: карточки в ряд, матрица прав */
+.role-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; padding: 0 20px 16px; }
+.role { font: inherit; text-align: left; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; cursor: pointer; transition-property: background-color, border-color; transition-duration: 150ms; }
+.role:hover:not(:disabled) { background: var(--surface2); border-color: var(--accent); }
+.role:disabled { cursor: default; }
+.role-scope { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.perm-mx td.c { text-align: center; color: var(--muted); font-weight: 700; }
+.perm-mx td.c.yes { color: var(--ok); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+@media (prefers-reduced-motion: reduce) { .role { transition: none; } }

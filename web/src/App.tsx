@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { api, ApiError, setOtpProvider } from './api';
+import { api, ApiError, setOtpProvider, setMe, type Scope } from './api';
 import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync } from './ui';
 import { OverviewPage } from './pages/Overview';
 import { ServersPage } from './pages/Servers';
@@ -24,7 +24,7 @@ const parseHash = (): Route => {
 type Theme = 'dark' | 'light';
 const readTheme = (): Theme => { try { return localStorage.getItem('eskadra.theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; } };
 
-export interface AuthState { setupNeeded: boolean; loggedIn: boolean; username: string | null; role: string | null; totp: boolean }
+export interface AuthState { setupNeeded: boolean; loggedIn: boolean; username: string | null; role: string | null; roleName: string | null; perms: string[]; scope: Scope | null; owner: boolean; totp: boolean }
 
 export function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -51,7 +51,8 @@ export function App() {
     setConfirmProvider((text) => new Promise<boolean>((resolve) => setConfirmAsk({ text, done: resolve })));
   }, []);
 
-  const refreshAuth = useCallback(() => api.get<AuthState>('/api/v1/auth/state').then(setAuth), []);
+  // права текущего админа — для интерфейса (кнопки, области); проверяет их сервер
+  const refreshAuth = useCallback(() => api.get<AuthState>('/api/v1/auth/state').then((a) => { setMe(a); setAuth(a); }), []);
   // версия и наличие обновления — при входе в панель
   useEffect(() => { if (auth?.loggedIn) api.get<Ver>('/api/v1/version').then(setVer).catch(() => undefined); }, [auth?.loggedIn]);
   useEffect(() => {
@@ -94,7 +95,7 @@ export function App() {
             void api.put('/api/v1/settings/lang', { lang: next }).catch(() => undefined).finally(() => setLang(next));
           }} aria-label="Language / Язык" title="Language / Язык">{getLang() === 'en' ? 'RU' : 'EN'}</button>
           <button className="btn ghost icon" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label="Переключить тему">{theme === 'dark' ? Icon.sun : Icon.moon}</button>
-          <span className="flex who"><span className="tag">{auth.role}</span><span>{auth.username}</span></span>
+          <span className="flex who"><span className="tag">{auth.roleName ?? auth.role}</span><span>{auth.username}</span></span>
           <button className="btn ghost" onClick={logout}>Выйти</button>
         </header>
         <main className="content">

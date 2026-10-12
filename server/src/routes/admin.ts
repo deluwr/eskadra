@@ -20,6 +20,7 @@ import { requestUpdate, updateHelperInstalled, updateStatus } from '../update.js
 import { armRestore, decryptBackup, stageRestore } from '../restorelib.js';
 import { config } from '../config.js';
 import { NOTIFY } from '../botadmin.js';
+import { listRoles, PERM_KEYS, PERMS, type Perm } from '../roles.js';
 import type { SubService } from '../subsvc.js';
 
 async function detectEgressIp(): Promise<string> {
@@ -80,7 +81,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   app.get('/api/v1/groups', async () =>
     db.prepare(`SELECT g.*, (SELECT COUNT(*) FROM servers s WHERE s.group_name = g.name) AS servers FROM groups g ORDER BY g.name`).all());
 
-  app.delete<{ Params: { name: string } }>('/api/v1/groups/:name', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.delete<{ Params: { name: string } }>('/api/v1/groups/:name', { preHandler: guard(ctx, 'ports.groups') }, async (req) => {
     const name = req.params.name;
     if (name === 'default') throw new HttpError(409, 'группу default удалить нельзя');
     if (db.prepare('SELECT 1 FROM servers WHERE group_name = ?').get(name)) throw new HttpError(409, 'в группе есть серверы — сначала перенесите их в другую группу');
@@ -89,7 +90,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     return db.prepare('SELECT * FROM groups ORDER BY name').all();
   });
 
-  app.put('/api/v1/groups', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.put('/api/v1/groups', { preHandler: guard(ctx, 'ports.groups') }, async (req) => {
     const b = z.object({
       name: z.string().trim().min(1).max(32),
       stealth: z.enum(['S0', 'S1', 'S2', 'S3', 'S4']),
@@ -104,12 +105,57 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   });
 
   // ───── права и роли ─────
+  const roleMustExist = (id: string) => { if (id !== 'owner' && !db.prepare('SELECT 1 FROM roles WHERE id = ?').get(id)) throw new HttpError(400, 'нет такой роли'); };
+  const rolesView = () => ({ perms: PERMS, roles: listRoles(db).map((r) => ({ ...r, admins: (db.prepare('SELECT COUNT(*) AS n FROM admins WHERE role = ?').get(r.id) as { n: number }).n })) });
+  const scopeBody = z.object({
+    templates: z.array(z.string()).nullable(), servers: z.array(z.string()).nullable(),
+    modes: z.array(z.enum(['direct', 'via'])).min(1).nullable(), limitGroups: z.array(z.string()).nullable(),
+  });
+  const roleBody = z.object({ name: z.string().trim().min(2).max(32).regex(/^[\p{L}0-9 ._-]+$/u), perms: z.array(z.enum(PERM_KEYS as [Perm, ...Perm[]])), scope: scopeBody });
+
+  app.get('/api/v1/roles', async () => rolesView());
+
+  /** Новая роль со своими правами и областью; id — из имени (латиница) или случайный. */
+  app.post('/api/v1/roles', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const b = roleBody.parse(req.body);
+    if (b.name.toLowerCase() === 'owner' || db.prepare('SELECT 1 FROM roles WHERE lower(name) = lower(?)').get(b.name)) throw new HttpError(409, 'роль с таким именем уже есть');
+    const slug = b.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const id = slug && slug !== 'owner' && !db.prepare('SELECT 1 FROM roles WHERE id = ?').get(slug) ? slug : 'role-' + randomBytes(3).toString('hex');
+    db.prepare('INSERT INTO roles (id, name, perms, scope) VALUES (?, ?, ?, ?)').run(id, b.name, JSON.stringify(b.perms), JSON.stringify(b.scope));
+    audit(db, who(req), 'role.create', id, b);
+    return rolesView();
+  });
+
+  /** Изменить права и область роли; owner не меняется. Встроенные admin и operator переименовать нельзя. */
+  app.put<{ Params: { id: string } }>('/api/v1/roles/:id', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const r = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id) as { id: string; builtin: number; name: string } | undefined;
+    if (!r) throw new HttpError(404, req.params.id === 'owner' ? 'права owner не настраиваются' : 'нет такой роли');
+    const b = roleBody.parse(req.body);
+    const name = r.builtin ? r.name : b.name;
+    if (name !== r.name && db.prepare('SELECT 1 FROM roles WHERE lower(name) = lower(?) AND id != ?').get(name, r.id)) throw new HttpError(409, 'роль с таким именем уже есть');
+    db.prepare('UPDATE roles SET name = ?, perms = ?, scope = ? WHERE id = ?').run(name, JSON.stringify(b.perms), JSON.stringify(b.scope), r.id);
+    audit(db, who(req), 'role.update', r.id, b);
+    return rolesView();
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/v1/roles/:id', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const r = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id) as { id: string; builtin: number } | undefined;
+    if (!r) throw new HttpError(404, 'нет такой роли');
+    if (r.builtin) throw new HttpError(409, 'встроенную роль удалить нельзя — можно изменить её права');
+    const n = (db.prepare('SELECT COUNT(*) AS n FROM admins WHERE role = ?').get(r.id) as { n: number }).n;
+    if (n) throw new HttpError(409, `роль назначена администраторам (${n}) — сначала смените им роль`);
+    db.prepare('DELETE FROM roles WHERE id = ?').run(r.id);
+    audit(db, who(req), 'role.delete', r.id);
+    return rolesView();
+  });
+
   const adminView = () => db.prepare('SELECT id, username, role, totp_enabled, tg_id, backup_recipient, last_login_at, created_at FROM admins ORDER BY id').all();
 
   app.get('/api/v1/admins', async () => adminView());
 
   app.post('/api/v1/admins', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
-    const b = z.object({ username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/), role: z.enum(['owner', 'admin', 'operator']) }).parse(req.body);
+    const b = z.object({ username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/), role: z.string() }).parse(req.body);
+    roleMustExist(b.role);
     if (db.prepare('SELECT 1 FROM admins WHERE username = ?').get(b.username)) throw new HttpError(409, 'такой логин уже есть');
     const password = randomBytes(15).toString('base64url');
     db.prepare('INSERT INTO admins (username, pw_hash, role) VALUES (?, ?, ?)').run(b.username, hashPassword(password), b.role);
@@ -119,9 +165,10 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
 
   app.patch<{ Params: { id: string } }>('/api/v1/admins/:id', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
     const id = Number(req.params.id);
-    const b = z.object({ role: z.enum(['owner', 'admin', 'operator']).optional(), tgId: z.string().regex(/^\d{3,20}$/).nullable().optional(), backupRecipient: z.boolean().optional() }).parse(req.body);
+    const b = z.object({ role: z.string().optional(), tgId: z.string().regex(/^\d{3,20}$/).nullable().optional(), backupRecipient: z.boolean().optional() }).parse(req.body);
     const target = db.prepare('SELECT id, role FROM admins WHERE id = ?').get(id) as { id: number; role: string } | undefined;
     if (!target) throw new HttpError(404, 'нет такого администратора');
+    if (b.role) roleMustExist(b.role);
     if (b.role && target.role === 'owner' && b.role !== 'owner') {
       const owners = db.prepare(`SELECT COUNT(*) AS n FROM admins WHERE role = 'owner'`).get() as { n: number };
       if (owners.n < 2) throw new HttpError(409, 'нельзя убрать последнего owner');
@@ -149,7 +196,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     try { return await deps.bot.bindLink('admin', String(id)); } catch (e) { throw new HttpError(409, (e as Error).message); }
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/users/:id/tg-link', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/users/:id/tg-link', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(req.params.id)) throw new HttpError(404, 'нет такого пользователя');
     try { return await deps.bot.bindLink('user', req.params.id); } catch (e) { throw new HttpError(409, (e as Error).message); }
   });
@@ -241,7 +288,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   });
 
   /** Язык панели: интерфейс у каждого свой (в браузере), а имена профилей в подписках — по этой настройке. */
-  app.put('/api/v1/settings/lang', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.put('/api/v1/settings/lang', { preHandler: guard(ctx, 'settings.edit') }, async (req) => {
     const { lang } = z.object({ lang: z.enum(['ru', 'en']) }).parse(req.body);
     setSetting(db, 'ui.lang', lang);
     audit(db, who(req), 'settings.lang', undefined, { lang });
@@ -250,7 +297,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
 
   app.post('/api/v1/settings/executor/detect', async () => ({ ip: await detectEgressIp() }));
 
-  app.put('/api/v1/settings/executor', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.put('/api/v1/settings/executor', { preHandler: guard(ctx, 'settings.edit', { otp: true }) }, async (req) => {
     const { ips } = z.object({ ips: z.array(z.string().trim().refine((s) => isIP(s) !== 0, 'invalid IP')).min(1).max(16) }).parse(req.body);
     const uniq = [...new Set(ips)];
     setSetting(db, 'executor.ips', uniq);
@@ -258,7 +305,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     return { ips: uniq };
   });
 
-  app.put('/api/v1/settings/sub', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.put('/api/v1/settings/sub', { preHandler: guard(ctx, 'settings.edit') }, async (req) => {
     const b = z.object({
       host: z.string().trim().max(253).regex(/^[a-zA-Z0-9.:-]*$/),
       port: z.number().int().min(1024).max(65535).nullable(),
@@ -277,7 +324,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     return { host: b.host, port, scheme: b.scheme };
   });
 
-  app.put('/api/v1/settings/general', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.put('/api/v1/settings/general', { preHandler: guard(ctx, 'settings.edit') }, async (req) => {
     const b = z.object({ failThresholdMin: z.number().int().min(10).max(1440), knockTtlHours: z.number().int().min(1).max(168) }).parse(req.body);
     setSetting(db, 'check.failThresholdMin', b.failThresholdMin);
     setSetting(db, 'knock.ttlHours', b.knockTtlHours);
@@ -288,7 +335,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   // ───── прокси бота: если api.telegram.org с главного сервера недоступен ─────
   app.get('/api/v1/settings/bot-proxy', async () => ({ ...botProxySetting(ctx), options: botProxyOptions(ctx) }));
 
-  app.put('/api/v1/settings/bot-proxy', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.put('/api/v1/settings/bot-proxy', { preHandler: guard(ctx, 'settings.edit') }, async (req) => {
     const b = z.object({ enabled: z.boolean(), serverId: z.string().default(''), templateId: z.string().default('') }).parse(req.body);
     if (b.enabled && !botProxyOptions(ctx).some((o) => o.serverId === b.serverId && o.templateId === b.templateId))
       throw new HttpError(400, 'выберите конфигурацию: активную, на протоколе Xray, на сервере флота');
@@ -305,7 +352,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     return { ...st, probe: await deps.bot.probe() };
   });
 
-  app.post('/api/v1/settings/bot-proxy/test', { preHandler: guard(ctx, 'admin') }, async () => deps.bot.probe());
+  app.post('/api/v1/settings/bot-proxy/test', { preHandler: guard(ctx, 'settings.edit') }, async () => deps.bot.probe());
 
   app.put('/api/v1/settings/bot', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
     const { token } = z.object({ token: z.string().regex(/^\d+:[A-Za-z0-9_-]{30,}$/, 'неверный формат токена').nullable() }).parse(req.body);
@@ -330,7 +377,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
 
   // ───── бэкапы ─────
   app.get('/api/v1/backups', async () => db.prepare('SELECT * FROM backups ORDER BY id DESC LIMIT 50').all());
-  app.post('/api/v1/backups/run', { preHandler: guard(ctx, 'admin') }, async (req) => deps.backups.run('manual', who(req)));
+  app.post('/api/v1/backups/run', { preHandler: guard(ctx, 'backups.run') }, async (req) => deps.backups.run('manual', who(req)));
 
   // Восстановление из бэкапа в панели: загрузить копию и приватный ключ age → проверить → подтвердить → перезапуск
   app.post('/api/v1/backups/restore/check', { preHandler: guard(ctx, 'owner', { otp: true }), bodyLimit: 400 * 1024 * 1024 }, async (req) => {

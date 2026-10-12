@@ -10,6 +10,7 @@ import { attentionOf } from './attention.js';
 import { audit } from './lib/audit.js';
 import { Ops } from './ops.js';
 import { AdminFlows, cb, esc, helpText, subMessage, type AdminRow, type Button, type Kb, type NotifyCat, type Screen } from './botadmin.js';
+import { can as canRole, roleOf } from './roles.js';
 import { json } from './vpn.js';
 
 const PART = 45 * 1024 * 1024;
@@ -233,7 +234,7 @@ export class Bot {
     if (admin) {
       void this.adminCommands(chatId);
       if (await this.flows.onText(chatId, admin, text, messageId)) return;
-      if (cmd === '/help') return this.show(chatId, { text: helpText('admin', admin.role), kb: [[cb('Меню', 'm')]] });
+      if (cmd === '/help') return this.show(chatId, { text: helpText('admin', admin.role, roleOf(this.ctx.db, admin.role)), kb: [[cb('Меню', 'm')]] });
       if (!user || !['/sub', '/links'].includes(cmd)) return this.show(chatId, this.adminMenu());
     }
     if (cmd === '/help') return this.send(chatId, helpText('user'));
@@ -275,7 +276,7 @@ export class Bot {
     }
     if (admin) {
       if (await this.flows.onButton(chatId, mid, admin, act, args, toast)) return;
-      const canBackup = admin.role !== 'operator';
+      const canBackup = canRole(roleOf(this.ctx.db, admin.role), 'backups.run');
       switch (act) {
         case 'm': await toast(); return this.show(chatId, this.adminMenu(), mid);
         case 'att': await toast(); return this.show(chatId, this.attentionScreen(), mid);

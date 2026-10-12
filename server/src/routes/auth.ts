@@ -8,6 +8,7 @@ import type { Ctx, Role } from '../ctx.js';
 import { config } from '../config.js';
 import { hashPassword, randomToken, sha256hex, verifyPassword } from '../lib/crypto.js';
 import { verifyTotp } from '../lib/totp.js';
+import { roleOf } from '../roles.js';
 import { audit } from '../lib/audit.js';
 
 export const COOKIE = 'fleet_session';
@@ -61,7 +62,10 @@ export async function authRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.get('/api/v1/auth/state', async (req) => {
     const admin = sessionAdmin(ctx, req);
-    return { setupNeeded: !hasAdmins(), loggedIn: !!admin, username: admin?.username ?? null, role: admin?.role ?? null, totp: admin?.totp ?? false };
+    const role = admin ? roleOf(db, admin.role) : null;
+    // права и область — чтобы интерфейс показывал только доступное; проверяет всё равно сервер
+    return { setupNeeded: !hasAdmins(), loggedIn: !!admin, username: admin?.username ?? null, role: admin?.role ?? null, roleName: role?.name ?? null,
+      perms: role?.perms ?? [], scope: role?.scope ?? null, owner: role?.owner ?? false, totp: admin?.totp ?? false };
   });
 
   // Первичная настройка owner: пока нет ни одного админа — с loopback или по одноразовому токену установщика.

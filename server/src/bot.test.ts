@@ -99,7 +99,7 @@ test('bot: operator добавляет пользователя по Telegram ID
   await f.press('77', `udelok:${u.id}`);
   assert.ok(f.db.prepare('SELECT 1 FROM users WHERE id = ?').get(u.id));
   await f.b.onMessage('77', '77', '/addserver');
-  assert.match(String(f.last().body.text), /admin и owner/);
+  assert.match(String(f.last().body.text), /не разрешено подключать серверы/);
   // уведомления: выключил «Связь с серверами» — сообщение о падении не приходит
   await f.press('77', 'nt:down');
   f.calls.length = 0;

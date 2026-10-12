@@ -40,7 +40,7 @@ export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
     };
   });
 
-  app.put('/api/v1/cores/pin', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.put('/api/v1/cores/pin', { preHandler: guard(ctx, 'cores.manage') }, async (req) => {
     const b = z.object({ core: coreParam, version: versionBody.shape.version }).parse(req.body);
     const pins = getSetting<Record<string, string>>(db, 'cores.pin', {});
     pins[b.core] = b.version.replace(/^v/, '');
@@ -49,7 +49,7 @@ export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
     return pins;
   });
 
-  app.post<{ Params: { id: string; core: string } }>('/api/v1/servers/:id/cores/:core/update', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string; core: string } }>('/api/v1/servers/:id/cores/:core/update', { preHandler: guard(ctx, 'cores.manage') }, async (req) => {
     const s = ctx.server(req.params.id);
     const core = coreParam.parse(req.params.core);
     const { version } = versionBody.parse(req.body ?? {});
@@ -73,7 +73,7 @@ export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** Ручное включение/выключение ядра — например, проверить, что «Авто» уходит на другой выход. */
-  app.post<{ Params: { id: string; core: string } }>('/api/v1/servers/:id/cores/:core/power', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string; core: string } }>('/api/v1/servers/:id/cores/:core/power', { preHandler: guard(ctx, 'cores.manage') }, async (req) => {
     const s = ctx.server(req.params.id);
     const core = coreParam.parse(req.params.core);
     const { on } = z.object({ on: z.boolean() }).parse(req.body);
@@ -85,7 +85,7 @@ export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
     } catch (e) { throw new HttpError(500, (e as Error).message); }
   });
 
-  app.post<{ Params: { id: string; core: string } }>('/api/v1/servers/:id/cores/:core/rollback', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string; core: string } }>('/api/v1/servers/:id/cores/:core/rollback', { preHandler: guard(ctx, 'cores.manage') }, async (req) => {
     const s = ctx.server(req.params.id);
     const core = coreParam.parse(req.params.core);
     const job = startJob(ctx, s.id, `core.rollback:${core}`);
@@ -102,7 +102,7 @@ export async function coreRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** Обновление ядра по флоту волнами (§11.3): canary → остальные по одному; первая ошибка останавливает выкат. */
-  app.post<{ Params: { core: string } }>('/api/v1/cores/:core/rollout', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { core: string } }>('/api/v1/cores/:core/rollout', { preHandler: guard(ctx, 'cores.manage') }, async (req) => {
     const core = coreParam.parse(req.params.core);
     const b = versionBody.extend({ serverIds: z.array(z.string()).optional() }).parse(req.body ?? {});
     if (running.has(core)) throw new HttpError(409, `обновление ${core} уже идёт`);

@@ -107,3 +107,14 @@ export const ago = (s: string | null | undefined) => {
   if (d < 86400) return `${Math.round(d / 3600)} ч назад`;
   return `${Math.round(d / 86400)} дн назад`;
 };
+
+// ───── права текущего админа (роль и её область) ─────
+
+/** Область роли: null — все; иначе только эти (roles.ts на сервере). */
+export interface Scope { templates: string[] | null; servers: string[] | null; modes: Array<'direct' | 'via'> | null; limitGroups: string[] | null }
+let me: { owner: boolean; perms: string[]; scope: Scope | null } = { owner: false, perms: [], scope: null };
+export const setMe = (m: { owner: boolean; perms: string[]; scope: Scope | null }) => { me = m; };
+/** Разрешено ли текущему админу (для интерфейса — сервер проверяет сам). */
+export const can = (perm: string) => me.owner || me.perms.includes(perm);
+/** В области ли роли: kind — конфигурации, серверы, режимы или группы лимитов. */
+export const inScope = (kind: keyof Scope, id: string) => me.owner || !me.scope?.[kind] || (me.scope[kind] as string[]).includes(id);

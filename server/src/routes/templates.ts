@@ -6,6 +6,7 @@ import { Ctx, guard, HttpError, type TemplateRow } from '../ctx.js';
 import { audit } from '../lib/audit.js';
 import { Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
+import { checkTemplateServers, roleOf, ScopeError } from '../roles.js';
 import { PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
 
 const settingsBody = z.object({
@@ -104,10 +105,16 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
         if (!/^[0-9.]+$|:/.test(ctx.server(id).host)) throw new HttpError(400, `сертификат на IP: у сервера ${ctx.server(id).name} адрес — домен; выберите «свой домен»`);
   };
 
+  const scoped = (f: () => void) => { try { f(); } catch (e) { if (e instanceof ScopeError) throw new HttpError(403, e.message); throw e; } };
+
   app.get('/api/v1/templates', async () => vpn.templates().map((t) => templateView(vpn, t)));
 
-  app.post('/api/v1/templates', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post('/api/v1/templates', { preHandler: guard(ctx, 'configs.edit') }, async (req) => {
     const b = body.parse(req.body);
+    const role = roleOf(db, req.admin!.role);
+    // роль с ограниченным списком конфигураций новую не создаёт: она оказалась бы вне её области
+    if (!role.owner && role.scope.templates) throw new HttpError(403, `роль «${role.name}» работает только со своими конфигурациями — новую создаёт owner или роль без ограничения`);
+    scoped(() => checkTemplateServers(role, [], [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]));
     validate(b);
     const id = 'tpl-' + randomBytes(3).toString('hex');
     db.prepare(
@@ -120,12 +127,13 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     return templateView(vpn, vpn.template(id)!);
   });
 
-  app.put<{ Params: { id: string } }>('/api/v1/templates/:id', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.put<{ Params: { id: string } }>('/api/v1/templates/:id', { preHandler: guard(ctx, 'configs.edit') }, async (req) => {
     const t = vpn.template(req.params.id);
     if (!t) throw new HttpError(404, 'шаблон не найден');
     const b = body.parse(req.body);
     validate(b);
     if (b.protocol !== specOf(t).protocol) throw new HttpError(400, 'протокол шаблона менять нельзя — создайте новый');
+    scoped(() => checkTemplateServers(roleOf(db, req.admin!.role), [...json<string[]>(t.node_ids, []), ...(t.entry_id ? [t.entry_id] : [])], [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]));
     db.prepare(
       `UPDATE templates SET name = ?, port = ?, sni = ?, fingerprint = ?, ech = ?, node_ids = ?, entry_id = ?, entry_port = ?, settings = ?,
        revision = revision + 1, updated_at = datetime('now') WHERE id = ?`,
@@ -151,7 +159,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     return { rows, selected: id(ov), actual: id(act), checkedAt: getSetting<string>(db, `auto.checked.${t.id}`, '') || null };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/templates/:id/health/check', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/templates/:id/health/check', { preHandler: guard(ctx, 'configs.rollout') }, async (req) => {
     const t = vpn.template(req.params.id);
     if (!t) throw new HttpError(404, 'шаблон не найден');
     const lines: string[] = [];
@@ -177,7 +185,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     return { server: sid, config: text };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/templates/:id/rollout', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/templates/:id/rollout', { preHandler: guard(ctx, 'configs.rollout') }, async (req) => {
     const t = vpn.template(req.params.id);
     if (!t) throw new HttpError(404, 'шаблон не найден');
     if (running.has(t.id)) throw new HttpError(409, 'выкат этого шаблона уже идёт');
@@ -214,7 +222,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get<{ Params: { jobId: string } }>('/api/v1/jobs/:jobId', async (req) =>
     db.prepare('SELECT * FROM jobs WHERE id = ?').get(Number(req.params.jobId)));
 
-  app.delete<{ Params: { id: string } }>('/api/v1/templates/:id', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.delete<{ Params: { id: string } }>('/api/v1/templates/:id', { preHandler: guard(ctx, 'configs.delete') }, async (req) => {
     const t = vpn.template(req.params.id);
     if (!t) throw new HttpError(404, 'шаблон не найден');
     const job = startJob(ctx, null, `remove:${t.name}`);

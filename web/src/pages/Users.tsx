@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, fmtBytes, fmtTime, type Server, type User } from '../api';
+import { api, can, fmtBytes, fmtTime, inScope, type Server, type User } from '../api';
 import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll, ask, Info, QrButton, Addr } from '../ui';
 
 interface Form {
@@ -30,7 +30,7 @@ export function UsersPage() {
     <>
       <div className="page-head">
         <div><h1>Пользователи</h1><p>Лимиты, режимы подключения, подписки и ссылки</p></div>
-        <div className="flex"><button className="btn" onClick={() => setGroups(true)}>Группы лимитов</button><button className="btn pri" onClick={() => setSel('new')}>Новый пользователь</button></div>
+        <div className="flex">{can('users.limits') && <button className="btn" onClick={() => setGroups(true)}>Группы лимитов</button>}{can('users.edit') && <button className="btn pri" onClick={() => setSel('new')}>Новый пользователь</button>}</div>
       </div>
       <SubServiceCard />
       <section className="card">
@@ -162,7 +162,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
           <section className="ublock stack">
             <h3>Ограничения</h3>
             <div className="grid g3">
-              <label className="fld">Группа лимитов<select className="inp" value={f.limitGroup} onChange={(e) => setF({ ...f, limitGroup: e.target.value })}>{groups?.map((x) => <option key={x.name}>{x.name}</option>)}</select></label>
+              <label className="fld">Группа лимитов<select className="inp" value={f.limitGroup} onChange={(e) => setF({ ...f, limitGroup: e.target.value })}>{groups?.filter((x) => inScope('limitGroups', x.name) || x.name === user?.limit_group).map((x) => <option key={x.name}>{x.name}</option>)}</select></label>
               <label className="fld">Трафик в месяц, ГБ<input className="inp mono" value={f.trafficLimitGb} onChange={(e) => setF({ ...f, trafficLimitGb: e.target.value })} placeholder={g?.traffic_gb ? `из группы: ${g.traffic_gb}` : '∞'} /></label>
               <label className="fld">Действует до<input className="inp mono" type="date" value={f.expireAt} onChange={(e) => setF({ ...f, expireAt: e.target.value })} /></label>
               <label className="fld">Устройств одновременно<input className="inp mono" value={f.deviceLimit} onChange={(e) => setF({ ...f, deviceLimit: e.target.value })} placeholder={g?.devices ? `из группы: ${g.devices}` : '∞'} /></label>
@@ -190,17 +190,20 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
           <section className="ublock stack">
             <h3>Что попадёт в подписку</h3>
             <div className="flex" style={{ gap: 18 }}>
-              <label className="cb"><input type="checkbox" checked={f.modes.includes('via')} onChange={() => toggleMode('via')} />Через Relay (вход)</label>
-              <label className="cb"><input type="checkbox" checked={f.modes.includes('direct')} onChange={() => toggleMode('direct')} />Напрямую к серверу</label>
+              <label className="cb"><input type="checkbox" checked={f.modes.includes('via')} disabled={!inScope('modes', 'via')} onChange={() => toggleMode('via')} />Через Relay (вход)</label>
+              <label className="cb"><input type="checkbox" checked={f.modes.includes('direct')} disabled={!inScope('modes', 'direct')} onChange={() => toggleMode('direct')} />Напрямую к серверу</label>
+              {(!inScope('modes', 'via') || !inScope('modes', 'direct')) && <span className="k">режим вне вашей роли не меняется</span>}
             </div>
             <span className="k">Конфигурации <Info>Отмеченные конфигурации дают пользователю свои профили; у снятой — ни одного. Профили зависят ещё и от режимов выше.</Info></span>
             {configs.length ? (
               <ul className="cfg-pick">
                 {configs.map((c) => {
-                  const on = !f.templateIds || f.templateIds.includes(c.id);
+                  const mine = inScope('templates', c.id);
+                  // вне области роли: у существующего пользователя — как было, новому не выдаётся
+                  const on = (!f.templateIds || f.templateIds.includes(c.id)) && (mine || !!user);
                   return (
                     <li key={c.id} className={on ? '' : 'off'}>
-                      <label className="cb"><input type="checkbox" checked={on} onChange={() => toggleTpl(c.id)} /><b>{c.name}</b></label>
+                      <label className="cb"><input type="checkbox" checked={on} disabled={!mine} onChange={() => toggleTpl(c.id)} /><b>{c.name}</b>{!mine && <span className="k"> · вне вашей роли</span>}</label>
                       {user && (c.profiles.length
                         ? <span className="cfg-profiles">{c.profiles.map((p) => <span key={p} className="tag">{p}</span>)}</span>
                         : <span className="k">профилей нет: проверьте режимы и выкат конфигурации</span>)}
@@ -253,7 +256,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
         <button className="btn pri" disabled={busy || !f.name || !f.modes.length || !dirty} onClick={() => void save()}>{user ? 'Сохранить' : 'Создать пользователя'}</button>
         {user && dirty && <><span className="dirty"><span className="dot" />Есть несохранённые изменения</span><button className="btn ghost sm" onClick={() => setF(toForm(user))}>Отменить</button></>}
         <span className="spacer" />
-        {user && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Удалить ${user.name}? Его ссылки и подписка перестанут работать.`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); toast(`${user.name} удалён`); onDeleted(); }); }}>Удалить</button>}
+        {user && can('users.delete') && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Удалить ${user.name}? Его ссылки и подписка перестанут работать.`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); toast(`${user.name} удалён`); onDeleted(); }); }}>Удалить</button>}
       </div>
     </Modal>
   );

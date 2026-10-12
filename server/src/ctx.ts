@@ -4,8 +4,10 @@ import { getSetting } from './db.js';
 import type { Sealer } from './lib/crypto.js';
 import { verifyTotp } from './lib/totp.js';
 import { withNodeLock, withSession, type ExecResult, type SshSession, type SshTarget } from './ssh/executor.js';
+import { can, inScope, PERMS, roleOf, type Perm } from './roles.js';
 
-export type Role = 'owner' | 'admin' | 'operator';
+/** id роли: owner, admin, operator или своя (roles.ts) */
+export type Role = string;
 
 export interface ServerRow {
   id: string; name: string; host: string; ssh_port: number; ssh_user: string; role: string; status: string;
@@ -166,23 +168,27 @@ export class NodeSession {
   }
 }
 
-const RANK: Record<Role, number> = { operator: 1, admin: 2, owner: 3 };
-
 declare module 'fastify' {
   interface FastifyRequest {
-    admin?: { id: number; username: string; role: Role; totp: boolean; totpSecret: string | null; console?: boolean };
+    admin?: { id: number; username: string; role: string; totp: boolean; totpSecret: string | null; console?: boolean };
   }
 }
 
 /**
- * Проверка роли и, для чувствительных операций, кода 2FA (заголовок X-Fleet-OTP).
+ * Проверка права роли (roles.ts) и, для чувствительных операций, кода 2FA (заголовок X-Fleet-OTP).
+ * Маршрут конкретного сервера или конфигурации (/servers/:id, /templates/:id) — ещё и в пределах области роли.
  * Если у админа 2FA не включена, операция разрешена, но UI показывает предупреждение (§14.3).
  */
-export function guard(ctx: Ctx, min: Role, opts: { otp?: boolean } = {}) {
+export function guard(ctx: Ctx, need: Perm | 'owner', opts: { otp?: boolean } = {}) {
   return async (req: FastifyRequest, reply: FastifyReply) => {
     const a = req.admin;
     if (!a) return reply.code(401).send({ error: 'unauthorized' });
-    if (RANK[a.role] < RANK[min]) return reply.code(403).send({ error: `нужна роль ${min} или выше` });
+    const role = roleOf(ctx.db, a.role);
+    if (!can(role, need)) return reply.code(403).send({ error: need === 'owner' ? 'нужна роль owner' : `у роли «${role.name}» нет права: ${PERMS[need]}` });
+    const id = (req.params as { id?: string } | undefined)?.id;
+    const url = req.routeOptions.url ?? '';
+    if (id && /\/api\/v1\/servers\/:id/.test(url) && !inScope(role.scope.servers, id)) return reply.code(403).send({ error: `сервер вне области роли «${role.name}»` });
+    if (id && /\/api\/v1\/templates\/:id/.test(url) && !inScope(role.scope.templates, id)) return reply.code(403).send({ error: `конфигурация вне области роли «${role.name}»` });
     // консольная сессия создаётся root-ом на самом сервере (eskadra) — код 2FA там не спрашиваем
     if (opts.otp && a.totp && !a.console) {
       const code = String(req.headers['x-fleet-otp'] ?? '');

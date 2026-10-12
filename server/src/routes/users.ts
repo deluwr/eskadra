@@ -9,6 +9,7 @@ import { randomToken } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { effectiveLimits, json, period, Vpn } from '../vpn.js';
 import { pushAllowedIp, revokeAllowedIp } from '../access.js';
+import { roleOf, ScopeError, scopeUserBody, type RoleInfo } from '../roles.js';
 
 export const userBody = z.object({
   name: z.string().trim().min(1).max(48).regex(/^[\p{L}0-9 ._-]+$/u),
@@ -36,9 +37,15 @@ export function subBase(ctx: Ctx): string | null {
   return `${scheme}://${host.includes(':') ? `[${host}]` : host}:${port}`;
 }
 
-/** Создать (id = null) или изменить пользователя — панель и бот. */
-export function saveUser(ctx: Ctx, id: string | null, b: z.infer<typeof userBody>): string {
+/**
+ * Создать (id = null) или изменить пользователя — панель и бот. role — кто сохраняет: конфигурации, серверы,
+ * режимы и группа лимитов приводятся к области роли (roles.ts), выданное вне области остаётся как было.
+ */
+export function saveUser(ctx: Ctx, id: string | null, input: z.infer<typeof userBody>, role: RoleInfo = roleOf(ctx.db, 'owner')): string {
   const { db } = ctx;
+  const prev = id ? (db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined) ?? null : null;
+  let b: z.infer<typeof userBody>;
+  try { b = scopeUserBody(db, role, prev, input); } catch (e) { if (e instanceof ScopeError) throw new HttpError(403, e.message); throw e; }
   if (b.nodeIds) for (const n of b.nodeIds) ctx.server(n);
   if (!db.prepare('SELECT 1 FROM limit_groups WHERE name = ?').get(b.limitGroup)) throw new HttpError(400, 'нет такой группы лимитов');
   if (b.templateIds) for (const t of b.templateIds) if (!db.prepare('SELECT 1 FROM templates WHERE id = ?').get(t)) throw new HttpError(400, 'нет такой конфигурации');
@@ -93,31 +100,31 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     };
   };
 
-  const save = (id: string | null, b: z.infer<typeof userBody>) => saveUser(ctx, id, b);
+  const roleOfReq = (req: { admin?: { role: string } }) => roleOf(db, req.admin!.role);
 
   app.get('/api/v1/users', async () => vpn.users().map(view));
 
   app.get<{ Params: { id: string } }>('/api/v1/users/:id', async (req) => view(getUser(req.params.id)));
 
-  app.post('/api/v1/users', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post('/api/v1/users', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     const b = userBody.parse(req.body);
     if (db.prepare('SELECT 1 FROM users WHERE name = ?').get(b.name)) throw new HttpError(409, 'пользователь с таким именем уже есть');
-    const id = save(null, b);
+    const id = saveUser(ctx, null, b, roleOfReq(req));
     vpn.markDirty();
     audit(db, req.admin!.username, 'user.create', id, { name: b.name });
     return view(getUser(id));
   });
 
-  app.put<{ Params: { id: string } }>('/api/v1/users/:id', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.put<{ Params: { id: string } }>('/api/v1/users/:id', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     const u = getUser(req.params.id);
     const b = userBody.parse(req.body);
-    save(u.id, b);
+    saveUser(ctx, u.id, b, roleOfReq(req));
     vpn.markDirty();
     audit(db, req.admin!.username, 'user.update', u.id, b);
     return view(getUser(u.id));
   });
 
-  app.delete<{ Params: { id: string } }>('/api/v1/users/:id', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.delete<{ Params: { id: string } }>('/api/v1/users/:id', { preHandler: guard(ctx, 'users.delete') }, async (req) => {
     const u = getUser(req.params.id);
     db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
     vpn.markDirty();
@@ -131,7 +138,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     return vpn.profiles(u).map((p) => ({ key: p.key, name: p.name, mode: p.mode, uri: vpn.link(u, p) }));
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/users/:id/rotate', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/users/:id/rotate', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     const u = getUser(req.params.id);
     const { what } = z.object({ what: z.enum(['sub', 'links', 'knock']) }).parse(req.body);
     if (what === 'sub') db.prepare('UPDATE users SET sub_token = ? WHERE id = ?').run(randomToken(18), u.id);
@@ -141,7 +148,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     return view(getUser(u.id));
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/users/:id/allowed-ips', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/users/:id/allowed-ips', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     const u = getUser(req.params.id);
     const b = z.object({ cidr: z.string(), ttlHours: z.number().min(1).max(720).default(12) }).parse(req.body);
     const ip = b.cidr.split('/')[0]!;
@@ -151,7 +158,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     return view(getUser(u.id));
   });
 
-  app.delete<{ Params: { id: string; ipId: string } }>('/api/v1/users/:id/allowed-ips/:ipId', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.delete<{ Params: { id: string; ipId: string } }>('/api/v1/users/:id/allowed-ips/:ipId', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     const u = getUser(req.params.id);
     await revokeAllowedIp(ctx, u, Number(req.params.ipId));
     audit(db, req.admin!.username, 'user.revoke_ip', u.id, { id: req.params.ipId });
@@ -160,7 +167,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
 
   // группы лимитов
   app.get('/api/v1/limit-groups', async () => db.prepare('SELECT * FROM limit_groups ORDER BY name').all());
-  app.put('/api/v1/limit-groups', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.put('/api/v1/limit-groups', { preHandler: guard(ctx, 'users.limits') }, async (req) => {
     const b = z.object({ name: z.string().trim().min(1).max(32), trafficGb: z.number().min(0).nullable(), days: z.number().int().min(1).nullable(), devices: z.number().int().min(0).nullable() }).parse(req.body);
     db.prepare(`INSERT INTO limit_groups (name, traffic_gb, days, devices) VALUES (?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET traffic_gb = excluded.traffic_gb, days = excluded.days, devices = excluded.devices`).run(b.name, b.trafficGb, b.days, b.devices);

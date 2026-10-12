@@ -290,6 +290,18 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (user_id, ip)
   );
   `,
+  `
+  CREATE TABLE roles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    builtin INTEGER NOT NULL DEFAULT 0,
+    perms TEXT NOT NULL DEFAULT '[]',
+    scope TEXT NOT NULL DEFAULT '{}'
+  );
+  INSERT INTO roles (id, name, builtin, perms) VALUES
+    ('admin', 'admin', 1, '["users.edit","users.delete","users.limits","configs.edit","configs.rollout","configs.delete","servers.manage","servers.protect","cores.manage","ports.groups","backups.run","settings.edit"]'),
+    ('operator', 'operator', 1, '["users.edit","configs.edit","configs.rollout"]');
+  `,
 ];
 
 export type Db = DatabaseSync;

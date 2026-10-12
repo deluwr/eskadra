@@ -6,7 +6,8 @@ import { config } from '../config.js';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import ssh2 from 'ssh2';
-import { Ctx, coreMode, expectedPanelIps, guard, HttpError, type Role, type ServerRow } from '../ctx.js';
+import { Ctx, coreMode, expectedPanelIps, guard, HttpError, type ServerRow } from '../ctx.js';
+import { can, roleOf } from '../roles.js';
 import { randomToken, sha256hex } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { credsFields, credsOf, newTunnel } from '../mgmt.js';
@@ -96,8 +97,6 @@ const patchBody = z.object({
   ]).nullable().optional(),
 });
 
-const RANK: Record<Role, number> = { operator: 1, admin: 2, owner: 3 };
-
 /**
  * Новый сервер (панель и бот): ключ панели, запись, канал управления. С одноразовым доступом (auth) панель
  * сразу настраивает узел сама (jobId задачи); без него — ручной сниппет.
@@ -127,8 +126,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   const who = (req: { admin?: { username: string } }) => req.admin!.username;
 
   /** Сниппет под канал узла. В режиме туннеля в нём ключ REALITY узла — поэтому только для admin и выше. */
-  async function snippetFor(r: ServerRow, role?: Role): Promise<string | null> {
-    if (r.mgmt_mode === 'tunnel' && role && RANK[role] < RANK.admin) return null;
+  async function snippetFor(r: ServerRow, role?: string): Promise<string | null> {
+    if (r.mgmt_mode === 'tunnel' && role && !can(roleOf(db, role), 'servers.manage')) return null;
     return snippetOf(ctx, r);
   }
 
@@ -140,7 +139,10 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.get('/api/v1/servers', async () => ctx.servers().map((r) => publicView(ctx, r)));
 
-  app.post('/api/v1/servers', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post('/api/v1/servers', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
+    const role = roleOf(db, req.admin!.role);
+    // роль, ограниченная списком серверов, новые не подключает: новый оказался бы вне её области
+    if (!role.owner && role.scope.servers) throw new HttpError(403, `роль «${role.name}» работает только со своими серверами — новый подключает owner или роль без ограничения`);
     const body = createBody.parse(req.body);
     const { id, jobId } = createServer(ctx, body, who(req));
     const r = ctx.server(id);
@@ -215,7 +217,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get<{ Params: { id: string; jobId: string } }>('/api/v1/servers/:id/jobs/:jobId', async (req) =>
     db.prepare('SELECT * FROM jobs WHERE id = ? AND server_id = ?').get(Number(req.params.jobId), req.params.id));
 
-  app.patch<{ Params: { id: string } }>('/api/v1/servers/:id', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.patch<{ Params: { id: string } }>('/api/v1/servers/:id', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
     const r = ctx.server(req.params.id);
     const b = patchBody.parse(req.body);
     if (b.group) db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(b.group);
@@ -247,13 +249,13 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   // ───── подключение (шаги 2–5 runbook) ─────
 
   /** Автоподключение: с одноразовым доступом — целиком; без него — продолжить с места остановки (сниппет выполнен вручную). */
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/onboard', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/onboard', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
     const r = ctx.server(req.params.id);
     const b = onboardBody.parse(req.body ?? {});
     return { jobId: startOnboarding(ctx, r.id, who(req), b.auth) };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/host-key/fetch', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/host-key/fetch', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
     const r = ctx.server(req.params.id);
     const t = ctx.target(r);
     const hk = await fetchHostKey(t.host, t.port, 10_000, t);
@@ -261,7 +263,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { fingerprint: hk.fp, algo: hk.algo, pinned: r.host_key_fp };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/host-key/trust', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/host-key/trust', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
     const r = ctx.server(req.params.id);
     const { fingerprint } = z.object({ fingerprint: z.string() }).parse(req.body);
     if (!r.host_key_pending_fp || r.host_key_pending_fp !== fingerprint.trim())
@@ -296,7 +298,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return parseHostStat(r.id, raw);
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/restart', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/restart', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
     const r = ctx.server(req.params.id);
     const { what } = z.object({ what: z.enum(['cores', 'host']) }).parse(req.body);
     requireKit(r);
@@ -307,7 +309,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   // TLS-сертификаты узла: проверить сроки или продлить сейчас (узел продлевает и сам, по таймеру)
-  app.post<{ Params: { id: string; act: string } }>('/api/v1/servers/:id/certs/:act', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post<{ Params: { id: string; act: string } }>('/api/v1/servers/:id/certs/:act', { preHandler: guard(ctx, 'configs.rollout') }, async (req) => {
     const r = ctx.server(req.params.id);
     if (!['check', 'renew'].includes(req.params.act)) throw new HttpError(404, 'нет такого действия');
     if (r.sudo_mode !== 'restricted') throw new HttpError(409, 'сервер ещё не настроен');
@@ -317,7 +319,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** Подбор сайтов маскировки REALITY: проверка кандидатов с узла (и, по желанию, соседей узла по /24). */
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/sni-scan', { preHandler: guard(ctx, 'operator') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/sni-scan', { preHandler: guard(ctx, 'configs.edit') }, async (req) => {
     const r = ctx.server(req.params.id);
     const b = z.object({ neighbors: z.boolean().default(false), domains: z.array(z.string().max(253)).max(60).optional() }).parse(req.body ?? {});
     const res = await scanSni(ctx, r, b);
@@ -348,7 +350,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** Шаг 3: nodekit + сужение sudo + строгий режим ключа. */
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/nodekit/install', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/nodekit/install', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
     const r = ctx.server(req.params.id);
     const job = startJob(ctx, r.id, 'nodekit.install');
     try {
@@ -383,7 +385,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
 
   // ───── ядра: свой Xray или Xray уже установленного 3x-ui ─────
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/core-mode', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/core-mode', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
     const r = ctx.server(req.params.id);
     const { mode } = z.object({ mode: z.enum(['auto', 'own', 'xui']) }).parse(req.body);
     if (db.prepare(`SELECT 1 FROM inbounds WHERE server_id = ? AND state IN ('active','deploying')`).get(r.id))
@@ -394,7 +396,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** Логин и пароль 3x-ui: проверяются входом на самом узле и хранятся зашифрованными. */
-  app.put<{ Params: { id: string } }>('/api/v1/servers/:id/xui', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.put<{ Params: { id: string } }>('/api/v1/servers/:id/xui', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const b = z.union([
@@ -417,7 +419,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** «Удалить или дополнить»: удалить 3x-ui с узла (база сохраняется в baseline узла). */
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/xui-remove', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/xui-remove', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     if (db.prepare(`SELECT 1 FROM inbounds WHERE server_id = ? AND state IN ('active','deploying')`).get(r.id) && coreMode(r) === 'xui')
@@ -432,7 +434,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** Остановить стороннее ядро (xray/sing-box как отдельный сервис), чтобы Эскадра могла поставить своё. */
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/foreign-stop', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/foreign-stop', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const { name } = z.object({ name: z.enum(['xray', 'sing-box', 'v2ray', 'hysteria-server']) }).parse(req.body);
@@ -467,7 +469,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return res;
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/admin-ips', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/admin-ips', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     const b = z.object({ ip: z.string().refine((s) => isIP(s) !== 0, 'неверный IP'), remove: z.boolean().default(false) }).parse(req.body);
     const list = new Set(json<string[]>(r.admin_ips, []));
@@ -478,7 +480,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { adminIps: [...list] };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/relax', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/relax', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const { duration } = z.object({ duration: z.enum(['30m', '1h', '2h', 'off']) }).parse(req.body);
@@ -487,7 +489,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { output: out.trim() };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/emergency-open', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/emergency-open', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const out = await ctx.onNode(r, (n) => n.must(['fw-open']));
@@ -496,7 +498,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { output: out.trim() };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/ufw-disable', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/ufw-disable', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const out = await ctx.onNode(r, (n) => n.must(['ufw-disable']));
@@ -506,7 +508,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** C3: SSH только по ключам — под таймером отката 180 с, затем подтверждение. */
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/key-only', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/key-only', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const { action } = z.object({ action: z.enum(['apply', 'confirm', 'rollback']) }).parse(req.body);
@@ -549,7 +551,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { items, passedAt: r.checklist_passed_at, done: items.filter((i) => i.done).length, total: items.length };
   }
 
-  app.put<{ Params: { id: string } }>('/api/v1/servers/:id/checklist', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.put<{ Params: { id: string } }>('/api/v1/servers/:id/checklist', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     const marks = z.record(z.string(), z.boolean()).parse(req.body);
     const clean = Object.fromEntries(Object.entries(marks).filter(([k]) => CHECKLIST.some((c) => c.id === k && !c.auto)));
@@ -577,7 +579,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return plan;
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/shadow', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/shadow', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const plan = renderPlan(ctx, r, levelOf(r, req.body));
@@ -611,7 +613,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { minutes, top: [...hits.entries()].sort((a, b) => b[1] - a[1]).slice(0, 50).map(([k, n]) => ({ flow: k, count: n })) };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/apply', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/apply', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     if (!r.checklist_passed_at) throw new HttpError(409, 'сначала пройдите ручной чек-лист');
@@ -632,7 +634,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { pendingUntil: until, newSessionOk: ping?.stdout.trim() === 'pong', level: plan.summary.level };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/confirm', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/confirm', { preHandler: guard(ctx, 'servers.protect', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const out = await ctx.onNode(r, (n) => n.op(['fw-confirm']));
@@ -646,7 +648,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { ok: true, level };
   });
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/rollback', { preHandler: guard(ctx, 'admin') }, async (req) => {
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/rollback', { preHandler: guard(ctx, 'servers.protect') }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
     const out = await ctx.onNode(r, (n) => n.op(['fw-rollback']));
@@ -655,7 +657,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return { output: out.stdout.trim() };
   });
 
-  app.delete<{ Params: { id: string } }>('/api/v1/servers/:id', { preHandler: guard(ctx, 'admin', { otp: true }) }, async (req) => {
+  app.delete<{ Params: { id: string } }>('/api/v1/servers/:id', { preHandler: guard(ctx, 'servers.manage', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     db.prepare('DELETE FROM servers WHERE id = ?').run(r.id);
     audit(db, who(req), 'server.delete', r.id, { host: r.host });

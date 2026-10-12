@@ -10,19 +10,18 @@ import { Ops, coresOff } from './ops.js';
 import { effectiveLimits, json, period, Vpn } from './vpn.js';
 import { saveUser, subBase, userBody } from './routes/users.js';
 import { createBody, createServer } from './routes/servers.js';
+import { can as canRole, inScope, roleOf, type Perm, type RoleInfo } from './roles.js';
 import { botProxyOptions } from './botproxy.js';
 
 export type Button = { text: string; callback_data?: string; url?: string };
 export type Kb = Button[][];
 export interface Screen { text: string; kb?: Kb }
-export interface AdminRow { id: number; username: string; role: 'owner' | 'admin' | 'operator' }
+export interface AdminRow { id: number; username: string; role: string }
 
 export const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 export const cb = (text: string, data: string): Button => ({ text, callback_data: data });
 const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} ГБ`;
 const back = (data: string, text = '‹ Назад'): Button => cb(text, data);
-const RANK = { operator: 1, admin: 2, owner: 3 } as const;
-const can = (a: AdminRow, min: keyof typeof RANK) => RANK[a.role] >= RANK[min];
 
 /** Категории уведомлений админам: каждый выбирает свои (в боте и в панели). */
 export const NOTIFY: Record<string, string> = {
@@ -51,7 +50,7 @@ export interface BotIO {
   drop(chatId: string, messageId: number): Promise<void>;
 }
 
-export function helpText(role: 'admin' | 'user' | null, adminRole?: AdminRow['role']): string {
+export function helpText(role: 'admin' | 'user' | null, adminRole?: string, info?: RoleInfo): string {
   if (role === 'user') return [
     '<b>Что умеет бот</b>',
     '/menu — ваш доступ: статус, трафик, срок',
@@ -62,22 +61,31 @@ export function helpText(role: 'admin' | 'user' | null, adminRole?: AdminRow['ro
     'Подписку добавьте в приложение (Hiddify, v2rayNG, Happ, Streisand): оно само обновит список серверов. Ссылку подписки никому не пересылайте.',
   ].join('\n');
   const lines = [
-    `<b>Команды</b> · роль ${adminRole}`,
+    `<b>Команды</b> · роль ${info?.name ?? adminRole}`,
     '/menu — состояние флота и всё управление кнопками',
     '/users — пользователи: подписка, ссылки, серверы, включить/отключить',
     '/adduser — добавить пользователя (можно сразу: <code>/adduser имя 123456789</code>, число — его Telegram ID)',
     '/servers — серверы: состояние, защита, ядра',
   ];
-  if (adminRole !== 'operator') lines.push('/addserver — подключить сервер по логину и паролю или ключу');
+  if (!info || canRole(info, 'servers.manage')) lines.push('/addserver — подключить сервер по логину и паролю или ключу');
   lines.push('/notify — какие уведомления присылать', '/cancel — прервать ввод', '/help — эта справка', '',
     'Пользователь, которого вы добавили с Telegram ID, пишет боту /sub и получает свою подписку.',
-    adminRole === 'operator' ? 'Роль operator: удалять пользователей и менять серверы может admin или owner.' : 'Пароли серверов бот удаляет из чата сразу после чтения и нигде не хранит.');
+    info && !canRole(info, 'servers.manage') ? `Роль ${info.name}: что ей разрешено, настраивает owner в панели («Права и роли»).` : 'Пароли серверов бот удаляет из чата сразу после чтения и нигде не хранит.');
   return lines.join('\n');
 }
 
 export class AdminFlows {
   private flows = new Map<string, Flow>();
   constructor(private readonly ctx: Ctx, private readonly io: BotIO) {}
+
+  /** Право роли админа (roles.ts) и, если указано, сервер или конфигурация в её области. */
+  private may(a: AdminRow, p: Perm, where: { server?: string; template?: string; newServer?: boolean } = {}): boolean {
+    const r = roleOf(this.ctx.db, a.role);
+    if (!canRole(r, p)) return false;
+    if (where.server && !inScope(r.scope.servers, where.server)) return false;
+    if (where.template && !inScope(r.scope.templates, where.template)) return false;
+    return !(where.newServer && !r.owner && r.scope.servers);
+  }
 
   private vpn() { return new Vpn(this.ctx); }
   private user(id: string) { return this.ctx.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined; }
@@ -93,6 +101,7 @@ export class AdminFlows {
     if (cmd === '/servers') { this.flows.delete(chatId); await this.io.show(chatId, this.serversScreen(a)); return true; }
     if (cmd === '/notify') { await this.io.show(chatId, this.notifyScreen(a)); return true; }
     if (cmd === '/adduser') {
+      if (!this.may(a, 'users.edit')) { await this.io.send(chatId, 'Роли не разрешено добавлять пользователей.'); return true; }
       const [name, tg] = rest;
       if (name) return this.addUser(chatId, a, name, tg ?? '').then(() => true);
       this.flows.set(chatId, { kind: 'user', step: 'name', data: {}, exp: Date.now() + 15 * 60_000 });
@@ -114,7 +123,7 @@ export class AdminFlows {
   async onButton(chatId: string, mid: number, a: AdminRow, act: string, args: string[], toast: (t?: string) => Promise<unknown>): Promise<boolean> {
     const db = this.ctx.db;
     switch (act) {
-      case 'h': await toast(); await this.io.show(chatId, { text: helpText('admin', a.role), kb: [[back('m', '‹ Меню')]] }, mid); return true;
+      case 'h': await toast(); await this.io.show(chatId, { text: helpText('admin', a.role, roleOf(this.ctx.db, a.role)), kb: [[back('m', '‹ Меню')]] }, mid); return true;
       case 'nt': {
         if (args[0]) {
           const off = new Set(json<string[]>((db.prepare('SELECT notify_off FROM admins WHERE id = ?').get(a.id) as { notify_off: string }).notify_off, []));
@@ -128,6 +137,7 @@ export class AdminFlows {
       // пользователи
       case 'ul': await toast(); await this.io.show(chatId, this.usersScreen(Number(args[0] ?? 0)), mid); return true;
       case 'uadd':
+        if (!this.may(a, 'users.edit')) return toast('Роли не разрешено добавлять пользователей').then(() => true);
         await toast();
         this.flows.set(chatId, { kind: 'user', step: 'name', data: {}, exp: Date.now() + 15 * 60_000 });
         await this.io.send(chatId, 'Имя нового пользователя (латиница, цифры, дефис):\n/cancel — отмена');
@@ -158,6 +168,7 @@ export class AdminFlows {
       case 'utpl': case 'usrv': {
         const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
         if (act === 'utpl' && args[1]) {
+          if (!this.may(a, 'users.edit', { template: args[1] })) return toast('Эта конфигурация вне вашей роли').then(() => true);
           const all = this.vpn().templates().map((t) => t.id);
           const cur = json<string[] | null>(u.template_ids, null) ?? all;
           const next = cur.includes(args[1]) ? cur.filter((x) => x !== args[1]) : [...cur, args[1]];
@@ -172,6 +183,7 @@ export class AdminFlows {
       }
       case 'uon': {
         const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
+        if (!this.may(a, 'users.edit')) return toast('Роли не разрешено менять пользователей').then(() => true);
         const st = u.status === 'active' ? 'disabled' : 'active';
         db.prepare(`UPDATE users SET status = ?, disabled_reason = ? WHERE id = ?`).run(st, st === 'disabled' ? 'отключён в боте' : null, u.id);
         this.vpn().markDirty();
@@ -182,13 +194,13 @@ export class AdminFlows {
       }
       case 'udel': {
         const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
-        if (!can(a, 'admin')) return toast('Удаляют admin и owner').then(() => true);
+        if (!this.may(a, 'users.delete')) return toast('Роли не разрешено удалять пользователей').then(() => true);
         await toast();
         await this.io.show(chatId, { text: `Удалить <b>${esc(u.name)}</b>? Его подписка и ссылки перестанут работать.`, kb: [[cb('Удалить', `udelok:${u.id}`), back(`uc:${u.id}`, 'Отмена')]] }, mid);
         return true;
       }
       case 'udelok': {
-        const u = this.user(args[0]!); if (!u || !can(a, 'admin')) return toast('Нет доступа').then(() => true);
+        const u = this.user(args[0]!); if (!u || !this.may(a, 'users.delete')) return toast('Нет доступа').then(() => true);
         db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
         this.vpn().markDirty();
         audit(db, a.username, 'user.delete', u.id, { name: u.name, via: 'bot' });
@@ -201,7 +213,7 @@ export class AdminFlows {
       case 'sc': { const s = this.server(args[0]!); if (!s) return toast('Сервер не найден').then(() => true); await toast(); await this.io.show(chatId, this.serverCard(a, s), mid); return true; }
       case 'sp': {
         const s = this.server(args[0]!); const lvl = args[1]!;
-        if (!s || !can(a, 'admin') || !LEVEL[lvl]) return toast('Нет доступа').then(() => true);
+        if (!s || !this.may(a, 'servers.protect', { server: s.id }) || !LEVEL[lvl]) return toast('Нет доступа').then(() => true);
         this.ctx.updateServer(s.id, { protection_target: lvl });
         audit(db, a.username, 'server.update', s.id, { protectionTarget: lvl, via: 'bot' });
         await toast(`Защита: ${LEVEL[lvl]}`);
@@ -218,7 +230,7 @@ export class AdminFlows {
       }
       case 'scp': {
         const s = this.server(args[0]!); const core = args[1] as 'xray' | 'sing-box' | 'telemt'; const on = args[2] === '1';
-        if (!s || !can(a, 'admin') || !['xray', 'sing-box', 'telemt'].includes(core)) return toast('Нет доступа').then(() => true);
+        if (!s || !this.may(a, 'cores.manage', { server: s.id }) || !['xray', 'sing-box', 'telemt'].includes(core)) return toast('Нет доступа').then(() => true);
         if (!on && args[3] !== 'ok') {
           await toast();
           await this.io.show(chatId, { text: `Остановить ${core} на <b>${esc(s.name)}</b>? Пользователи этого сервера потеряют связь, пока ядро не запустят снова.`, kb: [[cb('Остановить', `scp:${s.id}:${core}:0:ok`), back(`sco:${s.id}`, 'Отмена')]] }, mid);
@@ -283,7 +295,7 @@ export class AdminFlows {
       kb: [
         [cb('Подписка', `usub:${u.id}`), cb('Отдельные ссылки', `ulnk:${u.id}`)],
         [cb('Конфигурации', `utpl:${u.id}`), cb(u.status === 'active' ? 'Отключить' : 'Включить', `uon:${u.id}`)],
-        [...(can(a, 'admin') ? [cb('Удалить', `udel:${u.id}`)] : []), back('ul:0')],
+        [...(this.may(a, 'users.delete') ? [cb('Удалить', `udel:${u.id}`)] : []), back('ul:0')],
       ],
     };
   }
@@ -323,7 +335,8 @@ export class AdminFlows {
     }
     if (this.ctx.db.prepare('SELECT 1 FROM users WHERE name = ?').get(parsed.data.name)) { await this.io.send(chatId, 'Пользователь с таким именем уже есть.'); return; }
     if (parsed.data.tgId && this.ctx.db.prepare('SELECT 1 FROM users WHERE tg_id = ?').get(parsed.data.tgId)) { await this.io.send(chatId, 'Этот Telegram ID уже привязан к другому пользователю.'); return; }
-    const id = saveUser(this.ctx, null, parsed.data);
+    let id: string;
+    try { id = saveUser(this.ctx, null, parsed.data, roleOf(this.ctx.db, a.role)); } catch (e) { await this.io.send(chatId, `Не получилось: ${esc((e as Error).message)}`); return; }
     this.vpn().markDirty();
     audit(this.ctx.db, a.username, 'user.create', id, { name: parsed.data.name, via: 'bot' });
     const card = this.userCard(a, this.user(id)!);
@@ -339,7 +352,7 @@ export class AdminFlows {
     const servers = this.ctx.servers();
     return {
       text: servers.length ? '<b>Серверы</b>' : 'Серверов пока нет.',
-      kb: [...servers.map((s) => [cb(`${s.fail_since ? '🔴' : s.last_seen_at ? '🟢' : '⚪️'} ${s.name}`, `sc:${s.id}`)]), [...(can(a, 'admin') ? [cb('➕ Подключить', 'sadd')] : []), back('m', '‹ Меню')]],
+      kb: [...servers.map((s) => [cb(`${s.fail_since ? '🔴' : s.last_seen_at ? '🟢' : '⚪️'} ${s.name}`, `sc:${s.id}`)]), [...(this.may(a, 'servers.manage', { newServer: true }) ? [cb('➕ Подключить', 'sadd')] : []), back('m', '‹ Меню')]],
     };
   }
 
@@ -353,7 +366,7 @@ export class AdminFlows {
       ...(coresOff(this.ctx, s.id).length ? [`⏸ остановлено вручную: ${coresOff(this.ctx, s.id).join(', ')}`] : []),
     ];
     const kb: Kb = [];
-    if (can(a, 'admin')) kb.push((['P1', 'P2', 'P3'] as const).map((l) => cb(`${s.protection_target === l ? '● ' : ''}${LEVEL[l]}`, `sp:${s.id}:${l}`)));
+    if (this.may(a, 'servers.protect', { server: s.id })) kb.push((['P1', 'P2', 'P3'] as const).map((l) => cb(`${s.protection_target === l ? '● ' : ''}${LEVEL[l]}`, `sp:${s.id}:${l}`)));
     if (s.sudo_mode === 'restricted') kb.push([cb('Ядра', `sco:${s.id}`)]);
     kb.push([back('sl')]);
     return { text: lines.join('\n'), kb };
@@ -365,12 +378,12 @@ export class AdminFlows {
     const cores = Object.entries(st);
     return {
       text: cores.length ? `<b>Ядра ${esc(s.name)}</b>\n${cores.map(([c, v]) => `${v.active ? '🟢' : v.manualOff ? '⏸' : '🔴'} ${c} — ${v.active ? 'работает' : v.manualOff ? 'остановлен вручную' : 'не работает'}`).join('\n')}` : 'Ядра не установлены.',
-      kb: [...(can(a, 'admin') ? cores.map(([c, v]) => [cb(v.active ? `Остановить ${c}` : `Запустить ${c}`, `scp:${s.id}:${c}:${v.active ? 0 : 1}`)]) : []), [back(`sc:${s.id}`)]],
+      kb: [...(this.may(a, 'cores.manage', { server: s.id }) ? cores.map(([c, v]) => [cb(v.active ? `Остановить ${c}` : `Запустить ${c}`, `scp:${s.id}:${c}:${v.active ? 0 : 1}`)]) : []), [back(`sc:${s.id}`)]],
     };
   }
 
   private async startServerFlow(chatId: string, a: AdminRow) {
-    if (!can(a, 'admin')) { await this.io.send(chatId, 'Подключают серверы admin и owner.'); return; }
+    if (!this.may(a, 'servers.manage', { newServer: true })) { await this.io.send(chatId, 'Роли не разрешено подключать серверы.'); return; }
     this.flows.set(chatId, { kind: 'server', step: 'name', data: {}, exp: Date.now() + 20 * 60_000 });
     await this.io.send(chatId, 'Подключение сервера. Имя (например, de-1):\n/cancel — отмена');
   }

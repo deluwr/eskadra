@@ -2,35 +2,20 @@ import { useState } from 'react';
 import { api, fmtTime } from '../api';
 import { CopyButton, ErrorBox, Switch, Tag, TgBind, toast, useAsync, usePoll, ask, Addr } from '../ui';
 import type { AuthState } from '../App';
+import { RolesCard, type RolesData } from './Roles';
 
 interface Admin { id: number; username: string; role: string; totp_enabled: number; tg_id: string | null; backup_recipient: number; last_login_at: string | null }
-
-const MATRIX: Array<[string, Array<[string, string, string, string]>]> = [
-  ['Серверы', [
-    ['Просмотр, проверка связи, preflight', '✓', '✓', '✓'],
-    ['Подключение и удаление серверов', '✓', '✓', '—'],
-    ['Смена уровня защиты, план и применение firewall', '2FA', '2FA', '—'],
-    ['Временно открыть SSH, аварийно отключить блокировки', '2FA', '2FA', '—'],
-    ['Включить терминал (shell) на сервере', '2FA', '—', '—'],
-  ]],
-  ['Конфигурации и пользователи', [
-    ['Редактировать шаблоны, выкат', '✓', '✓', '✓'],
-    ['Создавать пользователей, менять лимиты', '✓', '✓', '✓'],
-  ]],
-  ['Бэкапы и безопасность', [
-    ['Запустить бэкап, посмотреть историю', '✓', '✓', '—'],
-    ['Сменить получателей и ключи age, токен бота', '2FA', '—', '—'],
-    ['Управлять ролями и администраторами', '2FA', '—', '—'],
-  ]],
-];
-const cell = (v: string) => <td style={{ textAlign: 'center', color: v === '✓' ? 'var(--ok)' : v === '—' ? 'var(--muted)' : 'var(--warn)', fontWeight: 700, fontSize: v === '2FA' ? 12 : 14 }}>{v}</td>;
 
 export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () => void }) {
   const { data: admins, setData, reload } = usePoll(() => api.get<Admin[]>('/api/v1/admins'), null);
   const { busy, error, run } = useAsync();
   const [nu, setNu] = useState({ username: '', role: 'admin' });
   const [created, setCreated] = useState<{ username: string; password: string } | null>(null);
-  const isOwner = auth.role === 'owner';
+  const isOwner = auth.owner;
+  // роли для выбора: встроенные и свои (owner — первым)
+  const { data: rolesData, reload: reloadRoles } = usePoll(() => api.get<RolesData>('/api/v1/roles'), null);
+  const roleOpts = rolesData?.roles ?? [];
+  const roleName = (id: string) => roleOpts.find((r) => r.id === id)?.name ?? id;
   const patch = (id: number, body: object, done?: string) => run(async () => { setData(await api.patch<Admin[]>(`/api/v1/admins/${id}`, body)); if (done) toast(done); });
 
   return (
@@ -46,7 +31,7 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
             <tbody>{admins?.map((a) => (
               <tr key={a.id}>
                 <td><b>{a.username}</b>{a.username === auth.username && <> <span className="k">(вы)</span></>}</td>
-                <td>{isOwner ? <select className="inp" style={{ width: 'auto' }} value={a.role} aria-label={`Роль ${a.username}`} onChange={(e) => void patch(a.id, { role: e.target.value }, `${a.username}: роль ${e.target.value} сохранена`)}>{['owner', 'admin', 'operator'].map((r) => <option key={r}>{r}</option>)}</select> : <Tag kind="acc">{a.role}</Tag>}</td>
+                <td>{isOwner ? <select className="inp" style={{ width: 'auto' }} value={a.role} aria-label={`Роль ${a.username}`} onChange={(e) => void patch(a.id, { role: e.target.value }, `${a.username}: роль ${roleName(e.target.value)} сохранена`)}>{roleOpts.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select> : <Tag kind="acc">{roleName(a.role)}</Tag>}</td>
                 <td>{a.totp_enabled ? <Tag kind="ok">TOTP</Tag> : <Tag kind="warn">не включена</Tag>}</td>
                 <td><TgBind tgId={a.tg_id} canEdit={isOwner || a.username === auth.username} linkUrl={`/api/v1/admins/${a.id}/tg-link`} onChanged={() => void reload()}
                   onSaveId={(v) => (isOwner ? api.patch(`/api/v1/admins/${a.id}`, { tgId: v }) : api.patch('/api/v1/me', { tgId: v }))} /></td>
@@ -60,22 +45,14 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
         {isOwner && (
           <form className="row" onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = await api.post<{ username: string; password: string; admins: Admin[] }>('/api/v1/admins', nu); setCreated(r); setData(r.admins); setNu({ username: '', role: 'admin' }); toast(`${r.username} приглашён`); }); }}>
             <div className="flex"><input className="inp" style={{ width: 200 }} value={nu.username} onChange={(e) => setNu({ ...nu, username: e.target.value })} placeholder="логин" aria-label="Логин" />
-              <select className="inp" style={{ width: 'auto' }} value={nu.role} onChange={(e) => setNu({ ...nu, role: e.target.value })} aria-label="Роль"><option value="owner">owner</option><option value="admin">admin</option><option value="operator">operator</option></select>
+              <select className="inp" style={{ width: 'auto' }} value={nu.role} onChange={(e) => setNu({ ...nu, role: e.target.value })} aria-label="Роль">{roleOpts.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select>
               <button className="btn pri" disabled={busy || nu.username.length < 3}>Пригласить</button>{nu.role === 'owner' && <span className="small" style={{ color: 'var(--warn)' }}>owner получает все права, включая управление администраторами и бэкапами</span>}</div>
             {created && <div className="alert warn">Временный пароль для <code>{created.username}</code>: <code>{created.password}</code> — покажется один раз. <CopyButton text={created.password} /></div>}
           </form>
         )}
         <div style={{ padding: '0 20px 14px' }}><ErrorBox error={error} /></div>
       </section>
-      <section className="card">
-        <div className="card-head"><h2>Матрица прав</h2><span className="k"><span style={{ color: 'var(--ok)' }}>✓</span> разрешено · <span style={{ color: 'var(--warn)' }}>2FA</span> с кодом, если 2FA включена</span></div>
-        <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
-          <table>
-            <thead><tr><th>Действие</th><th style={{ textAlign: 'center' }}>owner</th><th style={{ textAlign: 'center' }}>admin</th><th style={{ textAlign: 'center' }}>operator</th></tr></thead>
-            <tbody>{MATRIX.flatMap(([g, rows]) => [<tr key={g} className="grp"><td colSpan={4}>{g}</td></tr>, ...rows.map((r) => <tr key={r[0]}><td>{r[0]}</td>{cell(r[1])}{cell(r[2])}{cell(r[3])}</tr>)])}</tbody>
-          </table>
-        </div>
-      </section>
+      <RolesCard isOwner={isOwner} onChange={() => { void reload(); void reloadRoles(); }} />
     </>
   );
 }
