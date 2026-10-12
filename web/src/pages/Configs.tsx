@@ -40,7 +40,7 @@ const AUTO_HINT: Record<AutoMode, string> = {
 interface Settings {
   security: Security; transport: Transport; flow: string; path: string; host: string; serviceName: string; xhttpMode: string;
   alpn: string[]; certMode: CertMode; domain: string; domains: Record<string, string>; ssMethod: string; hy2Obfs: string; mtDomain: string; sniffing: boolean;
-  autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number;
+  autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number;
 }
 
 interface Draft {
@@ -53,7 +53,7 @@ const defaults = (p: Protocol): Settings => ({
   security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
-  autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5,
+  autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0,
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -226,7 +226,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
-      autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5,
+      autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0,
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -391,6 +391,16 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
                 <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при проверке скорости. 5 МБ раз в 15 минут — около 0,5 ГБ трафика в сутки на выход.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
               </div>
             )}
+            {st.autoMode === 'order' && (
+              <div className="grid g4">
+                <label className="fld"><span>Скорость не меньше, Мбит/с <Info>0 — не мерить: только доступность. Иначе выход медленнее порога пропускается — трафик идёт на следующий по порядку; тот тоже медленный — на следующий за ним. Медленный снова считается быстрым от порога +10% — без дёрганья на границе. Медленные все — обычный порядок по доступности.</Info></span>
+                  <input className="inp mono" inputMode="decimal" value={st.orderMinMbps} onChange={(e) => setSt({ orderMinMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} placeholder="0" /></label>
+                {st.orderMinMbps > 0 && <>
+                  <label className="fld">Мерить скорость каждые, мин<input className="inp mono" inputMode="numeric" value={st.checkMin} onChange={(e) => setSt({ checkMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                  <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при замере. 5 МБ раз в 15 минут — около 0,5 ГБ трафика в сутки на выход.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                </>}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -469,7 +479,7 @@ function JobLog({ id, onDone }: { id: number; onDone: () => void }) {
   );
 }
 
-interface Health { rows: Array<{ exit_id: string; name: string; host: string; exit_ip: string | null; exit_loc: string | null; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null }
+interface Health { rows: Array<{ exit_id: string; name: string; host: string; exit_ip: string | null; exit_loc: string | null; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null; slow: string[]; speedAt: string | null }
 
 /** Страна по коду ISO на языке интерфейса (FI → «Финляндия»); флаги-эмодзи Windows не рисует. */
 const countryOf = (cc: string) => { try { return new Intl.DisplayNames([getLang()], { type: 'region' }).of(cc) ?? cc; } catch { return cc; } };
@@ -478,13 +488,14 @@ const countryOf = (cc: string) => { try { return new Intl.DisplayNames([getLang(
 function ExitHealth({ t }: { t: Template }) {
   const { data, reload } = usePoll(() => api.get<Health>(`/api/v1/templates/${t.id}/health`), 60_000, [t.id]);
   const { busy, error, run } = useAsync();
-  const sp = t.spec as { maxRttMs?: number; minMbps?: number; autoMode?: string };
+  const sp = t.spec as { maxRttMs?: number; minMbps?: number; autoMode?: string; orderMinMbps?: number; checkMin?: number };
+  const thr = sp.orderMinMbps ?? 0;
   const order = sp.autoMode === 'order';
   const lead = data?.actual ?? data?.selected ?? null;   // реальный выбор входа; если его ещё не видели — назначенный
   return (
     <section className="card">
       <div className="card-head">
-        <h2>Выходы «Авто» <Info>{order ? 'По порядку: трафик идёт через первый отвечающий выход. Переключает сам вход за ~10 секунд; таблица обновляется раз в минуту.' : `Пороги: задержка не больше ${sp.maxRttMs ?? 100} мс, скорость не меньше ${sp.minMbps ?? 10} Мбит/с. Выбранный выход меняется, только когда текущий перестаёт проходить пороги.`}</Info></h2>
+        <h2>Выходы «Авто» <Info>{order ? <>По порядку: трафик идёт через первый отвечающий выход. Переключает сам вход за ~10 секунд; таблица обновляется раз в минуту.{thr > 0 && <> {`Выход медленнее ${thr} Мбит/с пропускается; скорость меряется раз в ${sp.checkMin ?? 15} мин и по кнопке «Проверить сейчас».`}</>}</> : `Пороги: задержка не больше ${sp.maxRttMs ?? 100} мс, скорость не меньше ${sp.minMbps ?? 10} Мбит/с. Выбранный выход меняется, только когда текущий перестаёт проходить пороги.`}</Info></h2>
         <span className="flex">
           {data?.checkedAt && <span className="k">проверено {ago(data.checkedAt)}</span>}
           <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/templates/${t.id}/health/check`); await reload(); })}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>
@@ -492,15 +503,15 @@ function ExitHealth({ t }: { t: Template }) {
       </div>
       <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
         <table>
-          <thead><tr><th>Выход</th><th>Выходит в интернет <Info>Адрес, с которым сайты видят трафик этого выхода, и страна по базе Cloudflare. Пользователи «напрямую» к этому серверу выходят с того же адреса. Клиент (Тропа, Hiddify и др.) может показывать другую страну — у него своя база GeoIP; сверяйте по адресу.</Info></th><th>Задержка</th>{!order && <th>Скорость</th>}<th>Состояние</th></tr></thead>
+          <thead><tr><th>Выход</th><th>Выходит в интернет <Info>Адрес, с которым сайты видят трафик этого выхода, и страна по базе Cloudflare. Пользователи «напрямую» к этому серверу выходят с того же адреса. Клиент (Тропа, Hiddify и др.) может показывать другую страну — у него своя база GeoIP; сверяйте по адресу.</Info></th><th>Задержка</th>{(!order || thr > 0) && <th>Скорость</th>}<th>Состояние</th></tr></thead>
           <tbody>
             {data?.rows.map((r) => (
               <tr key={r.exit_id}>
                 <td><b>{r.name}</b>{lead === r.exit_id && <> <Tag kind="acc" dot>ведёт трафик</Tag></>}{data.selected === r.exit_id && lead !== r.exit_id && <> <Tag kind="warn">назначен, вход ещё не переключился</Tag></>}</td>
                 <td>{r.exit_ip ? <span className="mono small">{r.exit_loc && <>{countryOf(r.exit_loc)} · </>}{r.exit_ip}{r.exit_ip !== r.host && <span className="k"> (сервер {r.host})</span>}</span> : <span className="k">—</span>}</td>
                 <td className="mono">{r.rtt_ms !== null ? `${r.rtt_ms} мс` : '—'}</td>
-                {!order && <td className="mono">{r.mbps !== null ? `${r.mbps} Мбит/с` : '—'}</td>}
-                <td>{r.ok ? <Tag kind="ok">{order ? 'отвечает' : 'проходит'}</Tag> : <Tag kind={r.error ? 'fail' : 'warn'}>{r.error === 'выход не отвечает' ? 'неактивен — нет связи' : r.error ?? 'ниже порога'}</Tag>}</td>
+                {(!order || thr > 0) && <td className="mono">{r.mbps !== null ? `${r.mbps} Мбит/с` : '—'}</td>}
+                <td>{order && r.ok && data.slow.includes(r.exit_id) ? <Tag kind="warn">медленнее {thr} Мбит/с — пропускается</Tag> : r.ok ? <Tag kind="ok">{order ? 'отвечает' : 'проходит'}</Tag> : <Tag kind={r.error ? 'fail' : 'warn'}>{r.error === 'выход не отвечает' ? 'неактивен — нет связи' : r.error ?? 'ниже порога'}</Tag>}</td>
               </tr>
             ))}
             {data && !data.rows.length && <tr><td colSpan={5} className="empty">Проверок ещё не было — нажмите «Проверить сейчас» или подождите расписания.</td></tr>}

@@ -11,6 +11,9 @@ import { effectiveLimits, json, period, Vpn } from '../vpn.js';
 import { pushAllowedIp, revokeAllowedIp } from '../access.js';
 import { roleOf, ScopeError, scopeUserBody, type RoleInfo } from '../roles.js';
 
+/** Онлайн — если подключения пользователя видели за последнюю минуту (опрос узлов раз в 30 с). */
+const ONLINE_MS = 75_000;
+
 export const userBody = z.object({
   name: z.string().trim().min(1).max(48).regex(/^[\p{L}0-9 ._-]+$/u),
   tgId: z.string().regex(/^\d{3,20}$/).nullable().default(null),
@@ -78,6 +81,12 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     return u;
   };
 
+  const onlineOf = (uid: string) => {
+    const r = db.prepare('SELECT MAX(last_seen) AS at, SUM(blocked = 0) AS n FROM user_devices WHERE user_id = ?').get(uid) as { at: string | null; n: number | null };
+    const at = r.at ?? getSetting<string | null>(db, `seen.${uid}`, null);
+    return { online: !!r.at && Date.now() - Date.parse(r.at) < ONLINE_MS && (r.n ?? 0) > 0, lastSeen: at };
+  };
+
   const view = (u: UserRow) => {
     const t = db.prepare('SELECT up, down FROM traffic WHERE user_id = ? AND period = ?').get(u.id, period()) as { up: number; down: number } | undefined;
     const lim = effectiveLimits(ctx, u);
@@ -94,6 +103,8 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
       allowedIps: ips,
       // устройства (IP с открытыми соединениями) за последние минуты; blocked — сверх лимита
       devices: db.prepare('SELECT ip, first_seen, last_seen, blocked FROM user_devices WHERE user_id = ? ORDER BY first_seen, ip').all(u.id),
+      // онлайн: подключения видели на последнем опросе узлов (раз в 30 с, devices.ts); lastSeen — когда видели последний раз
+      ...onlineOf(u.id),
       subUrl: base ? `${base}/s/${u.sub_token}` : null,
       knockUrl: base ? `${base}/k/${u.knock_token}` : null,
       profiles: vpn.profiles(u).length,

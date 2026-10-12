@@ -31,6 +31,7 @@ const settingsBody = z.object({
   minMbps: z.number().min(0.5).max(10000).optional(),
   checkMin: z.number().int().min(5).max(1440).optional(),
   testMB: z.number().int().min(1).max(100).optional(),
+  orderMinMbps: z.number().min(0).max(10000).optional(),
 }).default({});
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -157,14 +158,15 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     const act = getSetting<string | null>(db, `auto.actual.${t.id}`, null);
     const id = (tag: string | null) => (tag ? tag.slice(`to-${t.id}-`.length) : null);
     // selected — что назначила панель; actual — через какой выход вход реально ведёт трафик (по данным Xray входа)
-    return { rows, selected: id(ov), actual: id(act), checkedAt: getSetting<string>(db, `auto.checked.${t.id}`, '') || null };
+    return { rows, selected: id(ov), actual: id(act), checkedAt: getSetting<string>(db, `auto.checked.${t.id}`, '') || null,
+      slow: getSetting<string[]>(db, `auto.slow.${t.id}`, []), speedAt: getSetting<string>(db, `auto.speedAt.${t.id}`, '') || null };
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/templates/:id/health/check', { preHandler: guard(ctx, 'configs.rollout') }, async (req) => {
     const t = vpn.template(req.params.id);
     if (!t) throw new HttpError(404, 'шаблон не найден');
     const lines: string[] = [];
-    const r = await ops.checkExits(t, (l) => lines.push(l));
+    const r = await ops.checkExits(t, (l) => lines.push(l), { force: true });   // по кнопке — и замер скорости
     if (!r) throw new HttpError(409, 'проверка выходов работает для конфигурации со входом и режимом «по качеству»');
     audit(db, req.admin!.username, 'template.exits_check', t.id, { switched: r.switched });
     return { ...r, log: lines };

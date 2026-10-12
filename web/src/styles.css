@@ -384,3 +384,7 @@ span.rm-pick { cursor: default; }
 .block-list { display: flex; flex-direction: column; }
 .block-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid var(--line); }
 .block-row:first-child { border-top: 0; padding-top: 0; }
+
+/* онлайн-индикатор пользователя */
+.odot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--line); box-shadow: 0 0 0 2px var(--surface); }
+.odot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }

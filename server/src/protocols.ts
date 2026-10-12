@@ -63,6 +63,8 @@ export interface Spec {
   minMbps: number;
   checkMin: number;
   testMB: number;
+  /** «по порядку»: выход медленнее этого (Мбит/с, замер раз в checkMin минут) пропускается — трафик идёт на следующий; 0 — не мерить */
+  orderMinMbps: number;
 }
 
 /** Настройки шаблона с умолчаниями; старый протокол «vless-reality» = VLESS + REALITY + Vision. */
@@ -95,6 +97,7 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     minMbps: raw.minMbps ?? 10,
     checkMin: raw.checkMin ?? 15,
     testMB: raw.testMB ?? 5,
+    orderMinMbps: raw.orderMinMbps ?? 0,
   };
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, can, fmtBytes, fmtTime, inScope, type Server, type User } from '../api';
+import { ago, api, can, fmtBytes, fmtTime, inScope, type Server, type User } from '../api';
 import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll, ask, Info, QrButton, Addr } from '../ui';
 
 interface Form {
@@ -19,11 +19,12 @@ export function UsersPage() {
   const wlOn = !!st?.whitelistOn;
   const { data: servers } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
   const [sel, setSel] = useState<string | 'new' | null>(null);
-  const [filter, setFilter] = useState<'all' | 'active' | 'expiring' | 'disabled'>('all');
+  const [filter, setFilter] = useState<'all' | 'online' | 'active' | 'expiring' | 'disabled'>('all');
   const [groups, setGroups] = useState(false);
 
   const soon = (u: User) => !!u.effective.expireAt && Date.parse(u.effective.expireAt) - Date.now() < 7 * 86400_000;
-  const list = (users ?? []).filter((u) => filter === 'all' || (filter === 'disabled' ? u.status === 'disabled' : filter === 'active' ? u.status === 'active' : soon(u)));
+  const list = (users ?? []).filter((u) => filter === 'all' || (filter === 'online' ? u.online : filter === 'disabled' ? u.status === 'disabled' : filter === 'active' ? u.status === 'active' : soon(u)));
+  const onlineN = (users ?? []).filter((u) => u.online).length;
   const user = users?.find((u) => u.id === sel) ?? null;
 
   return (
@@ -34,7 +35,7 @@ export function UsersPage() {
       </div>
       <SubServiceCard />
       <section className="card">
-        <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
+        <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['online', `Онлайн · ${onlineN}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
           <table>
             <thead><tr><th>Пользователь</th><th>Трафик за месяц</th><th>Срок</th><th>Режимы</th><th>Устройства</th><th>Профилей</th>{wlOn && <th>Белый список</th>}</tr></thead>
@@ -44,7 +45,7 @@ export function UsersPage() {
                 const pct = u.effective.trafficGb ? Math.min(100, (used / (u.effective.trafficGb * 1024 ** 3)) * 100) : 0;
                 return (
                   <tr key={u.id} className={`clickable ${sel === u.id ? 'sel' : ''}`} onClick={() => setSel(u.id)}>
-                    <td><b>{u.name}</b>{u.note && <div className="k note-line" title={u.note}>{u.note}</div>}<div className="k">{u.limit_group}{u.status === 'disabled' && ` · отключён${u.disabled_reason ? `: ${u.disabled_reason}` : ''}`}</div></td>
+                    <td><span className="flex" style={{ gap: 8, flexWrap: 'nowrap' }}><OnlineDot u={u} /><b>{u.name}</b></span>{u.note && <div className="k note-line" title={u.note}>{u.note}</div>}<div className="k">{u.limit_group}{u.status === 'disabled' && ` · отключён${u.disabled_reason ? `: ${u.disabled_reason}` : ''}`}</div></td>
                     <td><div className="stack" style={{ gap: 4 }}><span className="mono small">{fmtBytes(used)} / {u.effective.trafficGb ? `${u.effective.trafficGb} ГБ` : '∞'}</span>{u.effective.trafficGb ? <div className={`bar ${pct > 80 ? 'hot' : ''}`}><span style={{ width: `${pct}%` }} /></div> : null}</div></td>
                     <td>{u.effective.expireAt ? <span className={soon(u) ? 'tag warn' : 'k'}>до {u.effective.expireAt.slice(0, 10)}</span> : <span className="k">бессрочно</span>}</td>
                     <td><span className="flex" style={{ gap: 4 }}>{u.modes.map((m) => <Tag key={m}>{m === 'via' ? 'вход' : 'напрямую'}</Tag>)}</span></td>
@@ -260,6 +261,12 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
       </div>
     </Modal>
   );
+}
+
+/** Онлайн-индикатор: зелёный — подключения видели в последнюю минуту; серый — «был …» по подсказке. */
+function OnlineDot({ u }: { u: User }) {
+  const title = u.online ? `в сети: устройств ${u.devices.filter((d) => !d.blocked).length}` : u.lastSeen ? `был в сети ${ago(u.lastSeen)}` : 'ещё не подключался';
+  return <span className={`odot ${u.online ? 'on' : ''}`} title={title} role="img" aria-label={title} />;
 }
 
 /** Устройства пользователя сейчас: по ним работает лимит «Устройств одновременно». */

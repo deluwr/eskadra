@@ -41,7 +41,11 @@ export function updateDevices(ctx: Ctx, online: Map<string, Set<string>>, now = 
   try {
     const up = db.prepare(`INSERT INTO user_devices (user_id, ip, first_seen, last_seen) VALUES (?, ?, ?, ?)
       ON CONFLICT(user_id, ip) DO UPDATE SET last_seen = excluded.last_seen`);
-    for (const [uid, ips] of online) if (users.has(uid)) for (const ip of ips) up.run(uid, ip, ts, ts);
+    const seen = db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+    for (const [uid, ips] of online) if (users.has(uid) && ips.size) {
+      for (const ip of ips) up.run(uid, ip, ts, ts);
+      seen.run(`seen.${uid}`, JSON.stringify(ts));   // «был в сети» — после того, как строки устройств уйдут
+    }
     // ушло дольше HOLD — место свободно; вернётся — станет новым устройством в конце очереди
     db.prepare('DELETE FROM user_devices WHERE last_seen < ?').run(new Date(now.getTime() - DEVICE_HOLD_MS).toISOString());
     const rows = db.prepare('SELECT * FROM user_devices ORDER BY user_id').all() as unknown as DeviceRow[];

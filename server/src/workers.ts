@@ -250,7 +250,7 @@ export class Workers {
         const r = await this.ops.checkExits(t, () => undefined);
         if (r?.switched) {
           const msg = r.switched.to
-            ? `«${t.name}»: «Авто» переключён ${r.switched.from ? `с ${r.switched.from} ` : ''}на ${r.switched.to}`
+            ? `«${t.name}»: «Авто» переключён ${r.switched.from ? `с ${r.switched.from} ` : ''}на ${r.switched.to}${r.switched.slow ? ` — ${r.switched.from} медленнее ${sp.orderMinMbps} Мбит/с` : ''}`
             : sp.autoMode === 'order' ? `«${t.name}»: ни один выход не отвечает`
             : `«${t.name}»: ни один выход не проходит пороги (задержка ≤ ${sp.maxRttMs} мс, скорость ≥ ${sp.minMbps} Мбит/с) — выбор по наименьшей задержке`;
           this.log.info(msg);

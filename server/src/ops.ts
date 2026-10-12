@@ -40,7 +40,26 @@ export function parseBalancerInfo(out: string): BalancerState {
 }
 
 /** exitIp/exitLoc — адрес, с которым трафик выходит в интернет, и его страна по Cloudflare (проба через этот выход) */
-export interface ExitHealth { exitId: string; name: string; rttMs: number | null; mbps: number | null; ok: boolean; error: string | null; exitIp: string | null; exitLoc: string | null }
+export interface ExitHealth { exitId: string; name: string; rttMs: number | null; mbps: number | null; ok: boolean; error: string | null; exitIp: string | null; exitLoc: string | null; slow?: boolean }
+
+/**
+ * «По порядку» с порогом скорости: какие выходы медленные. Замер ниже порога — медленный; уже медленный снова
+ * считается быстрым только от порога +10% (без дёрганья на границе). Не замеряли (выход не отвечал) — как было.
+ */
+export function slowExits(results: Array<{ exitId: string; ok: boolean; mbps: number | null }>, prevSlow: string[], thr: number, measured: boolean): string[] {
+  if (!thr) return [];
+  if (!measured) return prevSlow.filter((id) => results.some((r) => r.exitId === id));
+  return results.filter((r) => {
+    if (!r.ok) return prevSlow.includes(r.exitId);
+    if (r.mbps === null) return true;   // отвечает, но скачать не смог — медленный
+    return prevSlow.includes(r.exitId) ? r.mbps < thr * 1.1 : r.mbps < thr;
+  }).map((r) => r.exitId);
+}
+
+/** Какие уровни цепочки пропустить: медленный выход, если дальше по порядку есть отвечающий быстрый. Все медленные — никого. */
+export function skipLevels(results: Array<{ exitId: string; ok: boolean }>, slow: string[]): boolean[] {
+  return results.map((r, i) => slow.includes(r.exitId) && results.slice(i + 1).some((x) => x.ok && !slow.includes(x.exitId)));
+}
 
 const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
 import { buildKitBundle, kitVersion } from './nodekit.js';
@@ -341,12 +360,12 @@ export class Ops {
   }
 
   /** Назначить выход балансировщику (null — снять) и убедиться, что вход его принял; до 5 попыток. */
-  async setOverride(n: NodeSession, templateId: string, tag: string | null): Promise<BalancerState | null> {
+  async setOverride(n: NodeSession, templateId: string, tag: string | null, balancer = `bal-${templateId}`): Promise<BalancerState | null> {
     for (let i = 0; i < 5; i++) {
       if (i) await new Promise((r) => setTimeout(r, 1500));
-      const r = await n.op(['xray-bo', `bal-${templateId}`, tag ?? 'clear']);
+      const r = await n.op(['xray-bo', balancer, tag ?? 'clear']);
       if (r.code !== 0) continue;
-      const st = await this.balancerState(n, templateId);
+      const st = await this.balancerState(n, templateId, balancer);
       if (!st) return { override: tag, selected: tag };   // старый nodekit без xray-bi — проверить нечем
       if ((st.override ?? null) === tag) return st;
     }
@@ -420,7 +439,7 @@ export class Ops {
     return out;
   }
 
-  async checkExits(t: TemplateRow, log: (l: string) => void): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null } | null } | null> {
+  async checkExits(t: TemplateRow, log: (l: string) => void, opts: { force?: boolean } = {}): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null; slow?: boolean } | null } | null> {
     const sp = this.vpn.spec(t);
     if (sp.autoMode === 'random' || !t.entry_id) return null;
     const entry = this.ctx.server(t.entry_id);
@@ -434,13 +453,20 @@ export class Ops {
     let actualAfter: string | null = null;
     // по порядку — только «отвечает ли выход» (таймаут = выход недоступен), без замера скорости и порогов
     const order = sp.autoMode === 'order';
+    // по порядку с порогом скорости: замер раз в checkMin минут (или по кнопке «Проверить сейчас»), между ними — только доступность
+    const thr = order ? sp.orderMinMbps : 0;
+    const speedAt = getSetting<string>(this.ctx.db, `auto.speedAt.${t.id}`, '');
+    const measure = !order || (thr > 0 && (opts.force || !speedAt || Date.now() - Date.parse(speedAt) >= sp.checkMin * 60_000));
+    const prevSlow = getSetting<string[]>(this.ctx.db, `auto.slow.${t.id}`, []);
+    let slow: string[] = prevSlow;
     const tagOf = (exitId: string) => `to-${t.id}-${exitId}`;
     const actualOf = (st: BalancerState) => st.override || st.selected || null;
     // по порядку — цепочка уровней (vpn.ts): трафик идёт через первый уровень, где выход выбран; ни одного — через первый выход
     const orderActual = async (n: NodeSession, first: BalancerState | null): Promise<string | null> => {
-      if (first?.override) return first.override;
       for (let i = 0; i < targets.length; i++) {
         const st = i ? await this.balancerState(n, t.id, orderBalancer(t.id, i)) : first;
+        if (st?.override?.startsWith(`lb-${t.id}-`)) continue;   // уровень пропущен (медленный выход)
+        if (st?.override) return st.override;
         if (st?.selected) return st.selected;
       }
       return tagOf(targets[0]!.id);
@@ -453,20 +479,21 @@ export class Ops {
         if (before) actualBefore = order ? await orderActual(n, before) : actualOf(before);
       }
       for (const x of targets) {
-        const r = await n.op(['exit-probe', probePort(t.id, x.id), order ? 0 : sp.testMB * 1_000_000], { timeoutMs: order ? 60_000 : 120_000 });
+        const r = await n.op(['exit-probe', probePort(t.id, x.id), measure ? sp.testMB * 1_000_000 : 0], { timeoutMs: measure ? 120_000 : 60_000 });
         const rtt = Number(r.stdout.match(/^rtt_ms=(\d+)/m)?.[1] ?? NaN);
         const mbps = Number(r.stdout.match(/^mbps=([\d.]+)/m)?.[1] ?? NaN);
         const err = r.code !== 0 ? (r.stderr || r.stdout).trim().slice(0, 200) : Number.isNaN(rtt) ? 'выход не отвечает' : !order && Number.isNaN(mbps) ? 'скачивание не удалось' : null;
+        // по порядку скорость не мерили — прошлый замер остаётся
         const ok = !err && (order || (rtt <= sp.maxRttMs && mbps >= sp.minMbps));
         const exitIp = r.stdout.match(/^exit_ip=([0-9a-fA-F.:]+)$/m)?.[1] ?? null;
         const exitLoc = r.stdout.match(/^exit_loc=([A-Z]{2})$/m)?.[1] ?? null;
         results.push({ exitId: x.id, name: x.name, rttMs: Number.isNaN(rtt) ? null : rtt, mbps: Number.isNaN(mbps) ? null : mbps, ok, error: err, exitIp, exitLoc });
         // адрес выхода из прошлой проверки не стираем, если в этой его узнать не удалось
         this.ctx.db.prepare(`INSERT INTO exit_health (template_id, exit_id, rtt_ms, mbps, ok, error, exit_ip, exit_loc, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-          ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, mbps = excluded.mbps, ok = excluded.ok, error = excluded.error,
+          ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, mbps = ${order && !measure ? 'mbps' : 'excluded.mbps'}, ok = excluded.ok, error = excluded.error,
             exit_ip = COALESCE(excluded.exit_ip, exit_ip), exit_loc = COALESCE(excluded.exit_loc, exit_loc), checked_at = excluded.checked_at`)
           .run(t.id, x.id, Number.isNaN(rtt) ? null : rtt, Number.isNaN(mbps) ? null : mbps, ok ? 1 : 0, err, exitIp, exitLoc);
-        log(`${entry.name} → ${x.name}: ${err ?? (order ? `отвечает, ${rtt} мс` : `${rtt} мс, ${mbps} Мбит/с`)}${ok || err ? '' : ' — не проходит пороги'}${exitIp ? ` · выход в интернет ${exitIp}${exitLoc ? ` (${exitLoc})` : ''}` : ''}`);
+        log(`${entry.name} → ${x.name}: ${err ?? (order && !measure ? `отвечает, ${rtt} мс` : `${rtt} мс, ${Number.isNaN(mbps) ? 'скорость не замерена' : `${mbps} Мбит/с`}`)}${ok || err ? '' : ' — не проходит пороги'}${exitIp ? ` · выход в интернет ${exitIp}${exitLoc ? ` (${exitLoc})` : ''}` : ''}`);
       }
       const good = results.filter((r) => r.ok).sort((a, b) => (b.mbps! - a.mbps!) || (a.rttMs! - b.rttMs!));
       const cur = prev ? results.find((r) => `to-${t.id}-${r.exitId}` === prev) : undefined;
@@ -475,8 +502,21 @@ export class Ops {
       // по порядку между первым и вторым переключает сам вход (за секунды) — панель не закрепляет выход; только если
       // не отвечают оба, закрепляет следующий отвечающий по списку (вернулся первый или второй — закрепление снимается)
       // по порядку на любой резервный выход переключает сам вход (цепочка уровней) — панель ничего не закрепляет
-      if (order) next = null;
-      else next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
+      // с порогом скорости медленный уровень пропускается: его балансировщику назначается переход на следующий уровень
+      let skip: boolean[] = [];
+      if (order) {
+        slow = slowExits(results, prevSlow, thr, measure && thr > 0);
+        for (const r of results) r.slow = slow.includes(r.exitId);
+        skip = skipLevels(results, slow);
+        next = skip[0] ? `lb-${t.id}-2` : null;
+        for (let i = 1; i < targets.length - 1; i++) {
+          const st = await this.setOverride(n, t.id, skip[i] ? `lb-${t.id}-${i + 2}` : null, orderBalancer(t.id, i));
+          if (!st) log(`${entry.name}: уровень ${i + 1} не принял ${skip[i] ? 'пропуск' : 'снятие пропуска'} — повторю при следующей проверке`);
+        }
+        if (thr) for (const [i, r] of results.entries()) if (skip[i]) log(`${r.name}: ${r.mbps ?? '—'} Мбит/с — медленнее ${thr} Мбит/с, трафик идёт на следующий по порядку`);
+        setSetting(this.ctx.db, `auto.slow.${t.id}`, slow);
+        if (measure && thr) setSetting(this.ctx.db, `auto.speedAt.${t.id}`, new Date().toISOString());
+      } else next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
       // сверяемся с входом на каждой проверке, а не только при смене: выбор мог сброситься перезапуском Xray
       const st = await this.setOverride(n, t.id, next);
       if (!st) log(`${entry.name}: вход не принял выбор выхода ${next ?? '(по задержке)'} — повторю при следующей проверке`);
@@ -487,7 +527,8 @@ export class Ops {
     setSetting(this.ctx.db, `auto.checked.${t.id}`, new Date().toISOString());
     const nameOf = (tag: string | null) => (tag ? targets.find((x) => tag === `to-${t.id}-${x.id}`)?.name ?? tag : null);
     // уведомляем о реальной смене выхода, через который идёт трафик
-    return { results, switched: actualAfter && actualAfter !== actualBefore ? { from: nameOf(actualBefore), to: nameOf(actualAfter) } : !next && prev && sp.autoMode !== 'order' ? { from: nameOf(prev), to: null } : null };
+    const fromSlow = !!actualBefore && slow.some((id) => tagOf(id) === actualBefore);
+    return { results, switched: actualAfter && actualAfter !== actualBefore ? { from: nameOf(actualBefore), to: nameOf(actualAfter), ...(fromSlow ? { slow: true } : {}) } : !next && prev && sp.autoMode !== 'order' ? { from: nameOf(prev), to: null } : null };
   }
 
   /**
