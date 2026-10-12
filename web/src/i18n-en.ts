@@ -1145,4 +1145,5 @@ export const EN: Record<string, string> = {
   "найден 3x-ui {}: Эскадра будет добавлять свои inbounds в его Xray, второй Xray не запускается": "3x-ui {} found: Eskadra will add its inbounds to its Xray, a second Xray is not started",
   "найдены остатки 3x-ui (служба {}): 3x-ui не работает — Эскадра поставит свой Xray": "3x-ui leftovers found (service {}): 3x-ui isn't running — Eskadra will install its own Xray",
   "не запущена": "not running",
+  "Не удалось скопировать — выделите текст и нажмите Ctrl+C": "Copy failed \u2014 select the text and press Ctrl+C",
 };

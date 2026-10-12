@@ -68,21 +68,50 @@ export function Seg<T extends string>({ value, options, onChange, label }: { val
   );
 }
 
-export function CopyBlock({ text }: { text: string }) {
+/**
+ * Скопировать текст: буфер обмена браузера, а если он недоступен (панель открыта по http, браузер отказал) —
+ * через скрытое поле. false — не получилось ни так, ни так.
+ */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    // запрос к буферу может зависнуть в ожидании разрешения — больше секунды не ждём
+    if (navigator.clipboard && window.isSecureContext) {
+      const ok = await Promise.race([navigator.clipboard.writeText(text).then(() => true), new Promise<false>((r) => setTimeout(() => r(false), 1000))]);
+      if (ok) return true;
+    }
+  } catch { /* ниже — запасной способ */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+  document.body.appendChild(ta);
+  ta.select();
+  try { return document.execCommand('copy'); } catch { return false; } finally { ta.remove(); }
+}
+
+/** Кнопка копирования: type="button" — внутри формы она не отправляет форму. */
+function useCopy(text: string) {
   const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (await copyText(text)) { setCopied(true); setTimeout(() => setCopied(false), 1500); }
+    else toast('Не удалось скопировать — выделите текст и нажмите Ctrl+C', 'fail');
+  };
+  return { copied, copy };
+}
+
+export function CopyBlock({ text }: { text: string }) {
+  const { copied, copy } = useCopy(text);
   return (
     <div className="copy">
-      <button className="btn sm" onClick={() => void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>
-        {copied ? 'Скопировано' : 'Копировать'}
-      </button>
+      <button type="button" className="btn sm" onClick={() => void copy()}>{copied ? 'Скопировано' : 'Копировать'}</button>
       <pre className="code">{text}</pre>
     </div>
   );
 }
 
 export function CopyButton({ text, label = 'Копировать' }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  return <button className="btn sm" onClick={() => void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })}>{copied ? 'Скопировано' : label}</button>;
+  const { copied, copy } = useCopy(text);
+  return <button type="button" className="btn sm" onClick={() => void copy()}>{copied ? 'Скопировано' : label}</button>;
 }
 
 const P = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
