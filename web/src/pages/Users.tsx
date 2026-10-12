@@ -5,11 +5,13 @@ import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll
 interface Form {
   name: string; note: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
   overAction: string; modes: string[]; nodeIds: string[] | null; templateIds: string[] | null; wlMode: 'exact' | 'prefix' | 'asn'; status: 'active' | 'disabled';
+  excludedProfiles: string[];
 }
-const emptyForm: Form = { name: '', note: '', tgId: '', limitGroup: 'default', trafficLimitGb: '', expireAt: '', deviceLimit: '', overAction: 'disable', modes: ['direct', 'via'], nodeIds: null, templateIds: null, wlMode: 'exact', status: 'active' };
+const emptyForm: Form = { name: '', note: '', tgId: '', limitGroup: 'default', trafficLimitGb: '', expireAt: '', deviceLimit: '', overAction: 'disable', modes: ['direct', 'via'], nodeIds: null, templateIds: null, wlMode: 'exact', status: 'active', excludedProfiles: [] };
 const toForm = (u: User): Form => ({
   name: u.name, note: u.note, tgId: u.tg_id ?? '', limitGroup: u.limit_group, trafficLimitGb: u.traffic_limit_gb?.toString() ?? '', expireAt: u.expire_at?.slice(0, 10) ?? '',
   deviceLimit: u.device_limit?.toString() ?? '', overAction: u.over_action, modes: u.modes, nodeIds: u.node_ids, templateIds: u.template_ids, wlMode: u.wl_mode, status: u.status,
+  excludedProfiles: [...u.excluded_profiles].sort(),
 });
 const num = (s: string) => (s.trim() === '' ? null : Number(s));
 
@@ -25,6 +27,9 @@ export function UsersPage() {
   const soon = (u: User) => !!u.effective.expireAt && Date.parse(u.effective.expireAt) - Date.now() < 7 * 86400_000;
   const list = (users ?? []).filter((u) => filter === 'all' || (filter === 'online' ? u.online : filter === 'disabled' ? u.status === 'disabled' : filter === 'active' ? u.status === 'active' : soon(u)));
   const onlineN = (users ?? []).filter((u) => u.online).length;
+  const [sort, setSort] = useState<Sort>(readSort);
+  const sorted = sortUsers(list, sort);
+  const th = (key: SortKey, label: string) => <SortTh key={key} k={key} label={label} sort={sort} onSort={(s) => { setSort(s); saveSort(s); }} />;
   const user = users?.find((u) => u.id === sel) ?? null;
 
   return (
@@ -38,9 +43,9 @@ export function UsersPage() {
         <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['online', `Онлайн · ${onlineN}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
           <table>
-            <thead><tr><th>Пользователь</th><th>Трафик за месяц</th><th>Срок</th><th>Режимы</th><th>Устройства</th><th>Профилей</th>{wlOn && <th>Белый список</th>}</tr></thead>
+            <thead><tr>{th('name', 'Пользователь')}{th('traffic', 'Трафик за месяц')}{th('expire', 'Срок')}<th>Режимы</th>{th('devices', 'Устройства')}{th('profiles', 'Профилей')}{wlOn && <th>Белый список</th>}</tr></thead>
             <tbody>
-              {list.map((u) => {
+              {sorted.map((u) => {
                 const used = u.traffic.up + u.traffic.down;
                 const pct = u.effective.trafficGb ? Math.min(100, (used / (u.effective.trafficGb * 1024 ** 3)) * 100) : 0;
                 return (
@@ -102,7 +107,7 @@ function importLinks(url: string, name: string): Array<[string, string]> {
 }
 
 const bodyOf = (f: Form) => ({ name: f.name, note: f.note, tgId: f.tgId || null, limitGroup: f.limitGroup, trafficLimitGb: num(f.trafficLimitGb), expireAt: f.expireAt ? new Date(f.expireAt + 'T23:59:59Z').toISOString() : null,
-  deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, templateIds: f.templateIds, wlMode: f.wlMode, status: f.status });
+  deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, templateIds: f.templateIds, wlMode: f.wlMode, status: f.status, excludedProfiles: f.excludedProfiles });
 
 function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; onClose: () => void; wlOn: boolean }) {
   const [f, setF] = useState<Form>(user ? toForm(user) : emptyForm);
@@ -114,7 +119,8 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
   const toggleMode = (m: string) => setF({ ...f, modes: f.modes.includes(m) ? f.modes.filter((x) => x !== m) : [...f.modes, m] });
   // конфигурации, профили которых попадут в подписку (у существующего пользователя — с примером профилей)
   const { data: tpls } = usePoll(() => api.get<Array<{ id: string; name: string }>>('/api/v1/templates'), null);
-  const configs = user?.configs ?? tpls?.map((t) => ({ id: t.id, name: t.name, allowed: true, profiles: [] as string[] })) ?? [];
+  const configs = user?.configs ?? tpls?.map((t) => ({ id: t.id, name: t.name, allowed: true, profiles: [] as User['configs'][number]['profiles'] })) ?? [];
+  const toggleProfile = (key: string) => setF({ ...f, excludedProfiles: (f.excludedProfiles.includes(key) ? f.excludedProfiles.filter((k) => k !== key) : [...f.excludedProfiles, key]).sort() });
   const toggleTpl = (id: string) => {
     const all = configs.map((c) => c.id);
     const cur = f.templateIds ?? all;
@@ -195,7 +201,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
               <label className="cb"><input type="checkbox" checked={f.modes.includes('direct')} disabled={!inScope('modes', 'direct')} onChange={() => toggleMode('direct')} />Напрямую к серверу</label>
               {(!inScope('modes', 'via') || !inScope('modes', 'direct')) && <span className="k">режим вне вашей роли не меняется</span>}
             </div>
-            <span className="k">Конфигурации <Info>Отмеченные конфигурации дают пользователю свои профили; у снятой — ни одного. Профили зависят ещё и от режимов выше.</Info></span>
+            <span className="k">Конфигурации и варианты <Info>Отмеченные конфигурации дают пользователю свои варианты подключения; у снятой — ни одного. Отдельный вариант можно снять галочкой: он пропадёт из подписки, а его ссылка перестанет работать на сервере. Новые варианты (например, новый выход в конфигурации) появляются включёнными. Варианты зависят ещё и от режимов выше.</Info></span>
             {configs.length ? (
               <ul className="cfg-pick">
                 {configs.map((c) => {
@@ -206,7 +212,14 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
                     <li key={c.id} className={on ? '' : 'off'}>
                       <label className="cb"><input type="checkbox" checked={on} disabled={!mine} onChange={() => toggleTpl(c.id)} /><b>{c.name}</b>{!mine && <span className="k"> · вне вашей роли</span>}</label>
                       {user && (c.profiles.length
-                        ? <span className="cfg-profiles">{c.profiles.map((p) => <span key={p} className="tag">{p}</span>)}</span>
+                        ? <span className="cfg-profiles">{c.profiles.map((p) => {
+                          const pOn = !f.excludedProfiles.includes(p.key);
+                          return (
+                            <label key={p.key} className={`chip-cb ${pOn && on ? 'on' : ''}`} title={on ? (pOn ? 'вариант в подписке — снимите, чтобы убрать' : 'вариант выключен — ссылка не работает') : 'конфигурация не выдана'}>
+                              <input type="checkbox" checked={pOn} disabled={!on || !mine} onChange={() => toggleProfile(p.key)} />{p.name}
+                            </label>
+                          );
+                        })}</span>
                         : <span className="k">профилей нет: проверьте режимы и выкат конфигурации</span>)}
                     </li>
                   );
@@ -260,6 +273,43 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
         {user && can('users.delete') && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Удалить ${user.name}? Его ссылки и подписка перестанут работать.`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); toast(`${user.name} удалён`); onDeleted(); }); }}>Удалить</button>}
       </div>
     </Modal>
+  );
+}
+
+// ───── сортировка таблицы: клик по заголовку, повторный — обратный порядок; выбор помнит браузер ─────
+
+type SortKey = 'name' | 'traffic' | 'expire' | 'devices' | 'profiles';
+interface Sort { key: SortKey; dir: 1 | -1 }
+const SORT_LS = 'users.sort';
+const readSort = (): Sort => { try { const v = JSON.parse(localStorage.getItem(SORT_LS) ?? '') as Sort; if (v && v.key && (v.dir === 1 || v.dir === -1)) return v; } catch { /* нет — по имени */ } return { key: 'name', dir: 1 }; };
+const saveSort = (v: Sort) => { try { localStorage.setItem(SORT_LS, JSON.stringify(v)); } catch { /* приватный режим — не запоминаем */ } };
+
+/** Порядок: выбранная колонка; при равенстве — онлайн выше, затем по имени. Бессрочные — в конце по сроку. */
+function sortUsers(list: User[], s: Sort): User[] {
+  const val = (u: User): number | string => {
+    switch (s.key) {
+      case 'name': return u.name.toLocaleLowerCase();
+      case 'traffic': return u.traffic.up + u.traffic.down;
+      case 'expire': return u.effective.expireAt ? Date.parse(u.effective.expireAt) : Number.MAX_SAFE_INTEGER;
+      case 'devices': return u.devices.filter((d) => !d.blocked).length;
+      case 'profiles': return u.profiles;
+    }
+  };
+  return [...list].sort((a, b) => {
+    const x = val(a), y = val(b);
+    const c = typeof x === 'string' ? x.localeCompare(y as string, 'ru') : x - (y as number);
+    return c * s.dir || Number(b.online) - Number(a.online) || a.name.localeCompare(b.name, 'ru');
+  });
+}
+
+function SortTh({ k, label, sort, onSort }: { k: SortKey; label: string; sort: Sort; onSort: (s: Sort) => void }) {
+  const on = sort.key === k;
+  return (
+    <th aria-sort={on ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" className={`th-sort ${on ? 'on' : ''}`} onClick={() => onSort({ key: k, dir: on ? (sort.dir === 1 ? -1 : 1) : k === 'name' ? 1 : -1 })}>
+        {label}<span aria-hidden="true" className="th-arrow">{on ? (sort.dir === 1 ? '▲' : '▼') : '↕'}</span>
+      </button>
+    </th>
   );
 }
 

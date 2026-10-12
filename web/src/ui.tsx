@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import qrcode from 'qrcode-generator';
-import { api } from './api';
+import { api, can } from './api';
 
 export function useAsync() {
   const [busy, setBusy] = useState(false);
@@ -393,6 +393,8 @@ function TgBindModal({ tgId, linkUrl, onSaveId, onClose, onChanged }: { tgId: st
 export function Addr({ value, empty = '—', mono = true }: { value: string | null | undefined; empty?: string; mono?: boolean }) {
   const [shown, setShown] = useState(false);
   if (!value) return <span className="k">{empty}</span>;
+  // без права «видеть IP» адреса людей сервер не отдаёт вовсе, адреса серверов интерфейс не показывает
+  if (!can('ips.view') || value === 'скрыт') return <span className="k" title="Адрес скрыт: у роли нет права видеть IP-адреса">скрыт</span>;
   return (
     <span className="addr">
       <span className={`${mono ? 'mono ' : ''}addr-v ${shown ? '' : 'blur'}`} aria-hidden={!shown}>{value}</span>

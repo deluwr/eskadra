@@ -10,7 +10,7 @@ const PERM_GROUPS: Array<[string, string[]]> = [
   ['Пользователи', ['users.edit', 'users.delete', 'users.limits']],
   ['Конфигурации', ['configs.edit', 'configs.rollout', 'configs.delete']],
   ['Серверы', ['servers.manage', 'servers.protect', 'cores.manage', 'ports.groups']],
-  ['Панель', ['backups.run', 'settings.edit']],
+  ['Панель', ['backups.run', 'settings.edit', 'ips.view']],
 ];
 const OWNER_ONLY = ['Администраторы и роли', 'Бэкапы: получатели, ключи, восстановление', 'Токен бота, обновление панели', 'Терминал (shell) и режим SSH на сервере'];
 const MODE_LABEL: Record<string, string> = { via: 'через вход', direct: 'напрямую' };

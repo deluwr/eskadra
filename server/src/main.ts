@@ -12,6 +12,7 @@ import { coreMode } from './ctx.js';
 import { loadOrCreateMasterKey, Sealer } from './lib/crypto.js';
 import { Ctx, HttpError } from './ctx.js';
 import { authRoutes, requireAdmin } from './routes/auth.js';
+import { registerIpMask } from './ipmask.js';
 import { serverRoutes } from './routes/servers.js';
 import { templateRoutes } from './routes/templates.js';
 import { userRoutes } from './routes/users.js';
@@ -89,6 +90,7 @@ await app.register(async (root) => {
   await authRoutes(root, ctx);
   await root.register(async (secured) => {
     secured.addHook('preHandler', requireAdmin(ctx));
+    registerIpMask(secured, ctx);   // адреса людей — только с правом «видеть IP» (у owner — всегда)
     await serverRoutes(secured, ctx);
     await templateRoutes(secured, ctx);
     await userRoutes(secured, ctx);

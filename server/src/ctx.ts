@@ -81,6 +81,8 @@ export interface UserRow {
   disabled_reason: string | null; created_at: string;
   /** комментарий администратора: кто это */
   note: string | null;
+  /** выключенные варианты подключения (ключи профилей d:/v:…); новые варианты включены сами */
+  excluded_profiles: string | null;
 }
 
 export class HttpError extends Error {

@@ -30,6 +30,8 @@ export const userBody = z.object({
   status: z.enum(['active', 'disabled']).default('active'),
   /** Комментарий: кто это. Не передан — прежний не меняется (бот и привязка Telegram его не шлют). */
   note: z.string().trim().max(500).optional(),
+  /** Выключенные варианты подключения (ключи профилей). Не передано — прежние не меняются. */
+  excludedProfiles: z.array(z.string().regex(/^[dv]:[\w-]+:[\w-]+$/).max(160)).max(500).optional(),
 });
 
 export function subBase(ctx: Ctx): string | null {
@@ -56,13 +58,14 @@ export function saveUser(ctx: Ctx, id: string | null, input: z.infer<typeof user
     b.nodeIds ? JSON.stringify(b.nodeIds) : null, b.templateIds ? JSON.stringify(b.templateIds) : null, b.wlMode, b.status];
   if (id) {
     if (b.note !== undefined) db.prepare('UPDATE users SET note = ? WHERE id = ?').run(b.note || null, id);
+    if (b.excludedProfiles !== undefined) db.prepare('UPDATE users SET excluded_profiles = ? WHERE id = ?').run(b.excludedProfiles.length ? JSON.stringify(b.excludedProfiles) : null, id);
     db.prepare(`UPDATE users SET name=?, tg_id=?, limit_group=?, traffic_limit_gb=?, expire_at=?, device_limit=?, over_action=?, modes=?, node_ids=?, template_ids=?, wl_mode=?, status=?,
       disabled_reason = CASE WHEN ? = 'active' THEN NULL ELSE disabled_reason END WHERE id=?`).run(...vals, b.status, id);
     return id;
   }
   const nid = 'u-' + randomBytes(4).toString('hex');
-  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token, note)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18), b.note || null);
+  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token, note, excluded_profiles)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18), b.note || null, b.excludedProfiles?.length ? JSON.stringify(b.excludedProfiles) : null);
   return nid;
 }
 
@@ -72,8 +75,11 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
   /** Конфигурации и профили, которые каждая даст пользователю в подписке (с учётом режимов и серверов, без учёта выбора конфигураций). */
   const configsOf = (u: UserRow) => {
     const allowed = json<string[] | null>(u.template_ids, null);
-    const all = vpn.profiles({ ...u, template_ids: null });
-    return vpn.templates().map((t) => ({ id: t.id, name: t.name, allowed: !allowed || allowed.includes(t.id), profiles: all.filter((p) => p.template.id === t.id).map((p) => p.name) }));
+    // все варианты, какие дала бы конфигурация (без учёта выбора конфигураций и выключенных вариантов); on — включён ли
+    const all = vpn.profiles({ ...u, template_ids: null, excluded_profiles: null });
+    const off = json<string[]>(u.excluded_profiles, []);
+    return vpn.templates().map((t) => ({ id: t.id, name: t.name, allowed: !allowed || allowed.includes(t.id),
+      profiles: all.filter((p) => p.template.id === t.id).map((p) => ({ key: p.key, name: p.name, on: !off.includes(p.key) })) }));
   };
   const getUser = (id: string) => {
     const u = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
@@ -98,6 +104,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
       limit_group: u.limit_group, traffic_limit_gb: u.traffic_limit_gb, expire_at: u.expire_at, device_limit: u.device_limit,
       over_action: u.over_action, modes: json<string[]>(u.modes, []), node_ids: json<string[] | null>(u.node_ids, null), template_ids: json<string[] | null>(u.template_ids, null), wl_mode: u.wl_mode,
       configs: configsOf(u),
+      excluded_profiles: json<string[]>(u.excluded_profiles, []),
       effective: lim,
       traffic: { up: t?.up ?? 0, down: t?.down ?? 0, period: period() },
       allowedIps: ips,

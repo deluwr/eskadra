@@ -22,6 +22,7 @@ export const PERMS = {
   'ports.groups': 'Группы портов и связности',
   'backups.run': 'Запускать бэкап',
   'settings.edit': 'Настройки панели: сервис подписок, язык, прокси бота, адреса исполнителя',
+  'ips.view': 'Видеть IP-адреса: устройства и белые списки пользователей, входы и адреса администраторов, адреса серверов',
 } as const;
 export type Perm = keyof typeof PERMS;
 export const PERM_KEYS = Object.keys(PERMS) as Perm[];
@@ -93,7 +94,14 @@ export function scopeUserBody<B extends { templateIds: string[] | null; nodeIds:
   }
   if (s.limitGroups && !s.limitGroups.includes(b.limitGroup) && prev?.limit_group !== b.limitGroup)
     throw new ScopeError(`роль «${role.name}» не может назначать группу лимитов «${b.limitGroup}»`);
-  return { ...b, templateIds, nodeIds, modes };
+  // выключенные варианты: чужие (вне области конфигураций) — как были, свои — как прислали
+  let excludedProfiles = (b as { excludedProfiles?: string[] }).excludedProfiles;
+  if (excludedProfiles !== undefined && s.templates) {
+    const tplOf = (k: string) => k.split(':')[1] ?? '';
+    const prevOff = prev ? parse<string[]>(prev.excluded_profiles ?? '', []) : [];
+    excludedProfiles = [...prevOff.filter((k) => !s.templates!.includes(tplOf(k))), ...excludedProfiles.filter((k) => s.templates!.includes(tplOf(k)))];
+  }
+  return { ...b, templateIds, nodeIds, modes, ...(excludedProfiles !== undefined ? { excludedProfiles } : {}) };
 }
 
 /** Серверы конфигурации, которые роль меняет: добавлять и убирать можно только серверы из области. */

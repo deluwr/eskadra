@@ -1187,4 +1187,12 @@ export const EN: Record<string, string> = {
   "список версий с GitHub недоступен: {}": "version list from GitHub unavailable: {}",
   "— журнал ниже. Панель осталась на прежней версии.": "— log below. The panel stayed on the previous version.",
   "Выход пропускается или возвращается по медиане замеров за это время. 1 минута — по последнему замеру, реакция быстрее всего; больше — одна неудачная минута трафик не перекидывает. Само переключение делает Xray на входе за секунды.": "An exit is skipped or restored by the median of measurements over this period. 1 minute — by the latest measurement, the fastest reaction; more — one bad minute doesn't move traffic. Xray on the entry does the switch itself within seconds.",
+  "Адрес скрыт: у роли нет права видеть IP-адреса": "Address hidden: the role has no permission to see IP addresses",
+  "Конфигурации и варианты": "Configurations and variants",
+  "Отмеченные конфигурации дают пользователю свои варианты подключения; у снятой — ни одного. Отдельный вариант можно снять галочкой: он пропадёт из подписки, а его ссылка перестанет работать на сервере. Новые варианты (например, новый выход в конфигурации) появляются включёнными. Варианты зависят ещё и от режимов выше.": "Checked configurations give the user their connection variants; an unchecked one gives none. A single variant can be unchecked: it disappears from the subscription and its link stops working on the server. New variants (e.g. a new exit in a configuration) appear enabled. Variants also depend on the modes above.",
+  "вариант в подписке — снимите, чтобы убрать": "variant is in the subscription — uncheck to remove",
+  "вариант выключен — ссылка не работает": "variant is off — the link doesn't work",
+  "конфигурация не выдана": "configuration not granted",
+  "скрыт": "hidden",
+  "Видеть IP-адреса: устройства и белые списки пользователей, входы и адреса администраторов, адреса серверов": "See IP addresses: users' devices and whitelists, admins' logins and addresses, server addresses",
 };

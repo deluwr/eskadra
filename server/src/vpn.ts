@@ -83,6 +83,11 @@ export class Vpn {
     return !ids || ids.includes(serverId);
   }
 
+  /** Вариант подключения выключен у пользователя (галочка в его карточке). */
+  profileOff(u: UserRow, key: string): boolean {
+    return json<string[]>(u.excluded_profiles, []).includes(key);
+  }
+
   /** Все профили пользователя: напрямую к каждому узлу и через вход (§12.5). */
   profiles(u: UserRow): Profile[] {
     const modes = json<string[]>(u.modes, ['direct', 'via']);
@@ -111,7 +116,7 @@ export class Vpn {
         }
       }
     }
-    return out;
+    return out.filter((p) => !this.profileOff(u, p.key));
   }
 
   /** Узлы, на которые ведёт вход шаблона: его direct-узлы с активным inbound, кроме самого входа. */
@@ -179,7 +184,7 @@ export class Vpn {
           }
           const emails: string[] = [];
           for (const u of users)
-            if (json<string[]>(u.modes, []).includes('via') && this.userAllows(u, x.id, t.id)) {
+            if (json<string[]>(u.modes, []).includes('via') && this.userAllows(u, x.id, t.id) && !this.profileOff(u, `v:${t.id}:${x.id}`)) {
               const email = `${u.id}.v-${x.id}`;
               clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:${x.id}`), email));
               emails.push(email);
@@ -189,7 +194,8 @@ export class Vpn {
         if (ready.length) {
           const autoEmails: string[] = [];
           for (const u of users)
-            if (json<string[]>(u.modes, []).includes('via')) {
+            // «авто» — только если конфигурация пользователю выдана (есть хоть один доступный выход) и вариант не выключен
+            if (json<string[]>(u.modes, []).includes('via') && ready.some((x) => this.userAllows(u, x.id, t.id)) && !this.profileOff(u, `v:${t.id}:auto`)) {
               const email = `${u.id}.a-${t.id}`;
               clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:auto`), email));
               autoEmails.push(email);
@@ -273,7 +279,7 @@ export class Vpn {
     const sp = this.spec(t);
     const clients = [];
     for (const u of users)
-      if (json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id))
+      if (json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id) && !this.profileOff(u, `d:${t.id}:${server.id}`))
         clients.push(xrayClient(sp, this.cred(u.id, `t:${t.id}`), `${u.id}.d-${t.id}`));
     if (t.entry_id && t.entry_id !== server.id)
       clients.push(xrayClient(sp, this.svcCred(`relay:${t.id}:${t.entry_id}:${server.id}`), `svc.relay-${t.entry_id}-${t.id}`));
@@ -335,7 +341,7 @@ export class Vpn {
         return {
           type: 'hysteria2', tag: `in-${ib.id}`, listen: '::', listen_port: ib.port,
           users: users
-            .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id))
+            .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id) && !this.profileOff(u, `d:${t.id}:${server.id}`))
             .map((u) => ({ name: `${u.id}.d-${t.id}`, password: this.cred(u.id, `t:${t.id}`) })),
           ...(sp.hy2Obfs ? { obfs: { type: 'salamander', password: sp.hy2Obfs } } : {}),
           tls: {
@@ -366,7 +372,7 @@ export class Vpn {
     const ib = ibs[0]!;
     const t = this.template(ib.template_id)!;
     const users = this.users(true)
-      .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id))
+      .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id) && !this.profileOff(u, `d:${t.id}:${server.id}`))
       .map((u) => ({ name: `${u.id}.d-${t.id}`, secret: this.cred(u.id, `t:${t.id}`), maxIps: effectiveLimits(this.ctx, u).devices }));
     return telemtConfig(this.spec(t), ib.port, users, server.host);
   }

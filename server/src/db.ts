@@ -311,6 +311,9 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX exit_speed_t ON exit_speed (template_id, exit_id, at);
   `,
+  `
+  ALTER TABLE users ADD COLUMN excluded_profiles TEXT;
+  `,
 ];
 
 export type Db = DatabaseSync;
