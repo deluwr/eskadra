@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { api, can } from '../api';
-import { ErrorBox, Icon, Info, Switch, useAsync, usePoll, toast, Addr } from '../ui';
+import { api, can, fmtTime } from '../api';
+import { UpdateModal, type Ver } from '../App';
+import { ErrorBox, Icon, Info, Switch, Tag, useAsync, usePoll, toast, Addr } from '../ui';
 
 interface S {
   executorIps: string[];
@@ -17,6 +18,7 @@ export function SettingsPage() {
   return (
     <>
       <div className="page-head"><div><h1>Настройки</h1><p>Адрес исполнителя, проверка связи, блокировки, Telegram-бот и бэкапы</p></div></div>
+      <PanelVersion />
       <Executor s={data} onSaved={reload} />
       <General s={data} />
       <BlocksCard />
@@ -64,6 +66,43 @@ function General({ s }: { s: S }) {
       </div>
       <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/general', v); toast('Настройки сохранены'); })}>Сохранить</button></div>
       <ErrorBox error={error} />
+    </section>
+  );
+}
+
+interface Versions { current: string; minWithData: string; error: string | null; versions: Array<{ version: string; published: string; prerelease: boolean; snapshotAt: string | null; withData: boolean }> }
+
+/** Версия панели и откат на прошлую — только owner. Данные возвращаются из копии, снятой при обновлении с той версии. */
+function PanelVersion() {
+  const { data: ver } = usePoll(() => api.get<Ver>('/api/v1/version'), null);
+  const { data } = usePoll(() => (can('owner') ? api.get<Versions>('/api/v1/update/versions') : Promise.resolve(null)), null);
+  const [pick, setPick] = useState('');
+  const [withData, setWithData] = useState(true);
+  const [open, setOpen] = useState<'update' | 'rollback' | null>(null);
+  if (!ver) return null;
+  const v = data?.versions.find((x) => x.version === pick) ?? data?.versions[0];
+  return (
+    <section className="card pad stack">
+      <span className="flex" style={{ justifyContent: 'space-between' }}>
+        <h2>Версия панели <Info>Перед каждым обновлением и откатом панель сохраняет копию своих данных (последние 8). При откате на версию её данные можно вернуть — на момент, когда с неё обновились.</Info></h2>
+        <span className="flex" style={{ gap: 8 }}><Tag kind="acc">{ver.version}</Tag>{ver.updateAvailable && can('owner') && <button className="btn pri sm" onClick={() => setOpen('update')}>{`Обновить до ${ver.latest}`}</button>}</span>
+      </span>
+      {!can('owner') ? <span className="k">Обновление и откат панели — только у owner.</span> : !data ? <span className="k">Загрузка версий…</span> : data.error ? <ErrorBox error={`список версий с GitHub недоступен: ${data.error}`} /> : !data.versions.length ? <span className="k">Прошлых версий нет.</span> : (
+        <div className="flex" style={{ alignItems: 'flex-end', gap: 14 }}>
+          <label className="fld" style={{ flex: '0 1 320px' }}>Откатить на
+            <select className="inp" value={v?.version ?? ''} onChange={(e) => { setPick(e.target.value); setWithData(true); }}>
+              {data.versions.map((x) => <option key={x.version} value={x.version}>{x.version} · {x.published.slice(0, 10)}{x.snapshotAt ? ' · есть копия данных' : ''}</option>)}
+            </select>
+          </label>
+          <label className="cb" title={v?.withData ? undefined : v && !v.snapshotAt ? 'копии данных этой версии нет: с неё обновлялись до появления копий или давно' : `версии до ${data.minWithData} не умеют подменять данные`}>
+            <input type="checkbox" checked={!!v?.withData && withData} disabled={!v?.withData} onChange={(e) => setWithData(e.target.checked)} />
+            {v?.snapshotAt ? `вернуть данные на ${fmtTime(v.snapshotAt)}` : 'вернуть данные (копии нет)'}
+          </label>
+          <button className="btn warn" disabled={!v} onClick={() => setOpen('rollback')}>Откатить…</button>
+        </div>
+      )}
+      {v && !v.withData && <span className="k">Без копии данных старая версия запустится на текущей базе — годится для соседних версий; для далёких откатов возможны ошибки.</span>}
+      {open && <UpdateModal ver={ver} target={open === 'rollback' ? v?.version : undefined} rollback={open === 'rollback' ? { withData: !!v?.withData && withData } : undefined} onClose={() => setOpen(null)} />}
     </section>
   );
 }

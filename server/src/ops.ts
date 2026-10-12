@@ -56,6 +56,16 @@ export function slowExits(results: Array<{ exitId: string; ok: boolean; mbps: nu
   }).map((r) => r.exitId);
 }
 
+/** Медиана замеров скорости выхода за последние windowMin минут (0 — последний замер); null — замеров нет. */
+export function medianSpeed(ctx: Ctx, templateId: string, exitId: string, windowMin: number): number | null {
+  const rows = (windowMin > 0
+    ? ctx.db.prepare('SELECT mbps FROM exit_speed WHERE template_id = ? AND exit_id = ? AND at >= ? ORDER BY mbps').all(templateId, exitId, new Date(Date.now() - windowMin * 60_000).toISOString())
+    : ctx.db.prepare('SELECT mbps FROM exit_speed WHERE template_id = ? AND exit_id = ? ORDER BY at DESC LIMIT 1').all(templateId, exitId)) as Array<{ mbps: number }>;
+  if (!rows.length) return null;
+  const m = rows.length >> 1;
+  return rows.length % 2 ? rows[m]!.mbps : Math.round(((rows[m - 1]!.mbps + rows[m]!.mbps) / 2) * 10) / 10;
+}
+
 /** Какие уровни цепочки пропустить: медленный выход, если дальше по порядку есть отвечающий быстрый. Все медленные — никого. */
 export function skipLevels(results: Array<{ exitId: string; ok: boolean }>, slow: string[]): boolean[] {
   return results.map((r, i) => slow.includes(r.exitId) && results.slice(i + 1).some((x) => x.ok && !slow.includes(x.exitId)));
@@ -453,10 +463,12 @@ export class Ops {
     let actualAfter: string | null = null;
     // по порядку — только «отвечает ли выход» (таймаут = выход недоступен), без замера скорости и порогов
     const order = sp.autoMode === 'order';
-    // по порядку с порогом скорости: замер раз в checkMin минут (или по кнопке «Проверить сейчас»), между ними — только доступность
+    // по порядку с порогом скорости: замер каждые speedEveryMin минут, решение о пропуске — раз в checkMin минут по медиане
+    // замеров за это время (одна неудачная минута трафик не перекидывает); по кнопке «Проверить сейчас» — и замер, и решение
     const thr = order ? sp.orderMinMbps : 0;
-    const speedAt = getSetting<string>(this.ctx.db, `auto.speedAt.${t.id}`, '');
-    const measure = !order || (thr > 0 && (opts.force || !speedAt || Date.now() - Date.parse(speedAt) >= sp.checkMin * 60_000));
+    const due = (key: string, min: number) => { const at = getSetting<string>(this.ctx.db, key, ''); return !at || Date.now() - Date.parse(at) >= min * 60_000 - 5_000; };
+    const measure = !order || (thr > 0 && (opts.force || due(`auto.speedAt.${t.id}`, sp.speedEveryMin)));
+    const decide = thr > 0 && (opts.force || due(`auto.decideAt.${t.id}`, sp.checkMin));
     const prevSlow = getSetting<string[]>(this.ctx.db, `auto.slow.${t.id}`, []);
     let slow: string[] = prevSlow;
     const tagOf = (exitId: string) => `to-${t.id}-${exitId}`;
@@ -505,7 +517,16 @@ export class Ops {
       // с порогом скорости медленный уровень пропускается: его балансировщику назначается переход на следующий уровень
       let skip: boolean[] = [];
       if (order) {
-        slow = slowExits(results, prevSlow, thr, measure && thr > 0);
+        if (measure && thr) {
+          const ins = this.ctx.db.prepare('INSERT INTO exit_speed (template_id, exit_id, at, mbps) VALUES (?, ?, ?, ?)');
+          const now = new Date().toISOString();
+          for (const r of results) if (r.ok) ins.run(t.id, r.exitId, now, r.mbps ?? 0);   // отвечает, но не скачал — 0
+          this.ctx.db.prepare(`DELETE FROM exit_speed WHERE at < ?`).run(new Date(Date.now() - 24 * 3600_000).toISOString());
+        }
+        // решение — по медиане замеров за окно checkMin (по кнопке — по только что сделанному замеру)
+        const window = opts.force ? 0 : sp.checkMin;
+        const basis = results.map((r) => ({ ...r, mbps: opts.force ? r.mbps : medianSpeed(this.ctx, t.id, r.exitId, window) }));
+        slow = decide ? slowExits(basis, prevSlow, thr, true) : slowExits(results, prevSlow, thr, false);
         for (const r of results) r.slow = slow.includes(r.exitId);
         skip = skipLevels(results, slow);
         next = skip[0] ? `lb-${t.id}-2` : null;
@@ -513,9 +534,10 @@ export class Ops {
           const st = await this.setOverride(n, t.id, skip[i] ? `lb-${t.id}-${i + 2}` : null, orderBalancer(t.id, i));
           if (!st) log(`${entry.name}: уровень ${i + 1} не принял ${skip[i] ? 'пропуск' : 'снятие пропуска'} — повторю при следующей проверке`);
         }
-        if (thr) for (const [i, r] of results.entries()) if (skip[i]) log(`${r.name}: ${r.mbps ?? '—'} Мбит/с — медленнее ${thr} Мбит/с, трафик идёт на следующий по порядку`);
+        if (thr && decide) for (const [i, r] of results.entries()) if (skip[i]) log(`${r.name}: медиана ${medianSpeed(this.ctx, t.id, r.exitId, opts.force ? 0 : sp.checkMin) ?? '—'} Мбит/с — медленнее ${thr} Мбит/с, трафик идёт на следующий по порядку`);
         setSetting(this.ctx.db, `auto.slow.${t.id}`, slow);
         if (measure && thr) setSetting(this.ctx.db, `auto.speedAt.${t.id}`, new Date().toISOString());
+        if (decide) setSetting(this.ctx.db, `auto.decideAt.${t.id}`, new Date().toISOString());
       } else next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
       // сверяемся с входом на каждой проверке, а не только при смене: выбор мог сброситься перезапуском Xray
       const st = await this.setOverride(n, t.id, next);

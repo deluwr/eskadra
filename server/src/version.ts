@@ -24,3 +24,20 @@ export async function versionInfo() {
   const updateAvailable = version !== 'dev' && !!cache.latest && cmpVersion(cache.latest, version) > 0;
   return { version, latest: cache.latest, updateAvailable, error: cache.error };
 }
+
+let relCache: { at: number; list: Array<{ version: string; published: string; prerelease: boolean }> } | null = null;
+
+/** Релизы панели на GitHub (для отката), новые первыми; кэш на 10 минут. */
+export async function panelReleases() {
+  if (relCache && Date.now() - relCache.at < 10 * 60_000) return relCache.list;
+  const repo = read('REPO') || 'deluwr/eskadra';
+  const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=50`, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'eskadra-panel' }, signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`GitHub ${res.status}`);
+  const data = (await res.json()) as Array<{ tag_name: string; published_at: string; prerelease: boolean; draft: boolean }>;
+  const list = data.filter((r) => !r.draft && /^v\d+\.\d+\.\d+$/.test(r.tag_name))
+    .map((r) => ({ version: r.tag_name, published: r.published_at, prerelease: r.prerelease }));
+  relCache = { at: Date.now(), list };
+  return list;
+}

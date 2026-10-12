@@ -4,7 +4,8 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Ops } from '../ops.js';
 import { botProxyOptions, botProxySetting, saveBotProxy } from '../botproxy.js';
-import { versionInfo } from '../version.js';
+import { panelReleases, versionInfo } from '../version.js';
+import { cmpVersion } from '../releases.js';
 import { Ctx, guard, HttpError } from '../ctx.js';
 import { getSetting, setSetting } from '../db.js';
 import { hashPassword, sha256hex, verifyPassword } from '../lib/crypto.js';
@@ -16,7 +17,7 @@ import { Vpn, json, period } from '../vpn.js';
 import type { Backups } from '../backup.js';
 import type { Bot } from '../bot.js';
 import { attentionOf } from '../attention.js';
-import { requestUpdate, updateHelperInstalled, updateStatus } from '../update.js';
+import { listSnapshots, MIN_ROLLBACK_WITH_DATA, requestUpdate, snapshotDb, stageRollbackData, updateHelperInstalled, updateStatus } from '../update.js';
 import { armRestore, decryptBackup, stageRestore } from '../restorelib.js';
 import { config } from '../config.js';
 import { NOTIFY } from '../botadmin.js';
@@ -283,8 +284,50 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     if (!updateHelperInstalled()) throw new HttpError(409, 'помощник обновления не установлен: один раз обновите панель командой eskadra update на главном сервере — дальше кнопка будет работать');
     const st = updateStatus();
     if (st.running || st.pending) throw new HttpError(409, 'обновление уже идёт');
+    // копия данных текущей версии: при откате на неё их можно вернуть
+    const snap = snapshotDb(db, (await versionInfo()).version);
     requestUpdate(version);
-    audit(db, who(req), 'panel.update', undefined, { version });
+    audit(db, who(req), 'panel.update', undefined, { version, snapshot: snap?.file ?? null });
+    return { ok: true };
+  });
+
+  /** Прошлые версии панели (GitHub) и копии данных, снятые при уходе с них. */
+  app.get('/api/v1/update/versions', async () => {
+    const { version } = await versionInfo();
+    const snaps = listSnapshots();
+    let releases: Array<{ version: string; published: string; prerelease: boolean }> = [];
+    let error: string | null = null;
+    try { releases = await panelReleases(); } catch (e) { error = (e as Error).message; }
+    return {
+      current: version, minWithData: `v${MIN_ROLLBACK_WITH_DATA}`, error,
+      versions: releases.filter((r) => version === 'dev' || cmpVersion(r.version, version) < 0).map((r) => {
+        const snap = snaps.find((x) => x.version === r.version);
+        return { ...r, snapshotAt: snap?.at ?? null, withData: !!snap && cmpVersion(r.version, MIN_ROLLBACK_WITH_DATA) >= 0 };
+      }),
+    };
+  });
+
+  /**
+   * Откат на прошлую версию. withData — вернуть и данные на момент, когда с неё обновились (изменения после
+   * пропадут, текущие данные сохранятся рядом с суффиксом .before-restore-…). Без него новая база остаётся
+   * со старым кодом — годится только для близких версий.
+   */
+  app.post('/api/v1/update/rollback', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const b = z.object({ version: z.string().regex(/^v?\d+\.\d+\.\d+$/), withData: z.boolean() }).parse(req.body);
+    const version = b.version.replace(/^v?/, 'v');
+    if (!updateHelperInstalled()) throw new HttpError(409, 'помощник обновления не установлен: один раз выполните eskadra update на главном сервере');
+    const st = updateStatus();
+    if (st.running || st.pending) throw new HttpError(409, 'обновление уже идёт');
+    const cur = (await versionInfo()).version;
+    if (cur !== 'dev' && cmpVersion(version, cur) >= 0) throw new HttpError(400, `${version} не старше текущей ${cur} — это обновление, а не откат`);
+    if (b.withData) {
+      if (cmpVersion(version, MIN_ROLLBACK_WITH_DATA) < 0) throw new HttpError(400, `версии до v${MIN_ROLLBACK_WITH_DATA} не умеют подменять данные при запуске — откат только без данных`);
+      try { stageRollbackData(version); } catch (e) { throw new HttpError(409, (e as Error).message); }
+    }
+    // копия текущих данных — чтобы можно было вернуться вперёд с ними
+    const snap = snapshotDb(db, cur);
+    requestUpdate(version);
+    audit(db, who(req), 'panel.rollback', undefined, { from: cur, to: version, withData: b.withData, snapshot: snap?.file ?? null });
     return { ok: true };
   });
 

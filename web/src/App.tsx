@@ -128,7 +128,7 @@ export function App() {
   );
 }
 
-type Ver = { version: string; latest: string | null; updateAvailable: boolean };
+export type Ver = { version: string; latest: string | null; updateAvailable: boolean };
 
 /** Низ меню: только когда есть обновление (версия — под логотипом). */
 function SideFoot({ ver, owner }: { ver: Ver | null; owner: boolean }) {
@@ -150,7 +150,8 @@ function SideFoot({ ver, owner }: { ver: Ver | null; owner: boolean }) {
 interface UpdState { helper: boolean; pending: boolean; running: boolean; exit: number | null; log: string[]; at: string | null }
 
 /** Обновление панели: запрос root-помощнику, журнал в реальном времени, перезагрузка страницы на новой версии. */
-function UpdateModal({ ver, onClose }: { ver: Ver; onClose: () => void }) {
+export function UpdateModal({ ver, onClose, target, rollback }: { ver: Ver; onClose: () => void; target?: string; rollback?: { withData: boolean } }) {
+  const to = target ?? ver.latest ?? 'latest';
   const [st, setSt] = useState<UpdState | null>(null);
   const [started, setStarted] = useState(false);
   const [restarting, setRestarting] = useState(false);
@@ -166,22 +167,28 @@ function UpdateModal({ ver, onClose }: { ver: Ver; onClose: () => void }) {
   }, [started, ver.version]);
   const failed = st?.exit !== null && st?.exit !== undefined && st.exit !== 0 && started;
   return (
-    <Modal size="md" title={`Обновление до ${ver.latest}`} onClose={onClose}>
+    <Modal size="md" title={rollback ? `Откат на ${to}` : `Обновление до ${to}`} onClose={onClose}>
       {!started ? (
         <>
-          <p className="small">{`Панель скачает и установит ${ver.latest} на главном сервере и перезапустится.`} Данные, настройки и узлы не затрагиваются; пользователи VPN связь не теряют.</p>
+          {rollback
+            ? <p className="small">{`Панель установит ${to} на главном сервере и перезапустится.`} {rollback.withData ? `Данные вернутся к моменту обновления с ${to}: изменения после него пропадут, текущие данные сохранятся на сервере рядом (суффикс .before-restore-…).` : 'Данные останутся текущими — старая версия может не понять то, что появилось позже.'} Перед откатом панель сохранит копию текущих данных — на эту версию можно будет вернуться вперёд. Пользователи VPN связь не теряют.</p>
+            : <p className="small">{`Панель скачает и установит ${to} на главном сервере и перезапустится.`} Данные, настройки и узлы не затрагиваются; пользователи VPN связь не теряют. Перед обновлением панель сохраняет копию данных — для отката.</p>}
           {st && !st.helper && <div className="alert warn small">Кнопке нужен помощник обновления, его ставит обновление из консоли. Один раз выполните на главном сервере:<br /><code>eskadra update</code><br />Дальше обновлять можно этой кнопкой.<br /><CopyButton text="eskadra update" label="Скопировать команду" /></div>}
           <ErrorBox error={error} />
           <div className="flex">
-            <button className="btn pri" disabled={busy || (st !== null && !st.helper)} onClick={() => void run(async () => { await api.post('/api/v1/update', { version: ver.latest ?? 'latest' }); setStarted(true); })}>Обновить сейчас</button>
+            <button className={`btn ${rollback ? 'warn' : 'pri'}`} disabled={busy || (st !== null && !st.helper)} onClick={() => void run(async () => {
+              if (rollback) await api.post('/api/v1/update/rollback', { version: to, withData: rollback.withData });
+              else await api.post('/api/v1/update', { version: to });
+              setStarted(true);
+            })}>{rollback ? 'Откатить' : 'Обновить сейчас'}</button>
             <button className="btn ghost" onClick={onClose}>Отмена</button>
           </div>
         </>
       ) : (
         <>
           <span className="flex small" style={{ gap: 8 }}>
-            {failed ? <span style={{ color: 'var(--fail)' }}>Обновление не удалось — журнал ниже. Панель осталась на прежней версии.</span>
-              : <><span className="spin" aria-hidden="true" />{restarting ? 'Панель перезапускается…' : st?.pending ? 'Ждём помощник обновления…' : 'Идёт обновление…'}</>}
+            {failed ? <span style={{ color: 'var(--fail)' }}>{rollback ? 'Откат не удался' : 'Обновление не удалось'} — журнал ниже. Панель осталась на прежней версии.</span>
+              : <><span className="spin" aria-hidden="true" />{restarting ? 'Панель перезапускается…' : st?.pending ? 'Ждём помощник обновления…' : rollback ? 'Идёт откат…' : 'Идёт обновление…'}</>}
           </span>
           <pre className="code" style={{ maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{st?.log.join('\n') || '…'}</pre>
           <div className="flex"><button className="btn ghost" onClick={onClose}>{failed ? 'Закрыть' : 'Свернуть'}</button></div>

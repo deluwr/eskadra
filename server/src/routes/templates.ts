@@ -4,7 +4,7 @@ import { getSetting, setSetting } from '../db.js';
 import { z } from 'zod';
 import { Ctx, guard, HttpError, type TemplateRow } from '../ctx.js';
 import { audit } from '../lib/audit.js';
-import { Ops, startJob } from '../ops.js';
+import { medianSpeed, Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
 import { checkTemplateServers, roleOf, ScopeError } from '../roles.js';
 import { PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
@@ -32,6 +32,7 @@ const settingsBody = z.object({
   checkMin: z.number().int().min(5).max(1440).optional(),
   testMB: z.number().int().min(1).max(100).optional(),
   orderMinMbps: z.number().min(0).max(10000).optional(),
+  speedEveryMin: z.number().int().min(1).max(1440).optional(),
 }).default({});
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -159,7 +160,10 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = (tag: string | null) => (tag ? tag.slice(`to-${t.id}-`.length) : null);
     // selected — что назначила панель; actual — через какой выход вход реально ведёт трафик (по данным Xray входа)
     return { rows, selected: id(ov), actual: id(act), checkedAt: getSetting<string>(db, `auto.checked.${t.id}`, '') || null,
-      slow: getSetting<string[]>(db, `auto.slow.${t.id}`, []), speedAt: getSetting<string>(db, `auto.speedAt.${t.id}`, '') || null };
+      slow: getSetting<string[]>(db, `auto.slow.${t.id}`, []), speedAt: getSetting<string>(db, `auto.speedAt.${t.id}`, '') || null,
+      decideAt: getSetting<string>(db, `auto.decideAt.${t.id}`, '') || null,
+      // медиана скорости за окно решения — то, по чему выход пропускается
+      median: Object.fromEntries(vpn.relayTargets(t).map((x) => [x.id, medianSpeed(ctx, t.id, x.id, specOf(t).checkMin)])) };
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/templates/:id/health/check', { preHandler: guard(ctx, 'configs.rollout') }, async (req) => {

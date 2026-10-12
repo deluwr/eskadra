@@ -4,6 +4,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
 
 const dir = () => path.join(config.dataDir, 'update');
@@ -34,4 +35,58 @@ export function updateStatus() {
     log: lines.slice(-40),
     at: mtime.toISOString(),
   };
+}
+
+// ───── откат на прошлую версию: копия базы перед каждым обновлением ─────
+
+const snapDir = () => path.join(dir(), 'snapshots');
+const SNAP_KEEP = 8;
+/** Версии, на которые откат возможен вместе с данными: они при запуске подменяют базу подготовленной копией (restorelib). */
+export const MIN_ROLLBACK_WITH_DATA = '0.15.0';
+
+export interface Snapshot { version: string; file: string; at: string; bytes: number }
+
+const safeVer = (v: string) => (/^v?\d+\.\d+\.\d+$/.test(v) ? v.replace(/^v?/, 'v') : null);
+
+/**
+ * Копия базы, с которой панель уходит на другую версию: при откате на эту версию её данные можно вернуть.
+ * VACUUM INTO — согласованная копия работающей базы (WAL учитывается). Хранятся последние SNAP_KEEP.
+ */
+export function snapshotDb(db: DatabaseSync, version: string): Snapshot | null {
+  const v = safeVer(version);
+  if (!v) return null;   // dev-сборка — не снимаем
+  fs.mkdirSync(snapDir(), { recursive: true, mode: 0o700 });
+  const file = path.join(snapDir(), `${v}.db`);
+  fs.rmSync(file, { force: true });
+  db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+  fs.chmodSync(file, 0o600);
+  const all = listSnapshots().sort((a, b) => b.at.localeCompare(a.at));
+  for (const s of all.slice(SNAP_KEEP)) fs.rmSync(path.join(snapDir(), s.file), { force: true });
+  return listSnapshots().find((s) => s.version === v) ?? null;
+}
+
+export function listSnapshots(): Snapshot[] {
+  if (!fs.existsSync(snapDir())) return [];
+  return fs.readdirSync(snapDir()).filter((f) => /^v\d+\.\d+\.\d+\.db$/.test(f)).map((f) => {
+    const st = fs.statSync(path.join(snapDir(), f));
+    return { version: f.slice(0, -3), file: f, at: st.mtime.toISOString(), bytes: st.size };
+  });
+}
+
+/**
+ * Подготовить данные к откату: копия базы версии version и текущий master.key — в $DATA/restore с меткой APPLY.
+ * Старая версия при запуске подменит ими данные (прежние файлы сохранятся с суффиксом .before-restore-…).
+ */
+export function stageRollbackData(version: string) {
+  const v = safeVer(version);
+  const snap = v ? path.join(snapDir(), `${v}.db`) : '';
+  if (!v || !fs.existsSync(snap)) throw new Error(`нет копии данных версии ${version}`);
+  const rd = path.join(config.dataDir, 'restore');
+  fs.rmSync(rd, { recursive: true, force: true });
+  fs.mkdirSync(rd, { recursive: true, mode: 0o700 });
+  fs.copyFileSync(snap, path.join(rd, 'fleet.db'));
+  fs.copyFileSync(path.join(config.dataDir, 'master.key'), path.join(rd, 'master.key'));
+  for (const f of ['fleet.db', 'master.key']) fs.chmodSync(path.join(rd, f), 0o600);
+  fs.writeFileSync(path.join(rd, 'manifest.json'), JSON.stringify({ created: new Date().toISOString(), profile: `rollback ${v}`, contents: [] }));
+  fs.writeFileSync(path.join(rd, 'APPLY'), new Date().toISOString());
 }

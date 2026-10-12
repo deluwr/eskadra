@@ -302,6 +302,15 @@ const MIGRATIONS: string[] = [
     ('admin', 'admin', 1, '["users.edit","users.delete","users.limits","configs.edit","configs.rollout","configs.delete","servers.manage","servers.protect","cores.manage","ports.groups","backups.run","settings.edit"]'),
     ('operator', 'operator', 1, '["users.edit","configs.edit","configs.rollout"]');
   `,
+  `
+  CREATE TABLE exit_speed (
+    template_id TEXT NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+    exit_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    at TEXT NOT NULL,
+    mbps REAL
+  );
+  CREATE INDEX exit_speed_t ON exit_speed (template_id, exit_id, at);
+  `,
 ];
 
 export type Db = DatabaseSync;

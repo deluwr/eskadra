@@ -62,32 +62,45 @@ function fixture() {
   return { ctx, db, speed, alive, bo, probes, ops: new Ops(ctx), tpl: () => db.prepare(`SELECT * FROM templates WHERE id = 't'`).get() as never };
 }
 
-test('«по порядку» с порогом: медленный первый пропускается, затем и второй; вернулась скорость — назад; замер по расписанию', async () => {
+test('«по порядку» с порогом: замер каждую минуту, решение раз в 15 минут по медиане — одна плохая минута не перекидывает', async () => {
   const f = fixture();
-  // первая проверка — с замером: es 30 < 50 — пропускаем, трафик через pl
+  // время идёт: сдвигаем отметки «когда мерили» и «когда решали» в прошлое
+  const ago = (key: string, min: number) => setSetting(f.db, key, new Date(Date.now() - min * 60_000).toISOString());
+  const minute = () => ago('auto.speedAt.t', 1.1);
+  const samples = (exit: string) => (f.db.prepare(`SELECT COUNT(*) AS n FROM exit_speed WHERE exit_id = ?`).get(exit) as { n: number }).n;
+  // первая проверка — замер и решение: es 30 < 50 — пропускаем, трафик через pl
+  f.speed.es = 30;
   let r = await f.ops.checkExits(f.tpl(), () => undefined);
-  assert.deepEqual(f.bo, { 'bal-t-2': null, 'bal-t': 'lb-t-2' });
-  assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-pl');
-  assert.deepEqual(r?.results.map((x) => [x.exitId, x.slow]), [['es', true], ['pl', false], ['fi', false]]);
-  assert.deepEqual(r?.switched, { from: 'es', to: 'pl', slow: true }, 'бот: переключён с es на pl — es медленнее порога');
-  // между замерами (каждую минуту) — только доступность, решение держится
-  f.probes.length = 0;
-  f.speed.es = 100;
-  await f.ops.checkExits(f.tpl(), () => undefined);
-  assert.ok(f.probes.every(([, bytes]) => bytes === 0), 'без скачивания');
   assert.equal(f.bo['bal-t'], 'lb-t-2');
-  // по кнопке «Проверить сейчас» — замер: pl тоже медленный → сразу на fi
+  assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-pl');
+  assert.deepEqual(r?.switched, { from: 'es', to: 'pl', slow: true }, 'бот: переключён с es на pl — es медленнее порога');
+  // через минуту es разогнался — замер есть, но до решения пропуск держится
+  f.speed.es = 100; minute(); f.probes.length = 0;
+  await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.ok(f.probes.some(([, bytes]) => bytes > 0), 'замер скорости — каждую минуту');
+  assert.equal(samples('es'), 2);
+  assert.equal(f.bo['bal-t'], 'lb-t-2', 'решение — только раз в 15 минут');
+  // в ту же минуту повторный замер не делается
+  f.probes.length = 0;
+  await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.ok(f.probes.every(([, bytes]) => bytes === 0));
+  // ещё три быстрые минуты, время решения: медиана es [30, 100, 100, 100, 100] = 100 — снова через es
+  for (let i = 0; i < 3; i++) { minute(); await f.ops.checkExits(f.tpl(), () => undefined); }
+  ago('auto.decideAt.t', 16);
+  minute(); await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.equal(f.bo['bal-t'], null);
+  assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-es');
+  // одна плохая минута es (10) среди быстрых — медиана выше порога, трафик остаётся на es
+  f.db.prepare('DELETE FROM exit_speed').run();
+  for (const v of [100, 10, 100]) { f.speed.es = v; minute(); await f.ops.checkExits(f.tpl(), () => undefined); }
+  ago('auto.decideAt.t', 16); f.speed.es = 100;
+  minute(); await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.equal(f.bo['bal-t'], null, 'одна просадка не перекидывает');
+  // устойчиво медленно и es, и pl — по кнопке «Проверить сейчас» сразу на fi
   f.speed.es = 30; f.speed.pl = 20;
   r = await f.ops.checkExits(f.tpl(), () => undefined, { force: true });
   assert.deepEqual([f.bo['bal-t'], f.bo['bal-t-2']], ['lb-t-2', 'lb-t-3']);
   assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-fi');
-  assert.deepEqual(r?.switched, { from: 'pl', to: 'fi', slow: true });
-  // скорость es вернулась (выше порога +10%) — снова через es, пропуски сняты
-  f.speed.es = 60; f.speed.pl = 80;
-  setSetting(f.db, 'auto.speedAt.t', new Date(Date.now() - 16 * 60_000).toISOString());   // подошло время замера
-  r = await f.ops.checkExits(f.tpl(), () => undefined);
-  assert.deepEqual([f.bo['bal-t'], f.bo['bal-t-2']], [null, null]);
-  assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-es');
 });
 
 test('«по порядку» без порога — ничего не мерим и не пропускаем', async () => {

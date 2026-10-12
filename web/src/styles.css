@@ -86,6 +86,8 @@ code { background: var(--surface2); padding: .05em .35em; border-radius: 4px; ov
 .btn:active:not(:disabled):not(.static) { scale: 0.96; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn.pri { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.btn.warn:hover:not(:disabled) { background: color-mix(in srgb, var(--warn) 12%, transparent); }
 .btn.ghost { background: transparent; border-color: transparent; }
 .btn.danger { color: var(--fail); border-color: var(--fail-bg); background: var(--fail-bg); }
 .btn.sm { min-height: 32px; padding: 0 10px; font-size: 13px; }
