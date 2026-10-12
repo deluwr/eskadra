@@ -57,6 +57,9 @@ case "${1:-}" in
   host-reboot)   systemd-run --quiet --on-active=5 --unit=eskadra-reboot /bin/systemctl reboot && echo "reboot in 5s" ;;
   xray-x25519)   exec /usr/local/sbin/fleet-core x25519 ;;
   xray-stats)    exec /usr/local/sbin/fleet-core stats ;;
+  # лимит устройств: кто с каких IP онлайн; замена правил маршрутизации на ходу (stdin — JSON)
+  xray-online)   exec /usr/local/sbin/fleet-core online ;;
+  xray-rules)    exec /usr/local/sbin/fleet-core rules ;;
   singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;
   host-stat)     exec /usr/local/sbin/fleet-core hoststat ;;
   exit-probe)    exec /usr/local/sbin/fleet-core probe "${2:?port}" "${3:?bytes}" ;;

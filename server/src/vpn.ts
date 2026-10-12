@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Ctx, InboundRow, ServerRow, TemplateRow, UserRow } from './ctx.js';
 import { getSetting } from './db.js';
 import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
+import { blockedDevices, limitRules } from './devices.js';
 import { certName, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
@@ -130,8 +131,11 @@ export class Vpn {
 
   // ───── рендер конфигов узла ─────
 
-  /** Конфиг Xray для узла: все xray-inbounds узла (direct и relay), клиенты, маршруты входа. */
-  renderXray(server: ServerRow): object | null {
+  /**
+   * Конфиг Xray для узла: все xray-inbounds узла (direct и relay), клиенты, маршруты входа.
+   * limits — включить текущие блокировки лишних устройств (для отпечатка конфига — без них: они меняются на ходу).
+   */
+  renderXray(server: ServerRow, opts: { limits?: boolean } = {}): object | null {
     const ibs = this.inbounds(`server_id = ? AND state IN ('active','deploying')`, server.id)
       .filter((i) => this.template(i.template_id)?.core === 'xray');
     if (!ibs.length) return null;
@@ -140,12 +144,13 @@ export class Vpn {
       { tag: 'api', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } },
     ];
     const outbounds: object[] = [{ tag: 'direct', protocol: 'freedom' }, { tag: 'block', protocol: 'blackhole' }];
-    const rules: object[] = [
+    const head: object[] = [
       { type: 'field', inboundTag: ['api'], outboundTag: 'api' },
       // раньше правил пользователей; домены резолвятся для этой проверки (domainStrategy IPOnDemand)
       { type: 'field', ip: PRIVATE_NETS, outboundTag: 'block' },
       { type: 'field', protocol: ['bittorrent'], outboundTag: 'block' },
     ];
+    const rules: object[] = [];
     const balancers: object[] = [];
     const observed: string[] = [];   // префиксы outbound'ов выходов, за которыми следит Xray (умный «Авто»)
     let observeRtt = 0;
@@ -229,11 +234,22 @@ export class Vpn {
         },
       } : {}),
       stats: {},
-      policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true } }, system: { statsInboundUplink: false } },
+      // statsUserOnline — IP с открытыми соединениями по каждому пользователю: по ним считается лимит устройств (devices.ts)
+      policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true, statsUserOnline: true } }, system: { statsInboundUplink: false } },
       inbounds,
       outbounds,
-      routing: { domainStrategy: 'IPOnDemand', rules, balancers },
+      routing: { domainStrategy: 'IPOnDemand', rules: [...head, ...tagRules([...(opts.limits === false ? [] : limitRules(blockedDevices(this.ctx))), ...rules], 'r0')], balancers },
     };
+  }
+
+  /**
+   * Правила после служебных (лимит устройств + маршруты) с тегами поколения gen — для замены на работающем
+   * Xray без перезапуска (fleet-core rules): новые дописываются, затем старые удаляются по тегам.
+   */
+  routingTail(server: ServerRow, gen: string): object[] | null {
+    const cfg = this.renderXray(server) as { routing: { rules: Array<Record<string, unknown>> } } | null;
+    if (!cfg) return null;
+    return cfg.routing.rules.filter((r) => typeof r.ruleTag === 'string').map((r, i) => ({ ...r, ruleTag: `${gen}-${i}` }));
   }
 
   /** Клиенты direct-inbound: пользователи с прямым доступом к узлу + служебный клиент входа, ведущего сюда. */
@@ -342,6 +358,9 @@ export class Vpn {
     else for (const id of serverIds) this.db.prepare('UPDATE servers SET config_dirty = 1 WHERE id = ?').run(id);
   }
 }
+
+/** Теги правил поколения gen: по ним fleet-core rules убирает прежний набор после того, как добавлен новый. */
+const tagRules = (rules: object[], gen: string) => rules.map((r, i) => ({ ...r, ruleTag: `${gen}-${i}` }));
 
 const hostForUri = (h: string) => (h.includes(':') && !h.startsWith('[') ? `[${h}]` : h);
 

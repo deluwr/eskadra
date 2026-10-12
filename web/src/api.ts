@@ -87,6 +87,7 @@ export interface User {
   effective: { trafficGb: number | null; devices: number | null; expireAt: string | null };
   traffic: { up: number; down: number; period: string };
   allowedIps: Array<{ id: number; cidr: string; source: string; expires_at: string }>;
+  devices: Array<{ ip: string; first_seen: string; last_seen: string; blocked: number }>;
   subUrl: string | null; knockUrl: string | null; profiles: number;
 }
 

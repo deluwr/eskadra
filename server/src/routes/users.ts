@@ -85,6 +85,8 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
       effective: lim,
       traffic: { up: t?.up ?? 0, down: t?.down ?? 0, period: period() },
       allowedIps: ips,
+      // устройства (IP с открытыми соединениями) за последние минуты; blocked — сверх лимита
+      devices: db.prepare('SELECT ip, first_seen, last_seen, blocked FROM user_devices WHERE user_id = ? ORDER BY first_seen, ip').all(u.id),
       subUrl: base ? `${base}/s/${u.sub_token}` : null,
       knockUrl: base ? `${base}/k/${u.knock_token}` : null,
       profiles: vpn.profiles(u).length,

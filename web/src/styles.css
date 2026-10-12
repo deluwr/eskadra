@@ -365,3 +365,6 @@ span.rm-pick { cursor: default; }
 .ucol { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .ublock { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; align-items: stretch; }
 .ublock h3 { margin: 0; }
+.dev-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.dev { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.dev.off { border-style: dashed; }

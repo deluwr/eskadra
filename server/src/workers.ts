@@ -27,6 +27,7 @@ export class Workers {
     this.every('stats', 5 * 60_000, () => this.stats());
     this.every('sync', 20_000, () => this.syncDirty());
     this.every('exits', 60_000, () => this.exitChecks());
+    this.every('devices', 30_000, () => this.devices());
     this.every('cleanup', 10 * 60_000, async () => {
       this.ctx.db.prepare('DELETE FROM allowed_ips WHERE expires_at < ?').run(new Date().toISOString());
     });
@@ -223,6 +224,17 @@ export class Workers {
       changed = true;
     }
     if (changed) this.ops.vpn.markDirty();
+  }
+
+  /** Лимит устройств: раз в 30 с — кто с каких IP онлайн, блокировка лишних устройств (devices.ts). */
+  async devices() {
+    const r = await this.ops.syncDevices((l) => this.log.warn(l));
+    for (const uid of r.newlyLimited) {
+      const u = this.ctx.db.prepare('SELECT name FROM users WHERE id = ?').get(uid) as { name: string } | undefined;
+      if (!u) continue;
+      audit(this.ctx.db, 'system', 'user.devices_limited', uid, { blocked: r.blocked.get(uid) });
+      void this.bot.notifyAdmins(`📵 ${u.name}: устройств больше лимита — лишние заблокированы (${r.blocked.get(uid)?.join(', ')})`, undefined, 'users');
+    }
   }
 
   /** «Авто через вход» по качеству и по порядку: проверка выходов по расписанию каждой конфигурации, уведомление о переключении. */

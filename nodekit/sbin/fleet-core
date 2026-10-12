@@ -404,6 +404,63 @@ cmd_x25519() {  # выводит private=… public=… (формат Xray ме�
   echo "private=$priv"; echo "public=$pub"
 }
 
+cmd_online() {  # кто онлайн и с каких IP: {"<email>": ["ip", …]} (statsUserOnline, лимит устройств)
+  XRAY="$BIN/eskadra-xray" python3 -c "$(cat <<'PY'
+import json, os, re, subprocess
+from subprocess import PIPE
+X, S = os.environ["XRAY"], "--server=127.0.0.1:10085"
+def api(*a):
+    r = subprocess.run([X, "api", *a, S], stdout=PIPE, stderr=PIPE, timeout=10)
+    return json.loads(r.stdout.decode() or "{}") if r.returncode == 0 else {}
+out = {}
+for name in api("statsgetallonlineusers").get("users", []):
+    m = re.match(r"^user>>>(.+)>>>online$", name)
+    email = m.group(1) if m else name
+    if not re.match(r"^[A-Za-z0-9._-]{1,128}$", email):
+        continue
+    ips = api("statsonlineiplist", "-email", email).get("ips", {})
+    if ips:
+        out[email] = sorted(ips)
+print(json.dumps(out))
+PY
+)"
+}
+
+cmd_rules() {  # правила маршрутизации без перезапуска Xray: stdin {"gen":"r…","rules":[…]} — новые дописываются, прежние (r*-N) удаляются
+  XRAY="$BIN/eskadra-xray" python3 -c "$(cat <<'PY'
+import json, os, re, subprocess, sys, tempfile
+from subprocess import PIPE
+X, S = os.environ["XRAY"], "--server=127.0.0.1:10085"
+req = json.load(sys.stdin)
+gen, rules = req.get("gen", ""), req.get("rules", [])
+if not re.match(r"^r[0-9a-z]{1,16}$", gen) or not isinstance(rules, list):
+    sys.exit("bad request")
+for r in rules:
+    if not isinstance(r, dict) or not str(r.get("ruleTag", "")).startswith(gen + "-"):
+        sys.exit("bad ruleTag")
+ls = subprocess.run([X, "api", "lsrules", S], stdout=PIPE, stderr=PIPE, timeout=10)
+if ls.returncode != 0:
+    sys.exit("lsrules: " + ls.stderr.decode(errors="replace").strip())
+old = sorted({t for t in re.findall(r'"ruleTag"\s*:\s*"(r[0-9a-z]{1,16}-\d+)"', ls.stdout.decode()) if not t.startswith(gen + "-")})
+fd, path = tempfile.mkstemp(suffix=".json")
+with os.fdopen(fd, "w") as f:
+    json.dump({"routing": {"rules": rules}}, f)
+try:
+    # сначала новые (встают после прежних — пока те на месте, маршрут не меняется), потом прежние убираются
+    add = subprocess.run([X, "api", "adrules", S, "-append", path], stdout=PIPE, stderr=PIPE, timeout=15)
+    if add.returncode != 0:
+        sys.exit("adrules: " + (add.stderr or add.stdout).decode(errors="replace").strip())
+finally:
+    os.unlink(path)
+if old:
+    rm = subprocess.run([X, "api", "rmrules", S, *old], stdout=PIPE, stderr=PIPE, timeout=15)
+    if rm.returncode != 0:
+        sys.exit("rmrules: " + (rm.stderr or rm.stdout).decode(errors="replace").strip())
+print("ok rules=%d removed=%d" % (len(rules), len(old)))
+PY
+)"
+}
+
 cmd_stats() {  # счётчики пользователей с обнулением (§16)
   "$BIN/eskadra-xray" api statsquery --server=127.0.0.1:10085 -pattern 'user>>>' -reset 2>/dev/null || echo '{}'
 }
@@ -588,6 +645,8 @@ case "${1:-}" in
   bo)      cmd_bo "${2:?}" "${3:?}" ;;
   bi)      cmd_bi "${2:?}" ;;
   stats)   cmd_stats ;;
+  online)  cmd_online ;;
+  rules)   cmd_rules ;;
   tls)     cmd_tls "${2:?}" ;;
   cert-issue)  cmd_cert_issue "${2:?}" "${3:?}" "${4:?}" ;;
   cert-set)    cmd_cert_set "${2:?}" "${3:?}" "${4:?}" ;;

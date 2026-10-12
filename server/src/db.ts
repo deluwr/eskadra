@@ -280,6 +280,16 @@ const MIGRATIONS: string[] = [
   ALTER TABLE exit_health ADD COLUMN exit_ip TEXT;
   ALTER TABLE exit_health ADD COLUMN exit_loc TEXT;
   `,
+  `
+  CREATE TABLE user_devices (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    ip TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    blocked INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, ip)
+  );
+  `,
 ];
 
 export type Db = DatabaseSync;

@@ -37,7 +37,7 @@ export function UsersPage() {
         <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
           <table>
-            <thead><tr><th>Пользователь</th><th>Трафик за месяц</th><th>Срок</th><th>Режимы</th><th>Профилей</th>{wlOn && <th>Белый список</th>}</tr></thead>
+            <thead><tr><th>Пользователь</th><th>Трафик за месяц</th><th>Срок</th><th>Режимы</th><th>Устройства</th><th>Профилей</th>{wlOn && <th>Белый список</th>}</tr></thead>
             <tbody>
               {list.map((u) => {
                 const used = u.traffic.up + u.traffic.down;
@@ -48,12 +48,14 @@ export function UsersPage() {
                     <td><div className="stack" style={{ gap: 4 }}><span className="mono small">{fmtBytes(used)} / {u.effective.trafficGb ? `${u.effective.trafficGb} ГБ` : '∞'}</span>{u.effective.trafficGb ? <div className={`bar ${pct > 80 ? 'hot' : ''}`}><span style={{ width: `${pct}%` }} /></div> : null}</div></td>
                     <td>{u.effective.expireAt ? <span className={soon(u) ? 'tag warn' : 'k'}>до {u.effective.expireAt.slice(0, 10)}</span> : <span className="k">бессрочно</span>}</td>
                     <td><span className="flex" style={{ gap: 4 }}>{u.modes.map((m) => <Tag key={m}>{m === 'via' ? 'вход' : 'напрямую'}</Tag>)}</span></td>
-                    <td className="mono small">{u.profiles}</td>
+                    <td>{(() => { const on = u.devices.filter((d) => !d.blocked).length; const over = u.devices.length - on;
+                    return <span className="flex" style={{ gap: 4 }}><span className="mono small">{on}{u.effective.devices ? ` / ${u.effective.devices}` : ''}</span>{over > 0 && <Tag kind="fail">+{over} заблок.</Tag>}</span>; })()}</td>
+                  <td className="mono small">{u.profiles}</td>
                     {wlOn && <td><Tag>{u.wl_mode === 'exact' ? '/32' : u.wl_mode === 'prefix' ? '/24' : 'ASN'}</Tag></td>}
                   </tr>
                 );
               })}
-              {users && !list.length && <tr><td colSpan={wlOn ? 6 : 5} className="empty">Пользователей нет</td></tr>}
+              {users && !list.length && <tr><td colSpan={wlOn ? 7 : 6} className="empty">Пользователей нет</td></tr>}
             </tbody>
           </table>
         </div>
@@ -167,8 +169,9 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
               <label className="fld">При превышении<select className="inp" value={f.overAction} onChange={(e) => setF({ ...f, overAction: e.target.value })}><option value="disable">отключить</option><option value="notify">только уведомить</option></select></label>
               <label className="fld">Статус<select className="inp" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value as Form['status'] })}><option value="active">активен</option><option value="disabled">отключён</option></select></label>
             </div>
-            <span className="k">Пустое поле — значение из группы. Трафик считается по Xray; лимит устройств пока только отображается.</span>
+            <span className="k">Пустое поле — значение из группы. Трафик считается по Xray. Устройство — адрес, с которого пользователь сейчас подключён; лишние блокируются только для этого пользователя.</span>
           </section>
+          {user && <Devices user={user} />}
           {wlOn && <section className="ublock stack">
             <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Белый список IP <Info>Включён скрытностью группы (раздел «Порты и связность»): к серверам группы пускаются только адреса из списка. Адрес добавляется по персональной ссылке пользователя или вручную.</Info></h3></div>
             <Seg value={f.wlMode} label="Гранулярность" onChange={(v) => setF({ ...f, wlMode: v })} options={[['exact', 'Точный IP'], ['prefix', 'Префикс /24'], ['asn', 'Сеть оператора']]} />
@@ -253,6 +256,31 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
         {user && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Удалить ${user.name}? Его ссылки и подписка перестанут работать.`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); toast(`${user.name} удалён`); onDeleted(); }); }}>Удалить</button>}
       </div>
     </Modal>
+  );
+}
+
+/** Устройства пользователя сейчас: по ним работает лимит «Устройств одновременно». */
+function Devices({ user }: { user: User }) {
+  const limit = user.effective.devices;
+  const active = user.devices.filter((d) => !d.blocked).length;
+  return (
+    <section className="ublock stack">
+      <span className="flex" style={{ justifyContent: 'space-between' }}>
+        <h3>Устройства сейчас <Info>Устройство — IP, с которого у пользователя открыты подключения (через вход или напрямую — считается один раз). Первые по времени подключения пропускаются, лишние блокируются — только для этого пользователя: другие с той же конфигурации и того же адреса не затрагиваются. Отключившееся устройство освобождает место через 2 минуты. Обновляется раз в 30 секунд; Hysteria2 и узлы с 3x-ui пока не учитываются.</Info></h3>
+        <span className="k">{active}{limit ? ` из ${limit}` : ' · без лимита'}</span>
+      </span>
+      {user.devices.length ? (
+        <div className="dev-list">
+          {user.devices.map((d) => (
+            <span key={d.ip} className={`dev ${d.blocked ? 'off' : ''}`}>
+              <span className="small"><Addr value={d.ip} /></span>
+              <span className="k">с {fmtTime(d.first_seen)}</span>
+              {d.blocked ? <Tag kind="fail">сверх лимита — заблокировано</Tag> : <Tag kind="ok">подключено</Tag>}
+            </span>
+          ))}
+        </div>
+      ) : <span className="k">Сейчас не подключён.</span>}
+    </section>
   );
 }
 

@@ -5,6 +5,7 @@ import { getSetting, setSetting } from './db.js';
 import { json, Vpn } from './vpn.js';
 import { releaseFor, type Core } from './releases.js';
 import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
+import { blockedDevices, limitRules, updateDevices, userOfEmail } from './devices.js';
 
 /** Ядра узла, остановленные вручную на вкладке «Хост». */
 export const coresOff = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx.db, `core.off.${serverId}`, []);
@@ -14,9 +15,12 @@ export const coresOff = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx
  * панели (в т. ч. после обновления) узлы с другим отпечатком переприменяются сами — новая версия Эскадры
  * доходит до серверов без ручного «Выкатить».
  */
+/** Подпись текущих блокировок устройств: узел с другой подписью получает новые правила (без перезапуска). */
+export const limitsSig = (ctx: Ctx) => JSON.stringify(limitRules(blockedDevices(ctx)));
+
 export function renderHash(vpn: Vpn, s: ServerRow): string {
   const part = (f: () => unknown) => { try { return JSON.stringify(f()); } catch (e) { return `error:${(e as Error).message}`; } };
-  return createHash('sha256').update([part(() => vpn.renderXray(s)), part(() => vpn.renderSingbox(s)), part(() => vpn.renderTelemt(s))].join('\n')).digest('hex');
+  return createHash('sha256').update([part(() => vpn.renderXray(s, { limits: false })), part(() => vpn.renderSingbox(s)), part(() => vpn.renderTelemt(s))].join('\n')).digest('hex');
 }
 
 /** Метка в xui_user: для 3x-ui сохранён API-токен, а не логин и пароль. */
@@ -310,6 +314,8 @@ export class Ops {
     }
     this.ctx.updateServer(s.id, { config_dirty: 0 });
     if (!xuiMode) setSetting(this.ctx.db, `applied.${s.id}`, renderHash(this.vpn, s));
+    // блокировки устройств вошли в конфиг — на ходу узел догоняет только их изменения (Workers.devices)
+    if (!xuiMode) setSetting(this.ctx.db, `limits.applied.${s.id}`, limitsSig(this.ctx));
     // перезапуск Xray сбрасывает переключение балансировщика — возвращаем выбранные выходы «Авто» входа
     // (с повтором: сразу после перезапуска API Xray может ещё не отвечать) и сверяем с тем, что реально выбрано
     if (!xuiMode) for (const t of this.vpn.templates().filter((x) => x.entry_id === s.id)) {
@@ -473,6 +479,53 @@ export class Ops {
     const nameOf = (tag: string | null) => (tag ? targets.find((x) => tag === `to-${t.id}-${x.id}`)?.name ?? tag : null);
     // уведомляем о реальной смене выхода, через который идёт трафик
     return { results, switched: actualAfter && actualAfter !== actualBefore ? { from: nameOf(actualBefore), to: nameOf(actualAfter) } : !next && prev && sp.autoMode !== 'order' ? { from: nameOf(prev), to: null } : null };
+  }
+
+  /**
+   * Лимит устройств: кто с каких IP онлайн на Xray-узлах → блокировки лишних устройств → правила на узлах,
+   * где они изменились (на ходу, без перезапуска Xray). Узел, недоступный сейчас, догонит при следующем цикле.
+   */
+  async syncDevices(log: (l: string) => void = () => undefined): Promise<{ newlyLimited: string[]; blocked: Map<string, string[]> }> {
+    const nodes = this.ctx.servers().filter((s) => s.sudo_mode === 'restricted' && s.host_key_fp && coreMode(s) !== 'xui'
+      && json<Record<string, unknown>>(s.cores, {}).xray && this.vpn.inbounds(`server_id = ? AND state = 'active'`, s.id).length);
+    const online = new Map<string, Set<string>>();
+    let seen = 0;
+    for (const s of nodes) {
+      try {
+        const out = await this.ctx.onNode(s, async (n) => {
+          let r = await n.op(['xray-online'], { timeoutMs: 60_000 });
+          if (r.code === 126) { await this.ensureKit(s, n, log); r = await n.op(['xray-online'], { timeoutMs: 60_000 }); }   // старый nodekit
+          return r.code === 0 ? r.stdout : null;
+        });
+        if (out === null) continue;
+        for (const [email, ips] of Object.entries(JSON.parse(out || '{}') as Record<string, string[]>)) {
+          const uid = userOfEmail(email);
+          if (!uid) continue;
+          const set = online.get(uid) ?? new Set<string>();
+          for (const ip of ips) set.add(ip);
+          online.set(uid, set);
+        }
+        seen++;
+      } catch (e) { log(`${s.name}: онлайн не получен — ${(e as Error).message}`); }
+    }
+    // ни один узел не ответил — не делаем выводов (иначе все устройства «ушли» и освободили места)
+    if (nodes.length && !seen) return { newlyLimited: [], blocked: blockedDevices(this.ctx) };
+    const res = updateDevices(this.ctx, online);
+    const sig = limitsSig(this.ctx);
+    for (const s of nodes) {
+      if (getSetting<string>(this.ctx.db, `limits.applied.${s.id}`, '') === sig) continue;
+      const gen = 'r' + Date.now().toString(36);
+      const rules = this.vpn.routingTail(s, gen);
+      if (!rules) continue;
+      try {
+        await this.ctx.onNode(s, async (n) => {
+          const r = await n.op(['xray-rules'], { stdin: JSON.stringify({ gen, rules }), timeoutMs: 60_000 });
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `exit ${r.code}`);
+        });
+        setSetting(this.ctx.db, `limits.applied.${s.id}`, sig);
+      } catch (e) { log(`${s.name}: правила лимита устройств не применены — ${(e as Error).message}`); }
+    }
+    return res;
   }
 
   /** Выкат шаблона: canary → остальные direct-узлы → вход. Ошибка — откат inbound и остановка. */
