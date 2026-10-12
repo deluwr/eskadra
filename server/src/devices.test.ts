@@ -77,14 +77,16 @@ test('конфиг Xray: учёт онлайн-IP, правило лимита �
   const cfg = vpn.renderXray(ctx.server('relay')) as any;
   assert.equal(cfg.policy.levels['0'].statsUserOnline, true);
   const rules = cfg.routing.rules as any[];
-  assert.deepEqual(rules.slice(0, 3).map((r) => r.ruleTag), [undefined, undefined, undefined], 'служебные правила без тега — их замена на ходу не трогает');
-  assert.deepEqual(rules[3], { type: 'field', user: ['regexp:^u-a1\\.'], source: ['198.51.100.2'], outboundTag: 'block', ruleTag: 'r0-0' });
+  // служебные правила (api, частные сети, блокировки протоколов) — без тега: их замена на ходу не трогает
+  const head = rules.findIndex((r) => r.ruleTag);
+  assert.ok(head >= 2 && rules.slice(0, head).every((r) => r.ruleTag === undefined));
+  assert.deepEqual(rules[head], { type: 'field', user: ['regexp:^u-a1\\.'], source: ['198.51.100.2'], outboundTag: 'block', ruleTag: 'r0-0' });
   const route = rules.findIndex((r) => r.balancerTag || String(r.outboundTag).startsWith('to-'));
-  assert.ok(route > 3, 'маршруты входа — после правила лимита');
-  assert.ok(rules.slice(3).every((r) => /^r0-\d+$/.test(r.ruleTag)));
+  assert.ok(route > head, 'маршруты входа — после правила лимита');
+  assert.ok(rules.slice(head).every((r) => /^r0-\d+$/.test(r.ruleTag)));
   assert.equal(renderHash(vpn, ctx.server('relay')), hash, 'блокировки устройств не вызывают перезапуск Xray');
   const tail = vpn.routingTail(ctx.server('relay'), 'rk1')!;
-  assert.equal(tail.length, rules.length - 3);
+  assert.equal(tail.length, rules.length - head);
   assert.ok(tail.every((r: any, i) => r.ruleTag === `rk1-${i}`));
 });
 

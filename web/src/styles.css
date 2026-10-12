@@ -379,3 +379,8 @@ span.rm-pick { cursor: default; }
 .perm-mx td.c.yes { color: var(--ok); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px 14px; }
 @media (prefers-reduced-motion: reduce) { .role { transition: none; } }
+
+/* блокировки: переключатели строками */
+.block-list { display: flex; flex-direction: column; }
+.block-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid var(--line); }
+.block-row:first-child { border-top: 0; padding-top: 0; }

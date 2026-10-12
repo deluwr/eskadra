@@ -167,7 +167,7 @@ function transportSettings(sp: Spec): Record<string, unknown> {
  * Inbound Xray. ssServerKey — ключ сервера для Shadowsocks-2022 (общий на inbound).
  * cert — имя сертификата на узле для TLS.
  */
-export function xrayInbound(sp: Spec, ib: InboundRow, tag: string, clients: XrayClient[], opts: { privateKey?: string; cert?: string | null; ssServerKey?: string }): Record<string, unknown> {
+export function xrayInbound(sp: Spec, ib: InboundRow, tag: string, clients: XrayClient[], opts: { privateKey?: string; cert?: string | null; ssServerKey?: string; forceSniff?: boolean }): Record<string, unknown> {
   let settings: Record<string, unknown>;
   if (sp.protocol === 'shadowsocks') settings = { method: sp.ssMethod, password: opts.ssServerKey, clients, network: 'tcp' };
   else if (sp.protocol === 'vmess') settings = { clients };
@@ -183,7 +183,9 @@ export function xrayInbound(sp: Spec, ib: InboundRow, tag: string, clients: Xray
   return {
     tag, listen: '0.0.0.0', port: ib.port, protocol: sp.protocol, settings,
     streamSettings: sp.protocol === 'shadowsocks' ? undefined : stream,
-    ...(sp.sniffing ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'] } } : {}),
+    // sniffing выключен в конфигурации, но нужен блокировкам (blocks.ts) — только для маршрутизации, адрес назначения не подменяется
+    ...(sp.sniffing ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'] } }
+      : opts.forceSniff ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {}),
   };
 }
 

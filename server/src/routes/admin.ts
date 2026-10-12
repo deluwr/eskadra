@@ -21,6 +21,7 @@ import { armRestore, decryptBackup, stageRestore } from '../restorelib.js';
 import { config } from '../config.js';
 import { NOTIFY } from '../botadmin.js';
 import { listRoles, PERM_KEYS, PERMS, type Perm } from '../roles.js';
+import { blocksOf } from '../blocks.js';
 import type { SubService } from '../subsvc.js';
 
 async function detectEgressIp(): Promise<string> {
@@ -330,6 +331,18 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     setSetting(db, 'knock.ttlHours', b.knockTtlHours);
     audit(db, who(req), 'settings.general', undefined, b);
     return b;
+  });
+
+  // ───── блокировки протоколов на всех узлах (blocks.ts) ─────
+  app.get('/api/v1/settings/blocks', async () => blocksOf(db));
+
+  app.put('/api/v1/settings/blocks', { preHandler: guard(ctx, 'settings.edit') }, async (req) => {
+    const b = z.object({ bittorrent: z.boolean(), smtp: z.boolean(), quic: z.boolean() }).parse(req.body);
+    setSetting(db, 'blocks', b);
+    // конфиги всех узлов меняются — синхронизация переприменит их сама (Xray и sing-box перезапустятся на секунды)
+    new Vpn(ctx).markDirty();
+    audit(db, who(req), 'settings.blocks', undefined, b);
+    return blocksOf(db);
   });
 
   // ───── прокси бота: если api.telegram.org с главного сервера недоступен ─────

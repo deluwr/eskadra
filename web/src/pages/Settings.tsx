@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { api, can } from '../api';
 import { ErrorBox, Icon, Info, Switch, useAsync, usePoll, toast, Addr } from '../ui';
 
 interface S {
@@ -16,9 +16,10 @@ export function SettingsPage() {
   if (!data) return <p className="muted">Загрузка…</p>;
   return (
     <>
-      <div className="page-head"><div><h1>Настройки</h1><p>Адрес исполнителя, проверка связи, Telegram-бот и бэкапы</p></div></div>
+      <div className="page-head"><div><h1>Настройки</h1><p>Адрес исполнителя, проверка связи, блокировки, Telegram-бот и бэкапы</p></div></div>
       <Executor s={data} onSaved={reload} />
       <General s={data} />
+      <BlocksCard />
       <BotCard s={data} onSaved={reload} />
       <BackupCard s={data} />
     </>
@@ -62,6 +63,37 @@ function General({ s }: { s: S }) {
           <select className="inp" value={v.knockTtlHours} onChange={(e) => setV({ ...v, knockTtlHours: Number(e.target.value) })}>{[6, 12, 24, 48].map((h) => <option key={h} value={h}>{h} ч</option>)}</select></label>
       </div>
       <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/general', v); toast('Настройки сохранены'); })}>Сохранить</button></div>
+      <ErrorBox error={error} />
+    </section>
+  );
+}
+
+interface Blocks { bittorrent: boolean; smtp: boolean; quic: boolean }
+
+/** Блокировки протоколов на всех серверах (вход и выходы). */
+function BlocksCard() {
+  const { data, setData } = usePoll(() => api.get<Blocks>('/api/v1/settings/blocks'), null);
+  const { busy, error, run } = useAsync();
+  if (!data) return null;
+  const set = (patch: Partial<Blocks>) => run(async () => {
+    setData(await api.put<Blocks>('/api/v1/settings/blocks', { ...data, ...patch }));
+    toast('Блокировки сохранены — серверы получат их в течение минуты');
+  });
+  const row = (key: keyof Blocks, title: string, text: string) => (
+    <div className="block-row">
+      <span className="row-text"><b className="small">{title}</b><span className="k">{text}</span></span>
+      <Switch label={title} on={data[key]} disabled={busy || !can('settings.edit')} onChange={(v) => void set({ [key]: v })} />
+    </div>
+  );
+  return (
+    <section className="card pad stack">
+      <h2>Блокировки <Info>Действуют на всех серверах — и на входе, и на выходах, для всех пользователей и конфигураций. После изменения серверы переприменяют конфиги сами (подключения прервутся на секунды).</Info></h2>
+      <div className="block-list">
+        {row('bittorrent', 'BitTorrent', 'Протокол по содержимому (TCP и uTP), домены публичных трекеров; на Hysteria2 — ещё и UDP-трекеры. Распознавание работает даже в конфигурациях с выключенным sniffing. Полностью зашифрованные соединения торрент-клиента по содержимому не отличить, но без трекеров и uTP клиенту почти не найти пиров.')}
+        {row('smtp', 'Исходящая почта (SMTP)', 'Порты 25, 465, 587, 2525: через VPN нельзя рассылать почту — хостеры блокируют серверы за спам.')}
+        {row('quic', 'QUIC (HTTP/3)', 'UDP 443. Браузеры и приложения сами откатываются на обычный HTTPS. Включайте, только если QUIC мешает (например, обходит другие правила).')}
+      </div>
+      <span className="k">На серверах с 3x-ui маршрутизацию ведёт сама 3x-ui: BitTorrent она режет своими правилами (по умолчанию включено), остальное — в её настройках.</span>
       <ErrorBox error={error} />
     </section>
   );

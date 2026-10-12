@@ -3,6 +3,7 @@ import type { Ctx, InboundRow, ServerRow, TemplateRow, UserRow } from './ctx.js'
 import { getSetting } from './db.js';
 import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
 import { blockedDevices, limitRules } from './devices.js';
+import { blocksOf, needsSniff, singboxBlockRules, xrayBlockRules } from './blocks.js';
 import { certName, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
@@ -140,6 +141,7 @@ export class Vpn {
       .filter((i) => this.template(i.template_id)?.core === 'xray');
     if (!ibs.length) return null;
     const users = this.users(true);
+    const blocks = blocksOf(this.db);
     const inbounds: object[] = [
       { tag: 'api', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } },
     ];
@@ -148,7 +150,8 @@ export class Vpn {
       { type: 'field', inboundTag: ['api'], outboundTag: 'api' },
       // раньше правил пользователей; домены резолвятся для этой проверки (domainStrategy IPOnDemand)
       { type: 'field', ip: PRIVATE_NETS, outboundTag: 'block' },
-      { type: 'field', protocol: ['bittorrent'], outboundTag: 'block' },
+      // блокировки протоколов (настройка «Блокировки»): BitTorrent, почта, QUIC — на входе и на выходах
+      ...xrayBlockRules(blocks),
     ];
     const rules: object[] = [];
     const balancers: object[] = [];
@@ -231,6 +234,7 @@ export class Vpn {
         privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : undefined,
         cert: certName(sp, t.id, server.id, server.host),
         ssServerKey: ib.public_key ?? undefined,
+        forceSniff: needsSniff(blocks),
       }));
     }
     return {
@@ -308,13 +312,15 @@ export class Vpn {
       up: 0, down: 0, total: 0, remark: `eskadra-${t.name}-${ib.id}`, enable: true, expiryTime: 0, listen: '', port: ib.port, protocol: sp.protocol,
       settings: JSON.stringify({ ...x.settings, ...(sp.protocol === 'vless' ? { fallbacks: [] } : {}) }),
       streamSettings: JSON.stringify(stream),
-      sniffing: JSON.stringify({ enabled: sp.sniffing, destOverride: ['http', 'tls', 'quic'], metadataOnly: false, routeOnly: false }),
+      // маршрутизация на узле — своя у 3x-ui (BitTorrent он режет по умолчанию, но только при sniffing): для блокировок sniffing включаем
+      sniffing: JSON.stringify({ enabled: sp.sniffing || needsSniff(blocksOf(this.db)), destOverride: ['http', 'tls', 'quic'], metadataOnly: false, routeOnly: !sp.sniffing }),
       allocate: JSON.stringify({ strategy: 'always', refresh: 5, concurrency: 3 }),
     };
   }
 
   /** Конфиг sing-box (Hysteria2) для узла. */
   renderSingbox(server: ServerRow): object | null {
+    const blocks = blocksOf(this.db);
     const ibs = this.inbounds(`server_id = ? AND state IN ('active','deploying') AND kind = 'direct'`, server.id)
       .filter((i) => this.template(i.template_id)?.core === 'sing-box');
     if (!ibs.length) return null;
@@ -341,8 +347,13 @@ export class Vpn {
         };
       }),
       outbounds: [{ type: 'direct', tag: 'direct' }],
-      // домен сначала резолвится, затем локальные и частные адреса отклоняются (sing-box ≥ 1.11)
-      route: { rules: [{ action: 'resolve' }, { ip_cidr: PRIVATE_NETS, action: 'reject' }] },
+      // распознать протокол (BitTorrent: TCP, uTP, UDP-трекеры), затем домен резолвится, локальные и частные адреса
+      // отклоняются, затем блокировки протоколов (sing-box ≥ 1.11)
+      route: { rules: [
+        ...(needsSniff(blocks) ? [{ action: 'sniff' }] : []),
+        { action: 'resolve' }, { ip_cidr: PRIVATE_NETS, action: 'reject' },
+        ...singboxBlockRules(blocks),
+      ] },
     };
   }
 
