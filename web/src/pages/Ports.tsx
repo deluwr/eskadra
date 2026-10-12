@@ -19,32 +19,31 @@ export function PortsPage() {
   return (
     <>
       <div className="page-head"><div><h1>Порты и связность</h1><p>Открытые порты и связь между серверами</p></div></div>
-      <div className="split">
-        <section className="card pad wide stack">
-          <div className="flex" style={{ justifyContent: 'space-between' }}><h2>Связность нод <Info>Строка — откуда, столбец — куда. Проверяется каждые 10 минут. Долгий сбой связи сбрасывает чек-лист защиты обеих нод.</Info></h2><span className="k">{last ? ago(last) : 'ещё не проверялось'}</span></div>
-          {d.servers.length < 2 ? <p className="k">Нужно минимум два узла с nodekit.</p> : (
-            <div className="table-wrap">
-              <table className="mx" aria-label="Матрица связности">
-                <thead><tr><th />{d.servers.map((s) => <th key={s.id}>{s.name}</th>)}</tr></thead>
-                <tbody>{d.servers.map((a) => (
-                  <tr key={a.id}><th className="r" scope="row">{a.name}</th>
-                    {d.servers.map((b) => {
-                      if (a.id === b.id) return <td key={b.id} className="c-self">—</td>;
-                      const c = check(a.id, b.id);
-                      return <td key={b.id} className={!c ? 'c-none' : c.result === 'ok' ? 'c-ok' : 'c-fail'} title={c ? `проверено ${ago(c.checked_at)}${c.fail_since ? `, сбой с ${c.fail_since}` : ''}` : 'не проверялось'}>{!c ? '?' : c.result === 'ok' ? '✓' : 'нет'}</td>;
-                    })}
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          )}
-        </section>
-        <section className="card narrow">
-          <div className="card-head"><h2>Политика групп <Info>Группа задаёт скрытность портов, связь между нодами и разрешённый диапазон портов. Новая нода попадает в наборы соседей сама.</Info></h2></div>
+      <section className="card">
+        <div className="card-head"><h2>Политика групп <Info>Группа задаёт скрытность портов, связь между нодами и разрешённый диапазон портов. Новая нода попадает в наборы соседей сама. Нажмите на группу, чтобы изменить её политику.</Info></h2><NewGroup onSaved={reload} /></div>
+        <div className="grp-list">
           {d.groups.map((g) => <GroupRow key={g.name} g={g} servers={d.servers.filter((s) => s.group === g.name)} onSaved={reload} />)}
-          <NewGroup onSaved={reload} />
-        </section>
-      </div>
+        </div>
+      </section>
+      <section className="card pad stack">
+        <div className="flex" style={{ justifyContent: 'space-between' }}><h2>Связность нод <Info>Строка — откуда, столбец — куда. Проверяется каждые 10 минут. Долгий сбой связи сбрасывает чек-лист защиты обеих нод.</Info></h2><span className="k">{last ? ago(last) : 'ещё не проверялось'}</span></div>
+        {d.servers.length < 2 ? <p className="k">Нужно минимум два узла с nodekit.</p> : (
+          <div className="table-wrap">
+            <table className="mx" aria-label="Матрица связности">
+              <thead><tr><th />{d.servers.map((s) => <th key={s.id}>{s.name}</th>)}</tr></thead>
+              <tbody>{d.servers.map((a) => (
+                <tr key={a.id}><th className="r" scope="row">{a.name}</th>
+                  {d.servers.map((b) => {
+                    if (a.id === b.id) return <td key={b.id} className="c-self">—</td>;
+                    const c = check(a.id, b.id);
+                    return <td key={b.id} className={!c ? 'c-none' : c.result === 'ok' ? 'c-ok' : 'c-fail'} title={c ? `проверено ${ago(c.checked_at)}${c.fail_since ? `, сбой с ${c.fail_since}` : ''}` : 'не проверялось'}>{!c ? '?' : c.result === 'ok' ? '✓' : 'нет'}</td>;
+                  })}
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+      </section>
       <section className="card">
         <div className="card-head"><h2>Порты узлов <Info>Порт конфигурации открывается сам при выкате: проверка (не SSH, не занят, в диапазоне группы) → проверка конфига на узле → открытие порта → внешняя проба, при ошибке — откат. Защищённые порты (SSH, служебные) не трогаются никогда. Если у хостера свой firewall, диапазон портов группы откройте в нём заранее.</Info></h2></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
@@ -76,34 +75,44 @@ function NewGroup({ onSaved }: { onSaved: () => void }) {
   const [name, setName] = useState('');
   const { busy, error, run } = useAsync();
   return (
-    <form className="row stack" style={{ alignItems: 'stretch' }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.put('/api/v1/groups', { name: name.trim(), stealth: 'S0', peerScope: 'services', portRange: '443,1024-65535' }); toast(`Группа ${name.trim()} создана`); setName(''); onSaved(); }); }}>
-      <b>Новая группа <Info>Например, «de» или «мобильные». После создания настройте политику выше и перенесите серверы в группу в их карточках (вкладка «Доступ»).</Info></b>
-      <div className="flex"><input className="inp" style={{ flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="имя группы" maxLength={32} aria-label="Имя новой группы" /><button className="btn sm" disabled={busy || !name.trim()}>Создать</button></div>
+    <form className="flex" style={{ gap: 8 }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.put('/api/v1/groups', { name: name.trim(), stealth: 'S0', peerScope: 'services', portRange: '443,1024-65535' }); toast(`Группа ${name.trim()} создана`); setName(''); onSaved(); }); }}>
+      <input className="inp" style={{ width: 200 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="имя новой группы" maxLength={32} aria-label="Имя новой группы" />
+      <button className="btn sm" disabled={busy || !name.trim()}>Создать группу</button>
+      <Info>После создания раскройте группу, настройте политику и перенесите серверы в группу в их карточках (вкладка «Доступ»).</Info>
       <ErrorBox error={error} />
     </form>
   );
 }
 
+const PEER: Record<string, string> = { services: 'сервисные порты', chain: 'только цепочка', all: 'все порты', none: 'нет' };
+
+/** Группа — строка-сводка; раскрывается в горизонтальную форму политики. */
 function GroupRow({ g, servers, onSaved }: { g: Conn['groups'][number]; servers: Conn['servers']; onSaved: () => void }) {
   const [v, setV] = useState({ stealth: g.stealth, peerScope: g.peer_scope, portRange: g.port_range });
   const { busy, error, run } = useAsync();
   const dirty = v.stealth !== g.stealth || v.peerScope !== g.peer_scope || v.portRange !== g.port_range;
   return (
-    <div className="row stack" style={{ alignItems: 'stretch' }}>
-      <div className="flex" style={{ justifyContent: 'space-between' }}>
-        <b>{g.name}</b>
-        <span className="flex" style={{ gap: 6 }}>
-          {servers.length ? servers.map((x) => <a key={x.id} className="tag" href={`#/server/${x.id}`}>{x.name}</a>) : <span className="k">нет серверов</span>}
-          {!servers.length && g.name !== 'default' && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void run(async () => { await api.del(`/api/v1/groups/${encodeURIComponent(g.name)}`); toast(`Группа ${g.name} удалена`); onSaved(); })}>Удалить</button>}
-        </span>
-      </div>
-      <div className="grid g2">
+    <details className="grp" open={dirty || undefined}>
+      <summary className="grp-sum">
+        <b className="grp-name">{g.name}</b>
+        <span className="grp-cell"><span className="k">Скрытность</span><span className="small">{STEALTH[g.stealth] ?? g.stealth}</span></span>
+        <span className="grp-cell"><span className="k">Связность нод</span><span className="small">{PEER[g.peer_scope] ?? g.peer_scope}</span></span>
+        <span className="grp-cell"><span className="k">Порты</span><span className="small mono">{g.port_range}</span></span>
+        <span className="grp-cell grp-servers">{servers.length ? servers.map((x) => <a key={x.id} className="tag" href={`#/server/${x.id}`} onClick={(e) => e.stopPropagation()}>{x.name}</a>) : <span className="k">нет серверов</span>}</span>
+        {dirty && <Tag kind="warn">не сохранено</Tag>}
+        <span className="grp-chev" aria-hidden="true">▾</span>
+      </summary>
+      <div className="grp-body">
         <label className="fld">Скрытность<select className="inp" value={v.stealth} onChange={(e) => setV({ ...v, stealth: e.target.value })}>{Object.entries(STEALTH).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></label>
-        <label className="fld">Связность нод<select className="inp" value={v.peerScope} onChange={(e) => setV({ ...v, peerScope: e.target.value })}><option value="services">сервисные порты</option><option value="chain">только цепочка</option><option value="all">все порты</option><option value="none">нет</option></select></label>
+        <label className="fld">Связность нод<select className="inp" value={v.peerScope} onChange={(e) => setV({ ...v, peerScope: e.target.value })}>{Object.entries(PEER).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></label>
+        <label className="fld grp-range">Разрешённый диапазон портов<input className="inp mono" value={v.portRange} onChange={(e) => setV({ ...v, portRange: e.target.value })} /></label>
+        <span className="flex grp-acts">
+          <button className="btn sm pri" disabled={busy || !dirty} onClick={() => void run(async () => { await api.put('/api/v1/groups', { name: g.name, ...v }); toast(`Политика группы ${g.name} сохранена`); onSaved(); })}>Сохранить</button>
+          {dirty && <button type="button" className="btn ghost sm" onClick={() => setV({ stealth: g.stealth, peerScope: g.peer_scope, portRange: g.port_range })}>Отменить</button>}
+          {!servers.length && g.name !== 'default' && <button type="button" className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={() => void run(async () => { await api.del(`/api/v1/groups/${encodeURIComponent(g.name)}`); toast(`Группа ${g.name} удалена`); onSaved(); })}>Удалить группу</button>}
+        </span>
+        <ErrorBox error={error} />
       </div>
-      <label className="fld">Разрешённый диапазон портов<input className="inp mono" value={v.portRange} onChange={(e) => setV({ ...v, portRange: e.target.value })} /></label>
-      {dirty && <div><button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/groups', { name: g.name, ...v }); toast(`Политика группы ${g.name} сохранена`); onSaved(); })}>Сохранить</button></div>}
-      <ErrorBox error={error} />
-    </div>
+    </details>
   );
 }

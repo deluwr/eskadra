@@ -21,7 +21,6 @@ export function UsersPage() {
   const [sel, setSel] = useState<string | 'new' | null>(null);
   const [filter, setFilter] = useState<'all' | 'active' | 'expiring' | 'disabled'>('all');
   const [groups, setGroups] = useState(false);
-  useEffect(() => { if (!sel && users?.length) setSel(users[0]!.id); }, [users, sel]);
 
   const soon = (u: User) => !!u.effective.expireAt && Date.parse(u.effective.expireAt) - Date.now() < 7 * 86400_000;
   const list = (users ?? []).filter((u) => filter === 'all' || (filter === 'disabled' ? u.status === 'disabled' : filter === 'active' ? u.status === 'active' : soon(u)));
@@ -34,35 +33,34 @@ export function UsersPage() {
         <div className="flex"><button className="btn" onClick={() => setGroups(true)}>Группы лимитов</button><button className="btn pri" onClick={() => setSel('new')}>Новый пользователь</button></div>
       </div>
       <SubServiceCard />
-      <div className="split">
-        <section className="card wide">
-          <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
-          <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
-            <table>
-              <thead><tr><th>Пользователь</th><th>Трафик за месяц</th><th>Срок</th><th>Режимы</th><th>Профилей</th>{wlOn && <th>Белый список</th>}</tr></thead>
-              <tbody>
-                {list.map((u) => {
-                  const used = u.traffic.up + u.traffic.down;
-                  const pct = u.effective.trafficGb ? Math.min(100, (used / (u.effective.trafficGb * 1024 ** 3)) * 100) : 0;
-                  return (
-                    <tr key={u.id} className={`clickable ${sel === u.id ? 'sel' : ''}`} onClick={() => setSel(u.id)}>
-                      <td><b>{u.name}</b>{u.note && <div className="k note-line" title={u.note}>{u.note}</div>}<div className="k">{u.limit_group}{u.status === 'disabled' && ` · отключён${u.disabled_reason ? `: ${u.disabled_reason}` : ''}`}</div></td>
-                      <td><div className="stack" style={{ gap: 4 }}><span className="mono small">{fmtBytes(used)} / {u.effective.trafficGb ? `${u.effective.trafficGb} ГБ` : '∞'}</span>{u.effective.trafficGb ? <div className={`bar ${pct > 80 ? 'hot' : ''}`}><span style={{ width: `${pct}%` }} /></div> : null}</div></td>
-                      <td>{u.effective.expireAt ? <span className={soon(u) ? 'tag warn' : 'k'}>до {u.effective.expireAt.slice(0, 10)}</span> : <span className="k">бессрочно</span>}</td>
-                      <td><span className="flex" style={{ gap: 4 }}>{u.modes.map((m) => <Tag key={m}>{m === 'via' ? 'вход' : 'напрямую'}</Tag>)}</span></td>
-                      <td className="mono small">{u.profiles}</td>
-                      {wlOn && <td><Tag>{u.wl_mode === 'exact' ? '/32' : u.wl_mode === 'prefix' ? '/24' : 'ASN'}</Tag></td>}
-                    </tr>
-                  );
-                })}
-                {users && !list.length && <tr><td colSpan={wlOn ? 6 : 5} className="empty">Пользователей нет</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </section>
-        {servers && (sel === 'new' ? <UserCard key="new" user={null} servers={servers} wlOn={wlOn} onSaved={(u) => { void reload(); setSel(u.id); }} onDeleted={() => { setSel(null); void reload(); }} />
-          : user && <UserCard key={user.id} user={user} servers={servers} wlOn={wlOn} onSaved={(u) => setUsers((list) => list?.map((x) => (x.id === u.id ? u : x)) ?? list)} onDeleted={() => { setSel(null); void reload(); }} />)}
-      </div>
+      <section className="card">
+        <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
+        <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
+          <table>
+            <thead><tr><th>Пользователь</th><th>Трафик за месяц</th><th>Срок</th><th>Режимы</th><th>Профилей</th>{wlOn && <th>Белый список</th>}</tr></thead>
+            <tbody>
+              {list.map((u) => {
+                const used = u.traffic.up + u.traffic.down;
+                const pct = u.effective.trafficGb ? Math.min(100, (used / (u.effective.trafficGb * 1024 ** 3)) * 100) : 0;
+                return (
+                  <tr key={u.id} className={`clickable ${sel === u.id ? 'sel' : ''}`} onClick={() => setSel(u.id)}>
+                    <td><b>{u.name}</b>{u.note && <div className="k note-line" title={u.note}>{u.note}</div>}<div className="k">{u.limit_group}{u.status === 'disabled' && ` · отключён${u.disabled_reason ? `: ${u.disabled_reason}` : ''}`}</div></td>
+                    <td><div className="stack" style={{ gap: 4 }}><span className="mono small">{fmtBytes(used)} / {u.effective.trafficGb ? `${u.effective.trafficGb} ГБ` : '∞'}</span>{u.effective.trafficGb ? <div className={`bar ${pct > 80 ? 'hot' : ''}`}><span style={{ width: `${pct}%` }} /></div> : null}</div></td>
+                    <td>{u.effective.expireAt ? <span className={soon(u) ? 'tag warn' : 'k'}>до {u.effective.expireAt.slice(0, 10)}</span> : <span className="k">бессрочно</span>}</td>
+                    <td><span className="flex" style={{ gap: 4 }}>{u.modes.map((m) => <Tag key={m}>{m === 'via' ? 'вход' : 'напрямую'}</Tag>)}</span></td>
+                    <td className="mono small">{u.profiles}</td>
+                    {wlOn && <td><Tag>{u.wl_mode === 'exact' ? '/32' : u.wl_mode === 'prefix' ? '/24' : 'ASN'}</Tag></td>}
+                  </tr>
+                );
+              })}
+              {users && !list.length && <tr><td colSpan={wlOn ? 6 : 5} className="empty">Пользователей нет</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {/* карточка — поверх страницы: таблица не сдвигается и не растёт вниз */}
+      {servers && (sel === 'new' ? <UserCard key="new" user={null} servers={servers} wlOn={wlOn} onSaved={(u) => { void reload(); setSel(u.id); }} onDeleted={() => { setSel(null); void reload(); }} onClose={() => setSel(null)} />
+        : user && <UserCard key={user.id} user={user} servers={servers} wlOn={wlOn} onSaved={(u) => setUsers((list) => list?.map((x) => (x.id === u.id ? u : x)) ?? list)} onDeleted={() => { setSel(null); void reload(); }} onClose={() => setSel(null)} />)}
       {groups && <LimitGroups onClose={() => setGroups(false)} />}
     </>
   );
@@ -103,7 +101,7 @@ function importLinks(url: string, name: string): Array<[string, string]> {
 const bodyOf = (f: Form) => ({ name: f.name, note: f.note, tgId: f.tgId || null, limitGroup: f.limitGroup, trafficLimitGb: num(f.trafficLimitGb), expireAt: f.expireAt ? new Date(f.expireAt + 'T23:59:59Z').toISOString() : null,
   deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, templateIds: f.templateIds, wlMode: f.wlMode, status: f.status });
 
-function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; wlOn: boolean }) {
+function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; onClose: () => void; wlOn: boolean }) {
   const [f, setF] = useState<Form>(user ? toForm(user) : emptyForm);
   const { data: groups } = usePoll(() => api.get<Array<{ name: string; traffic_gb: number | null; days: number | null; devices: number | null }>>('/api/v1/limit-groups'), null);
   const [mode, setMode] = useState<'sub' | 'links'>('sub');
@@ -134,117 +132,127 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
   useEffect(() => { if (mode === 'links' && user) void loadLinks(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [mode, user?.id]);
   const rotate = (what: string) => run(async () => { if (!user) return; onSaved(await api.post<User>(`/api/v1/users/${user.id}/rotate`, { what })); if (what === 'links') void loadLinks(); });
   const g = groups?.find((x) => x.name === f.limitGroup);
+  // закрыть окно: несохранённые правки не теряем молча
+  const close = async () => { if (!dirty || await ask('Закрыть без сохранения? Изменения пропадут.')) onClose(); };
 
   return (
-    <section className="card narrow" aria-label="Карточка пользователя">
-      <div className="card-head" style={{ alignItems: 'flex-start' }}>
-        <div className="row-text"><h2 style={{ fontSize: 18 }}>{user ? user.name : 'Новый пользователь'}</h2>{user && <span className="k">группа «{user.limit_group}» · {user.tg_id ? 'Telegram привязан' : 'Telegram не привязан'}</span>}</div>
-        {user && <Tag kind={user.status === 'active' ? 'ok' : 'fail'} dot>{user.status === 'active' ? 'активен' : 'отключён'}</Tag>}
-      </div>
-      <div className="row" style={{ display: 'block' }}>
-        <div className="grid g2">
-          <label className="fld">Имя<input className="inp" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
-          {user ? (
-            <div className="fld"><span>Telegram <Info>В боте пользователь получает подписку, ссылки на профили и сведения о своём трафике.</Info></span>
-              <span className="flex" style={{ minHeight: 40 }}><TgBind tgId={user.tg_id} linkUrl={`/api/v1/users/${user.id}/tg-link`} onChanged={() => void api.get<User>(`/api/v1/users/${user.id}`).then(onSaved)}
-                onSaveId={(v) => api.put(`/api/v1/users/${user.id}`, { ...bodyOf(toForm(user)), tgId: v })} /></span></div>
-          ) : <label className="fld">Telegram ID (необязательно)<input className="inp mono" inputMode="numeric" value={f.tgId} onChange={(e) => setF({ ...f, tgId: e.target.value.replace(/\D/g, '') })} placeholder="привязать можно и после создания" /></label>}
+    <Modal size="xl" title={user ? user.name : 'Новый пользователь'} onClose={close} head={user && (
+      <span className="flex" style={{ gap: 8 }}>
+        <span className="k">группа «{user.limit_group}» · {user.tg_id ? 'Telegram привязан' : 'Telegram не привязан'}</span>
+        <Tag kind={user.status === 'active' ? 'ok' : 'fail'} dot>{user.status === 'active' ? 'активен' : 'отключён'}</Tag>
+      </span>
+    )}>
+      <div className="ucard">
+        <div className="ucol">
+          <section className="ublock stack">
+            <h3>Профиль</h3>
+            <div className="grid g2">
+              <label className="fld">Имя<input className="inp" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
+              {user ? (
+                <div className="fld"><span>Telegram <Info>В боте пользователь получает подписку, ссылки на профили и сведения о своём трафике.</Info></span>
+                  <span className="flex" style={{ minHeight: 40 }}><TgBind tgId={user.tg_id} linkUrl={`/api/v1/users/${user.id}/tg-link`} onChanged={() => void api.get<User>(`/api/v1/users/${user.id}`).then(onSaved)}
+                    onSaveId={(v) => api.put(`/api/v1/users/${user.id}`, { ...bodyOf(toForm(user)), tgId: v })} /></span></div>
+              ) : <label className="fld">Telegram ID (необязательно)<input className="inp mono" inputMode="numeric" value={f.tgId} onChange={(e) => setF({ ...f, tgId: e.target.value.replace(/\D/g, '') })} placeholder="привязать можно и после создания" /></label>}
+            </div>
+            <label className="fld">Комментарий <span className="k">видят только администраторы</span>
+              <textarea className="inp" rows={2} maxLength={500} value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} placeholder="кто это: друг Саши, рабочий ноутбук, оплатил до мая…" /></label>
+          </section>
+          <section className="ublock stack">
+            <h3>Ограничения</h3>
+            <div className="grid g3">
+              <label className="fld">Группа лимитов<select className="inp" value={f.limitGroup} onChange={(e) => setF({ ...f, limitGroup: e.target.value })}>{groups?.map((x) => <option key={x.name}>{x.name}</option>)}</select></label>
+              <label className="fld">Трафик в месяц, ГБ<input className="inp mono" value={f.trafficLimitGb} onChange={(e) => setF({ ...f, trafficLimitGb: e.target.value })} placeholder={g?.traffic_gb ? `из группы: ${g.traffic_gb}` : '∞'} /></label>
+              <label className="fld">Действует до<input className="inp mono" type="date" value={f.expireAt} onChange={(e) => setF({ ...f, expireAt: e.target.value })} /></label>
+              <label className="fld">Устройств одновременно<input className="inp mono" value={f.deviceLimit} onChange={(e) => setF({ ...f, deviceLimit: e.target.value })} placeholder={g?.devices ? `из группы: ${g.devices}` : '∞'} /></label>
+              <label className="fld">При превышении<select className="inp" value={f.overAction} onChange={(e) => setF({ ...f, overAction: e.target.value })}><option value="disable">отключить</option><option value="notify">только уведомить</option></select></label>
+              <label className="fld">Статус<select className="inp" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value as Form['status'] })}><option value="active">активен</option><option value="disabled">отключён</option></select></label>
+            </div>
+            <span className="k">Пустое поле — значение из группы. Трафик считается по Xray; лимит устройств пока только отображается.</span>
+          </section>
+          {wlOn && <section className="ublock stack">
+            <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Белый список IP <Info>Включён скрытностью группы (раздел «Порты и связность»): к серверам группы пускаются только адреса из списка. Адрес добавляется по персональной ссылке пользователя или вручную.</Info></h3></div>
+            <Seg value={f.wlMode} label="Гранулярность" onChange={(v) => setF({ ...f, wlMode: v })} options={[['exact', 'Точный IP'], ['prefix', 'Префикс /24'], ['asn', 'Сеть оператора']]} />
+            <span className="k">{f.wlMode === 'exact' ? 'Для домашних: меньше всего чужих адресов проходит фильтр.' : f.wlMode === 'prefix' ? 'Для мобильных, у которых IP меняется внутри пула оператора.' : 'Самый широкий режим (/16): пропускает и чужие адреса той же сети.'}</span>
+            {user?.allowedIps.map((a) => (
+              <div key={a.id} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+                <span><span className="small"><Addr value={a.cidr} /></span> <span className="k">· {a.source} · до {fmtTime(a.expires_at)}</span></span>
+                <button className="btn ghost sm" disabled={busy} onClick={() => void run(async () => onSaved(await api.del<User>(`/api/v1/users/${user.id}/allowed-ips/${a.id}`)))}>Отозвать</button>
+              </div>
+            ))}
+            {user && <form className="flex" onSubmit={(e) => { e.preventDefault(); void run(async () => { onSaved(await api.post<User>(`/api/v1/users/${user.id}/allowed-ips`, { cidr: ip })); setIp(''); }); }}>
+              <input className="inp mono" style={{ flex: 1 }} value={ip} onChange={(e) => setIp(e.target.value)} placeholder="добавить вручную: 198.51.100.7" aria-label="IP" /><button className="btn sm" disabled={!ip || busy}>Добавить</button></form>}
+          </section>}
         </div>
-        <label className="fld" style={{ marginTop: 12 }}>Комментарий <span className="k">видят только администраторы</span>
-          <textarea className="inp" rows={2} maxLength={500} value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} placeholder="кто это: друг Саши, рабочий ноутбук, оплатил до мая…" /></label>
-      </div>
-      <div className="row stack" style={{ alignItems: 'stretch' }}>
-        <h3>Ограничения</h3>
-        <div className="grid g2">
-          <label className="fld">Группа лимитов<select className="inp" value={f.limitGroup} onChange={(e) => setF({ ...f, limitGroup: e.target.value })}>{groups?.map((x) => <option key={x.name}>{x.name}</option>)}</select></label>
-          <label className="fld">Трафик в месяц, ГБ<input className="inp mono" value={f.trafficLimitGb} onChange={(e) => setF({ ...f, trafficLimitGb: e.target.value })} placeholder={g?.traffic_gb ? `из группы: ${g.traffic_gb}` : '∞'} /></label>
-          <label className="fld">Действует до<input className="inp mono" type="date" value={f.expireAt} onChange={(e) => setF({ ...f, expireAt: e.target.value })} /></label>
-          <label className="fld">Устройств одновременно<input className="inp mono" value={f.deviceLimit} onChange={(e) => setF({ ...f, deviceLimit: e.target.value })} placeholder={g?.devices ? `из группы: ${g.devices}` : '∞'} /></label>
-          <label className="fld">При превышении<select className="inp" value={f.overAction} onChange={(e) => setF({ ...f, overAction: e.target.value })}><option value="disable">отключить</option><option value="notify">только уведомить</option></select></label>
-          <label className="fld">Статус<select className="inp" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value as Form['status'] })}><option value="active">активен</option><option value="disabled">отключён</option></select></label>
-        </div>
-        <span className="k">Пустое поле — значение из группы. Трафик считается по Xray; лимит устройств пока только отображается.</span>
-      </div>
-      <div className="row stack" style={{ alignItems: 'stretch' }}>
-        <h3>Что попадёт в подписку</h3>
-        <div className="flex" style={{ gap: 18 }}>
-          <label className="cb"><input type="checkbox" checked={f.modes.includes('via')} onChange={() => toggleMode('via')} />Через Relay (вход)</label>
-          <label className="cb"><input type="checkbox" checked={f.modes.includes('direct')} onChange={() => toggleMode('direct')} />Напрямую к серверу</label>
-        </div>
-        <span className="k">Конфигурации <Info>Отмеченные конфигурации дают пользователю свои профили; у снятой — ни одного. Профили зависят ещё и от режимов выше.</Info></span>
-        {configs.length ? (
-          <ul className="cfg-pick">
-            {configs.map((c) => {
-              const on = !f.templateIds || f.templateIds.includes(c.id);
-              return (
-                <li key={c.id} className={on ? '' : 'off'}>
-                  <label className="cb"><input type="checkbox" checked={on} onChange={() => toggleTpl(c.id)} /><b>{c.name}</b></label>
-                  {user && (c.profiles.length
-                    ? <span className="cfg-profiles">{c.profiles.map((p) => <span key={p} className="tag">{p}</span>)}</span>
-                    : <span className="k">профилей нет: проверьте режимы и выкат конфигурации</span>)}
-                </li>
-              );
-            })}
-          </ul>
-        ) : <span className="k">Конфигураций пока нет — создайте их в разделе «Конфигурации».</span>}
-        {!user && <span className="k">Профили каждой конфигурации появятся здесь после создания пользователя.</span>}
-        {f.nodeIds && <div className="alert warn small flex" style={{ justifyContent: 'space-between' }}>
-          <span>{`Задано и ограничение по серверам: ${f.nodeIds.map((id) => servers.find((s) => s.id === id)?.name ?? id).join(', ') || 'ни одного'}`}</span>
-          <button type="button" className="btn ghost sm" onClick={() => setF({ ...f, nodeIds: null })}>Снять</button>
-        </div>}
-      </div>
-      {wlOn && <div className="row stack" style={{ alignItems: 'stretch' }}>
-        <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Белый список IP <Info>Включён скрытностью группы (раздел «Порты и связность»): к серверам группы пускаются только адреса из списка. Адрес добавляется по персональной ссылке пользователя или вручную.</Info></h3></div>
-        <Seg value={f.wlMode} label="Гранулярность" onChange={(v) => setF({ ...f, wlMode: v })} options={[['exact', 'Точный IP'], ['prefix', 'Префикс /24'], ['asn', 'Сеть оператора']]} />
-        <span className="k">{f.wlMode === 'exact' ? 'Для домашних: меньше всего чужих адресов проходит фильтр.' : f.wlMode === 'prefix' ? 'Для мобильных, у которых IP меняется внутри пула оператора.' : 'Самый широкий режим (/16): пропускает и чужие адреса той же сети.'}</span>
-        {user?.allowedIps.map((a) => (
-          <div key={a.id} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}>
-            <span><span className="small"><Addr value={a.cidr} /></span> <span className="k">· {a.source} · до {fmtTime(a.expires_at)}</span></span>
-            <button className="btn ghost sm" disabled={busy} onClick={() => void run(async () => onSaved(await api.del<User>(`/api/v1/users/${user.id}/allowed-ips/${a.id}`)))}>Отозвать</button>
-          </div>
-        ))}
-        {user && <form className="flex" onSubmit={(e) => { e.preventDefault(); void run(async () => { onSaved(await api.post<User>(`/api/v1/users/${user.id}/allowed-ips`, { cidr: ip })); setIp(''); }); }}>
-          <input className="inp mono" style={{ flex: 1 }} value={ip} onChange={(e) => setIp(e.target.value)} placeholder="добавить вручную: 198.51.100.7" aria-label="IP" /><button className="btn sm" disabled={!ip || busy}>Добавить</button></form>}
-      </div>}
-      {user && (
-        <div className="row stack" style={{ alignItems: 'stretch' }}>
-          <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Подписка и ссылки</h3><Seg value={mode} onChange={setMode} label="Что выдавать" options={[['sub', 'Подписка'], ['links', 'Отдельные ссылки']]} /></div>
-          {mode === 'sub' ? (
-            user.subUrl ? (
-              <>
-                {user.profiles === 0 && <div className="alert warn">В подписке нет ни одного профиля — клиент (v2rayN и др.) ничего не добавит. Выкатите конфигурацию на серверы, доступные пользователю, и проверьте режимы подключения выше.</div>}
-                <div className="flex"><input className="inp mono" style={{ flex: 1 }} value={user.subUrl} readOnly aria-label="Ссылка подписки" /><CopyButton text={user.subUrl} /><QrButton text={user.subUrl} title={`Подписка · ${user.name}`} /></div>
-                <div className="flex" style={{ gap: 6 }}>
-                  <span className="k">Открыть в приложении <Info>Кнопки работают на устройстве, где установлено приложение. В v2rayN (Windows) — «Подписки → Добавить», вставьте ссылку; или отсканируйте QR с экрана.</Info></span>
-                  {importLinks(user.subUrl, user.name).map(([n, href]) => <a key={n} className="btn ghost sm" href={href}>{n}</a>)}
-                </div>
-                <div className="flex"><button className="btn sm" onClick={() => void rotate('sub')}>Сменить токен</button>{user.knockUrl && <CopyButton text={user.knockUrl} label="Knock-ссылка" />}</div>
-                <span className="k">Одна ссылка, обновляется сама. Профилей внутри: {user.profiles}.</span>
-              </>
-            ) : <span className="k">Задайте адрес сервиса подписок выше.</span>
-          ) : (
-            <>
-              <span className="k">Ссылка на каждый профиль — для клиентов без подписок или чтобы дать один сервер. Сама не обновляется.</span>
-              {links?.map((l) => (
-                <div key={l.key} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}>
-                  <span className="row-text" style={{ minWidth: 0 }}><b className="small">{l.name}</b><span className="k mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 260 }}>{l.uri}</span></span>
-                  <span className="flex" style={{ gap: 6 }}><QrButton text={l.uri} title={l.name} /><CopyButton text={l.uri} /></span>
-                </div>
-              ))}
-              {links && !links.length && <span className="k">Нет активных профилей: выкатите конфигурацию на доступные узлы.</span>}
-              {links && links.length > 0 && <div className="flex"><CopyButton text={links.map((l) => l.uri).join('\n')} label="Скопировать все" /><button className="btn sm" onClick={async () => { if (await ask('Перевыпустить ссылки? Старые перестанут работать.')) void rotate('links'); }}>Перевыпустить ссылки</button></div>}
-            </>
+        <div className="ucol">
+          <section className="ublock stack">
+            <h3>Что попадёт в подписку</h3>
+            <div className="flex" style={{ gap: 18 }}>
+              <label className="cb"><input type="checkbox" checked={f.modes.includes('via')} onChange={() => toggleMode('via')} />Через Relay (вход)</label>
+              <label className="cb"><input type="checkbox" checked={f.modes.includes('direct')} onChange={() => toggleMode('direct')} />Напрямую к серверу</label>
+            </div>
+            <span className="k">Конфигурации <Info>Отмеченные конфигурации дают пользователю свои профили; у снятой — ни одного. Профили зависят ещё и от режимов выше.</Info></span>
+            {configs.length ? (
+              <ul className="cfg-pick">
+                {configs.map((c) => {
+                  const on = !f.templateIds || f.templateIds.includes(c.id);
+                  return (
+                    <li key={c.id} className={on ? '' : 'off'}>
+                      <label className="cb"><input type="checkbox" checked={on} onChange={() => toggleTpl(c.id)} /><b>{c.name}</b></label>
+                      {user && (c.profiles.length
+                        ? <span className="cfg-profiles">{c.profiles.map((p) => <span key={p} className="tag">{p}</span>)}</span>
+                        : <span className="k">профилей нет: проверьте режимы и выкат конфигурации</span>)}
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : <span className="k">Конфигураций пока нет — создайте их в разделе «Конфигурации».</span>}
+            {!user && <span className="k">Профили каждой конфигурации появятся здесь после создания пользователя.</span>}
+            {f.nodeIds && <div className="alert warn small flex" style={{ justifyContent: 'space-between' }}>
+              <span>{`Задано и ограничение по серверам: ${f.nodeIds.map((id) => servers.find((s) => s.id === id)?.name ?? id).join(', ') || 'ни одного'}`}</span>
+              <button type="button" className="btn ghost sm" onClick={() => setF({ ...f, nodeIds: null })}>Снять</button>
+            </div>}
+          </section>
+          {user && (
+            <section className="ublock stack">
+              <div className="flex" style={{ justifyContent: 'space-between' }}><h3>Подписка и ссылки</h3><Seg value={mode} onChange={setMode} label="Что выдавать" options={[['sub', 'Подписка'], ['links', 'Отдельные ссылки']]} /></div>
+              {mode === 'sub' ? (
+                user.subUrl ? (
+                  <>
+                    {user.profiles === 0 && <div className="alert warn">В подписке нет ни одного профиля — клиент (v2rayN и др.) ничего не добавит. Выкатите конфигурацию на серверы, доступные пользователю, и проверьте режимы подключения выше.</div>}
+                    <div className="flex"><input className="inp mono" style={{ flex: 1 }} value={user.subUrl} readOnly aria-label="Ссылка подписки" /><CopyButton text={user.subUrl} /><QrButton text={user.subUrl} title={`Подписка · ${user.name}`} /></div>
+                    <div className="flex" style={{ gap: 6 }}>
+                      <span className="k">Открыть в приложении <Info>Кнопки работают на устройстве, где установлено приложение. В v2rayN (Windows) — «Подписки → Добавить», вставьте ссылку; или отсканируйте QR с экрана.</Info></span>
+                      {importLinks(user.subUrl, user.name).map(([n, href]) => <a key={n} className="btn ghost sm" href={href}>{n}</a>)}
+                    </div>
+                    <div className="flex"><button className="btn sm" onClick={() => void rotate('sub')}>Сменить токен</button>{user.knockUrl && <CopyButton text={user.knockUrl} label="Knock-ссылка" />}</div>
+                    <span className="k">Одна ссылка, обновляется сама. Профилей внутри: {user.profiles}.</span>
+                  </>
+                ) : <span className="k">Задайте адрес сервиса подписок выше.</span>
+              ) : (
+                <>
+                  <span className="k">Ссылка на каждый профиль — для клиентов без подписок или чтобы дать один сервер. Сама не обновляется.</span>
+                  {links?.map((l) => (
+                    <div key={l.key} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+                      <span className="row-text" style={{ minWidth: 0, flex: 1 }}><b className="small">{l.name}</b><span className="k mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{l.uri}</span></span>
+                      <span className="flex" style={{ gap: 6 }}><QrButton text={l.uri} title={l.name} /><CopyButton text={l.uri} /></span>
+                    </div>
+                  ))}
+                  {links && !links.length && <span className="k">Нет активных профилей: выкатите конфигурацию на доступные узлы.</span>}
+                  {links && links.length > 0 && <div className="flex"><CopyButton text={links.map((l) => l.uri).join('\n')} label="Скопировать все" /><button className="btn sm" onClick={async () => { if (await ask('Перевыпустить ссылки? Старые перестанут работать.')) void rotate('links'); }}>Перевыпустить ссылки</button></div>}
+                </>
+              )}
+            </section>
           )}
         </div>
-      )}
-      {error && <div className="row"><ErrorBox error={error} /></div>}
+      </div>
+      <ErrorBox error={error} />
       <div className="savebar">
         <button className="btn pri" disabled={busy || !f.name || !f.modes.length || !dirty} onClick={() => void save()}>{user ? 'Сохранить' : 'Создать пользователя'}</button>
         {user && dirty && <><span className="dirty"><span className="dot" />Есть несохранённые изменения</span><button className="btn ghost sm" onClick={() => setF(toForm(user))}>Отменить</button></>}
         <span className="spacer" />
         {user && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Удалить ${user.name}? Его ссылки и подписка перестанут работать.`)) void run(async () => { await api.del(`/api/v1/users/${user.id}`); toast(`${user.name} удалён`); onDeleted(); }); }}>Удалить</button>}
       </div>
-    </section>
+    </Modal>
   );
 }
 
@@ -253,7 +261,7 @@ function LimitGroups({ onClose }: { onClose: () => void }) {
   const [f, setF] = useState({ name: '', trafficGb: '', days: '', devices: '' });
   const { busy, error, run } = useAsync();
   return (
-    <Modal title="Группы лимитов" onClose={onClose}>
+    <Modal size="md" title="Группы лимитов" onClose={onClose}>
       <table><thead><tr><th>Группа</th><th>Трафик</th><th>Дней</th><th>Устройств</th></tr></thead>
         <tbody>{data?.map((g) => <tr key={g.name} className="clickable" onClick={() => setF({ name: g.name, trafficGb: g.traffic_gb?.toString() ?? '', days: g.days?.toString() ?? '', devices: g.devices?.toString() ?? '' })}><td>{g.name}</td><td>{g.traffic_gb ?? '∞'}</td><td>{g.days ?? '∞'}</td><td>{g.devices ?? '∞'}</td></tr>)}</tbody></table>
       <div className="grid g2">

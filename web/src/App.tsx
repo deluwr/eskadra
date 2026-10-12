@@ -165,7 +165,7 @@ function UpdateModal({ ver, onClose }: { ver: Ver; onClose: () => void }) {
   }, [started, ver.version]);
   const failed = st?.exit !== null && st?.exit !== undefined && st.exit !== 0 && started;
   return (
-    <Modal title={`Обновление до ${ver.latest}`} onClose={onClose}>
+    <Modal size="md" title={`Обновление до ${ver.latest}`} onClose={onClose}>
       {!started ? (
         <>
           <p className="small">{`Панель скачает и установит ${ver.latest} на главном сервере и перезапустится.`} Данные, настройки и узлы не затрагиваются; пользователи VPN связь не теряют.</p>

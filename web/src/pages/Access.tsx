@@ -87,6 +87,7 @@ function MySecurity({ auth, onChange }: { auth: AuthState; onChange: () => void 
   const { data: sessions, reload } = usePoll(() => api.get<Array<{ id: string; created_at: string; expires_at: string; ip: string | null; current: boolean }>>('/api/v1/me/sessions'), null);
   const { busy, error, run } = useAsync();
   const [ok, setOk] = useState<string | null>(null);
+  const [allSessions, setAllSessions] = useState(false);
   return (
     <div className="split">
       <section className="card pad wide stack">
@@ -115,8 +116,9 @@ function MySecurity({ auth, onChange }: { auth: AuthState; onChange: () => void 
       </section>
       <section className="card pad narrow stack">
         <h2>Сессии</h2>
-        {sessions?.map((s) => <div key={s.id} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}><span className="row-text"><span className="small"><Addr value={s.ip} empty="?" /> · с {fmtTime(s.created_at)}</span><span className="k">истекает {fmtTime(s.expires_at)}</span></span>{s.current && <Tag kind="ok">текущая</Tag>}</div>)}
-        <div><button className="btn" disabled={busy} onClick={() => void run(async () => { await api.post('/api/v1/me/sessions/revoke-others'); void reload(); })}>Завершить остальные сессии</button></div>
+        {(allSessions ? sessions : sessions?.slice(0, 3))?.map((s) => <div key={s.id} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}><span className="row-text"><span className="small"><Addr value={s.ip} empty="?" /> · с {fmtTime(s.created_at)}</span><span className="k">истекает {fmtTime(s.expires_at)}</span></span>{s.current && <Tag kind="ok">текущая</Tag>}</div>)}
+        <div className="flex">{(sessions?.length ?? 0) > 3 && <button className="btn ghost sm" onClick={() => setAllSessions(!allSessions)}>{allSessions ? 'Свернуть' : `Показать все (${sessions!.length})`}</button>}
+          <button className="btn" disabled={busy} onClick={() => void run(async () => { await api.post('/api/v1/me/sessions/revoke-others'); void reload(); })}>Завершить остальные сессии</button></div>
       </section>
     </div>
   );

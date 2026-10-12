@@ -93,25 +93,23 @@ export function ConfigsPage() {
         <div><h1>Конфигурации</h1><p>Протоколы и порты, по которым подключаются пользователи</p></div>
         <button className="btn pri" onClick={() => { setDraft(empty()); setJobId(null); }}>Новая конфигурация</button>
       </div>
-      <div className="split">
-        <section className="card narrow tpl-list" style={{ flex: '1 1 280px' }} aria-label="Конфигурации">
-          <div className="k" style={{ padding: '6px 8px' }}>Конфигурации · {templates?.length ?? 0}</div>
-          {templates?.map((t) => (
-            <button key={t.id} className={`tpl ${draft?.id === t.id ? 'on' : ''}`} onClick={() => { setDraft(toDraft(t)); setJobId(null); }}>
-              <span className="flex" style={{ justifyContent: 'space-between', width: '100%' }}><b className="small">{t.name}</b><Tag>{t.core}</Tag></span>
-              <span className="k mono">{describe(t)} · :{t.port}{t.entry_id ? ` · вход :${t.entry_port}` : ''}</span>
-              <span className="flex" style={{ gap: 6 }}><span className="k">серверов: {t.inbounds.filter((i) => i.state === 'active').length}</span>{t.applied_revision < t.revision && <Tag kind="warn">не выкачена</Tag>}</span>
-            </button>
-          ))}
-          {!templates?.length && <p className="k" style={{ padding: 8 }}>Конфигураций пока нет.</p>}
-        </section>
-        <div className="wide stack" style={{ gap: 20 }}>
-          {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current} onServers={() => void reloadServers()}
-            onSaved={(t) => { void reload(); setDraft(toDraft(t)); }} onRollout={(id) => setJobId(id)} onDeleted={() => { setDraft(null); void reload(); }} />}
-          {jobId && <JobLog id={jobId} onDone={() => void reload()} />}
-          {current?.entry_id && current.spec.autoMode !== 'random' && <ExitHealth t={current} />}
-          {current && <Preview t={current} servers={servers ?? []} />}
-        </div>
+      {/* лента конфигураций: растёт вбок и переносится, редактор под ней — во всю ширину */}
+      <section className="card tpl-list" aria-label="Конфигурации">
+        {templates?.map((t) => (
+          <button key={t.id} className={`tpl ${draft?.id === t.id ? 'on' : ''}`} onClick={() => { setDraft(toDraft(t)); setJobId(null); }}>
+            <span className="flex" style={{ justifyContent: 'space-between', width: '100%' }}><b className="small">{t.name}</b><Tag>{t.core}</Tag></span>
+            <span className="k mono">{describe(t)} · :{t.port}{t.entry_id ? ` · вход :${t.entry_port}` : ''}</span>
+            <span className="flex" style={{ gap: 6 }}><span className="k">серверов: {t.inbounds.filter((i) => i.state === 'active').length}</span>{t.applied_revision < t.revision && <Tag kind="warn">не выкачена</Tag>}</span>
+          </button>
+        ))}
+        {!templates?.length && <p className="k" style={{ padding: 8 }}>Конфигураций пока нет.</p>}
+      </section>
+      <div className="stack" style={{ gap: 20 }}>
+        {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current} onServers={() => void reloadServers()}
+          onSaved={(t) => { void reload(); setDraft(toDraft(t)); }} onRollout={(id) => setJobId(id)} onDeleted={() => { setDraft(null); void reload(); }} />}
+        {jobId && <JobLog id={jobId} onDone={() => void reload()} />}
+        {current?.entry_id && current.spec.autoMode !== 'random' && <ExitHealth t={current} />}
+        {current && <Preview t={current} servers={servers ?? []} />}
       </div>
     </>
   );
@@ -548,7 +546,7 @@ function SniPicker({ servers, prefer, current, onPick, onClose }: { servers: Ser
   const scan = () => run(async () => { setRes(null); setRes((await api.post<{ results: SniResult[] }>(`/api/v1/servers/${sid}/sni-scan`, { neighbors: near })).results); });
   const good = res?.filter((r) => r.ok) ?? [];
   return (
-    <Modal title="Подбор сайта маскировки" onClose={onClose}>
+    <Modal size="lg" title="Подбор сайта маскировки" onClose={onClose}>
       <p className="k">Проверка идёт с самого сервера — оттуда, откуда Xray будет обращаться к сайту. Нужны TLS 1.3, X25519 и HTTP/2; лучше без редиректа на другой сайт и с малой задержкой. Соседи по подсети — сайты из того же дата-центра: для наблюдателя такой сервер выглядит естественнее всего.</p>
       <div className="flex" style={{ alignItems: 'flex-end' }}>
         <label className="fld" style={{ flex: '1 1 200px' }}>Сервер
@@ -559,7 +557,7 @@ function SniPicker({ servers, prefer, current, onPick, onClose }: { servers: Ser
       </div>
       <ErrorBox error={error} />
       {res && (
-        <div className="table-wrap" style={{ maxHeight: '50vh', overflow: 'auto' }}>
+        <div className="table-wrap">
           <table>
             <thead><tr><th>Сайт</th><th>Задержка</th><th>Проверка</th><th /></tr></thead>
             <tbody>

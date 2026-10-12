@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { HostStatsPanel } from '../HostStats';
 import { ViaPicker, viaBody, viaOnly, viaReady, type Via } from '../ViaPicker';
 import { api, ago, fmtTime, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
-import { CopyBlock, CopyButton, ErrorBox, Info, Level, Seg, StagePip, StageHelp, Switch, Tag, RoleTag, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
+import { CopyBlock, CopyButton, ErrorBox, Info, Level, Modal, Seg, StagePip, StageHelp, Switch, Tag, RoleTag, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
 
@@ -792,18 +792,24 @@ function CoresCard({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
 
 export function JobsCard({ serverId, jobs }: { serverId?: string; jobs: Job[] }) {
   const [open, setOpen] = useState<Job | null>(null);
-  const show = async (j: Job) => setOpen(open?.id === j.id ? null : await api.get<Job>(serverId ? `/api/v1/servers/${serverId}/jobs/${j.id}` : `/api/v1/jobs/${j.id}`));
+  const [all, setAll] = useState(false);
+  const show = async (j: Job) => setOpen(await api.get<Job>(serverId ? `/api/v1/servers/${serverId}/jobs/${j.id}` : `/api/v1/jobs/${j.id}`));
   if (!jobs.length) return <div className="card empty">Задач пока не было</div>;
+  const LIMIT = 10;
+  const tag = (j: Job) => <Tag kind={j.status === 'ok' ? 'ok' : j.status === 'failed' ? 'fail' : 'warn'}>{j.status}</Tag>;
   return (
-    <section className="card pad stack">
-      <h2>Задачи</h2>
-      {jobs.map((j) => (
-        <div key={j.id}>
-          <button className="link" onClick={() => void show(j)}>#{j.id} {j.kind}</button>{' '}
-          <Tag kind={j.status === 'ok' ? 'ok' : j.status === 'failed' ? 'fail' : 'warn'}>{j.status}</Tag> <span className="k mono">{fmtTime(j.started_at)}</span>
-          {open?.id === j.id && <pre className="code" style={{ marginTop: 8 }}>{open.log}</pre>}
-        </div>
-      ))}
+    <section className="card">
+      <div className="card-head"><h2>Задачи</h2><span className="k">журнал задачи открывается поверх страницы</span></div>
+      <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
+        <table>
+          <thead><tr><th>Задача</th><th>Состояние</th><th>Начата</th></tr></thead>
+          <tbody>{(all ? jobs : jobs.slice(0, LIMIT)).map((j) => (
+            <tr key={j.id} className="clickable" onClick={() => void show(j)}><td><span className="mono small">#{j.id}</span> {j.kind}</td><td>{tag(j)}</td><td className="k mono">{fmtTime(j.started_at)}</td></tr>
+          ))}</tbody>
+        </table>
+      </div>
+      {jobs.length > LIMIT && <div className="row"><button className="btn ghost sm" onClick={() => setAll(!all)}>{all ? 'Свернуть' : `Показать все (${jobs.length})`}</button></div>}
+      {open && <Modal size="lg" title={`Задача #${open.id} · ${open.kind}`} head={tag(open)} onClose={() => setOpen(null)}><pre className="code">{open.log}</pre></Modal>}
     </section>
   );
 }

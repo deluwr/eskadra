@@ -237,17 +237,26 @@ export function QrButton({ text, title, label = 'QR' }: { text: string; title: s
   );
 }
 
-export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+/**
+ * Окно поверх страницы. size: sm — подтверждения, md — формы, lg/xl — карточки (пользователь, подбор SNI).
+ * Высота ограничена экраном: шапка остаётся на месте, содержимое прокручивается внутри и не обрезается.
+ */
+export function Modal({ title, children, onClose, size = 'sm', head }: { title: string; children: ReactNode; onClose: () => void; size?: 'sm' | 'md' | 'lg' | 'xl'; head?: ReactNode }) {
+  const bg = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    // Escape закрывает только верхнее окно (например, подтверждение поверх карточки пользователя)
+    const onKey = (e: KeyboardEvent) => {
+      const all = document.querySelectorAll('.modal-bg');
+      if (e.key === 'Escape' && all[all.length - 1] === bg.current) onClose();
+    };
     addEventListener('keydown', onKey);
     return () => removeEventListener('keydown', onKey);
   }, [onClose]);
   return (
-    <div className="modal-bg" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="card modal" role="dialog" aria-modal="true" aria-label={title}>
-        <h2>{title}</h2>
-        {children}
+    <div ref={bg} className="modal-bg" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className={`card modal modal-${size}`} role="dialog" aria-modal="true" aria-label={title}>
+        <div className="modal-head"><h2>{title}</h2>{head}<button type="button" className="btn ghost sm modal-x" aria-label="Закрыть" onClick={onClose}>✕</button></div>
+        <div className="modal-body">{children}</div>
       </div>
     </div>
   );
