@@ -162,10 +162,12 @@ export class Vpn {
       let clients = ib.kind === 'direct' ? this.directClients(server, t, users) : [];
       if (ib.kind === 'relay') {
         const targets = this.relayTargets(t);
+        const ready: ServerRow[] = [];   // выходы, для которых собран outbound: на них ссылаются балансировщики
         for (const x of targets) {
           const outTag = `to-${t.id}-${x.id}`;
           const xi = this.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct'`, t.id, x.id)[0];
           if (!xi || (sp.security === 'reality' && !xi.public_key)) continue;
+          ready.push(x);
           outbounds.push(xrayOutbound(sp, xi, outTag, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id));
           if (sp.autoMode !== 'random') {
             // локальный SOCKS для проб: панель меряет задержку и скорость именно этого выхода
@@ -181,7 +183,7 @@ export class Vpn {
             }
           if (emails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: emails, outboundTag: outTag });
         }
-        if (targets.length) {
+        if (ready.length) {
           const autoEmails: string[] = [];
           for (const u of users)
             if (json<string[]>(u.modes, []).includes('via')) {
@@ -195,16 +197,26 @@ export class Vpn {
             observed.push(`to-${t.id}-`);
             observeRtt = Math.max(observeRtt, sp.maxRttMs);
             const order = sp.autoMode === 'order';
-            if (order) fastObserve = true;
-            balancers.push(order ? {
-              // по порядку: балансировщик видит только первый выход, второй — fallback. Первый жив (хоть одна из двух
-              // последних проверок прошла) — трафик через него; нет — через второй, вернулся — снова через первый, всё
-              // за секунды и без участия панели. Оба не отвечают — панель закрепляет следующий отвечающий (ops.checkExits).
-              // Веса leastLoad для порядка не годятся: Xray умножает на них разброс задержки, а не её саму — выбор скакал
-              tag: `bal-${t.id}`, selector: [`to-${t.id}-${targets[0]!.id}`], fallbackTag: `to-${t.id}-${(targets[1] ?? targets[0])!.id}`,
-              strategy: { type: 'leastLoad', settings: { expected: 1, tolerance: 0.5 } },
-            } : {
-              tag: `bal-${t.id}`, selector: [`to-${t.id}-`], fallbackTag: `to-${t.id}-${targets[0]!.id}`,
+            if (order) {
+              fastObserve = true;
+              // по порядку: цепочка уровней. Уровень k видит только k-й выход; жив (хоть одна из двух последних проверок
+              // прошла) — трафик через него, нет — loopback возвращает соединение в маршрутизацию на уровень k+1.
+              // Так любой резервный выход включается за секунды без участия панели; вернулся вышестоящий — снова через него.
+              // Все не отвечают — через первый. Веса leastLoad для порядка не годятся: Xray умножает на них разброс задержки.
+              ready.forEach((x, i) => {
+                const last = i === ready.length - 1;
+                balancers.push({
+                  tag: orderBalancer(t.id, i), selector: [`to-${t.id}-${x.id}`],
+                  fallbackTag: last ? `to-${t.id}-${ready[0]!.id}` : `lb-${t.id}-${i + 2}`,
+                  strategy: { type: 'leastLoad', settings: { expected: 1, tolerance: 0.5 } },
+                });
+                if (i) {
+                  outbounds.push({ tag: `lb-${t.id}-${i + 1}`, protocol: 'loopback', settings: { inboundTag: `lvl-${t.id}-${i + 1}` } });
+                  rules.push({ type: 'field', inboundTag: [`lvl-${t.id}-${i + 1}`], balancerTag: orderBalancer(t.id, i) });
+                }
+              });
+            } else balancers.push({
+              tag: `bal-${t.id}`, selector: [`to-${t.id}-`], fallbackTag: `to-${t.id}-${ready[0]!.id}`,
               strategy: { type: 'leastLoad', settings: { expected: 1, tolerance: 0.01, maxRTT: `${sp.maxRttMs}ms` } },
             });
           } else {
@@ -358,6 +370,9 @@ export class Vpn {
     else for (const id of serverIds) this.db.prepare('UPDATE servers SET config_dirty = 1 WHERE id = ?').run(id);
   }
 }
+
+/** Балансировщик уровня i цепочки «по порядку»: первый — bal-<t> (его назначение и состояние смотрит панель), дальше bal-<t>-<i+1>. */
+export const orderBalancer = (templateId: string, i: number) => (i ? `bal-${templateId}-${i + 1}` : `bal-${templateId}`);
 
 /** Теги правил поколения gen: по ним fleet-core rules убирает прежний набор после того, как добавлен новый. */
 const tagRules = (rules: object[], gen: string) => rules.map((r, i) => ({ ...r, ruleTag: `${gen}-${i}` }));

@@ -2,7 +2,7 @@ import net from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { coreMode, foreignCore, panelPorts, type Ctx, type InboundRow, type NodeSession, type ServerRow, type TemplateRow } from './ctx.js';
 import { getSetting, setSetting } from './db.js';
-import { json, Vpn } from './vpn.js';
+import { json, orderBalancer, Vpn } from './vpn.js';
 import { releaseFor, type Core } from './releases.js';
 import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
 import { blockedDevices, limitRules, updateDevices, userOfEmail } from './devices.js';
@@ -335,8 +335,8 @@ export class Ops {
    * (наименьшая задержка). Возвращает результаты и смену выхода (для уведомления).
    */
   /** Что выбрано в балансировщике входа: назначенный панелью выход (override) и тот, через который идёт трафик. */
-  async balancerState(n: NodeSession, templateId: string): Promise<BalancerState | null> {
-    const r = await n.op(['xray-bi', `bal-${templateId}`]);
+  async balancerState(n: NodeSession, templateId: string, tag = `bal-${templateId}`): Promise<BalancerState | null> {
+    const r = await n.op(['xray-bi', tag]);
     return r.code === 0 ? parseBalancerInfo(r.stdout) : null;
   }
 
@@ -435,14 +435,22 @@ export class Ops {
     // по порядку — только «отвечает ли выход» (таймаут = выход недоступен), без замера скорости и порогов
     const order = sp.autoMode === 'order';
     const tagOf = (exitId: string) => `to-${t.id}-${exitId}`;
-    // по порядку балансировщик видит только первый выход: не выбран он и не закреплён другой — трафик идёт через fallback (второй)
-    const actualOf = (st: BalancerState) => st.override || st.selected || (order ? tagOf((targets[1] ?? targets[0])!.id) : null);
+    const actualOf = (st: BalancerState) => st.override || st.selected || null;
+    // по порядку — цепочка уровней (vpn.ts): трафик идёт через первый уровень, где выход выбран; ни одного — через первый выход
+    const orderActual = async (n: NodeSession, first: BalancerState | null): Promise<string | null> => {
+      if (first?.override) return first.override;
+      for (let i = 0; i < targets.length; i++) {
+        const st = i ? await this.balancerState(n, t.id, orderBalancer(t.id, i)) : first;
+        if (st?.selected) return st.selected;
+      }
+      return tagOf(targets[0]!.id);
+    };
     await this.ctx.onNode(entry, async (n) => {
       await this.ensureKit(entry, n, log);   // проба выходов появилась в nodekit 0.10 — старый nodekit обновляем сам
       // «откуда» — по прошлой проверке: вход переключается сам и раньше, чем панель на него посмотрит
       if (!getSetting<string | null>(this.ctx.db, `auto.actual.${t.id}`, null)) {
         const before = await this.balancerState(n, t.id);
-        if (before) actualBefore = actualOf(before);
+        if (before) actualBefore = order ? await orderActual(n, before) : actualOf(before);
       }
       for (const x of targets) {
         const r = await n.op(['exit-probe', probePort(t.id, x.id), order ? 0 : sp.testMB * 1_000_000], { timeoutMs: order ? 60_000 : 120_000 });
@@ -466,13 +474,14 @@ export class Ops {
       // по качеству — текущий, пока проходит пороги (без лишних переключений), иначе лучший подходящий; никто — Xray сам
       // по порядку между первым и вторым переключает сам вход (за секунды) — панель не закрепляет выход; только если
       // не отвечают оба, закрепляет следующий отвечающий по списку (вернулся первый или второй — закрепление снимается)
-      if (order) { const further = !results[0]?.ok && !results[1]?.ok ? results.slice(2).find((r) => r.ok) : undefined; next = further ? tagOf(further.exitId) : null; }
+      // по порядку на любой резервный выход переключает сам вход (цепочка уровней) — панель ничего не закрепляет
+      if (order) next = null;
       else next = cur?.ok ? prev : good[0] ? `to-${t.id}-${good[0].exitId}` : null;
       // сверяемся с входом на каждой проверке, а не только при смене: выбор мог сброситься перезапуском Xray
       const st = await this.setOverride(n, t.id, next);
       if (!st) log(`${entry.name}: вход не принял выбор выхода ${next ?? '(по задержке)'} — повторю при следующей проверке`);
       setSetting(this.ctx.db, `auto.override.${t.id}`, next);
-      actualAfter = st ? actualOf(st) : null;
+      actualAfter = st ? (order ? await orderActual(n, st) : actualOf(st)) : null;
       setSetting(this.ctx.db, `auto.actual.${t.id}`, actualAfter);
     });
     setSetting(this.ctx.db, `auto.checked.${t.id}`, new Date().toISOString());

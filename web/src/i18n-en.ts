@@ -1004,7 +1004,6 @@ export const EN: Record<string, string> = {
   "назначен, вход ещё не переключился": "assigned, entry hasn't switched yet",
   "неактивен": "inactive",
   "неактивен — нет связи": "inactive — no connection",
-  "Трафик идёт через первый выход в списке. Не отвечает — вход сам переводит трафик на следующий примерно за 10 секунд; первый снова отвечает — трафик возвращается к нему. Не отвечают и первый, и второй — на следующий переводит панель при своей проверке (около минуты). Вход проверяет выходы каждые 5 секунд, без замера скорости.": "Traffic goes through the first exit in the list. If it stops responding, the entry itself moves traffic to the next one in about 10 seconds; once the first responds again, traffic returns to it. If both the first and second are down, the panel moves traffic further down the list on its next check (about a minute). The entry checks exits every 5 seconds, with no speed test.",
   "По порядку: трафик идёт через первый отвечающий выход. Переключает сам вход за ~10 секунд; таблица обновляется раз в минуту.": "In order: traffic goes through the first exit that responds. The entry switches by itself in ~10 seconds; the table refreshes once a minute.",
   ", цепочкой через": ", chained via",
   "API-токен": "API token",
@@ -1133,4 +1132,5 @@ export const EN: Record<string, string> = {
   "Группы портов и связности": "Port and connectivity groups",
   "Запускать бэкап": "Run a backup",
   "Настройки панели: сервис подписок, язык, прокси бота, адреса исполнителя": "Panel settings: subscription service, language, bot proxy, executor addresses",
+  "Трафик идёт через первый отвечающий выход в списке. Выход не отвечает — вход сам переводит трафик на следующий по списку примерно за 10 секунд, на любом уровне: второй, третий и дальше. Вышестоящий снова отвечает — трафик возвращается к нему. Не отвечает никто — через первый. Вход проверяет выходы каждые 5 секунд, без замера скорости.": "Traffic goes through the first responding exit in the list. If an exit stops responding, the entry itself moves traffic to the next one in the list in about 10 seconds \u2014 at any level: second, third and beyond. When a higher exit responds again, traffic returns to it. If none respond \u2014 through the first. The entry checks exits every 5 seconds, without a speed test.",
 };

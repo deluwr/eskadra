@@ -13,6 +13,7 @@ import { parseSections, summarize } from './preflight.js';
 import { buildInstallScript, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from './nodekit.js';
 import { Ops, startJob, type JobHandle } from './ops.js';
 import { viaOutbound, type BootstrapVia } from './via.js';
+import { diagScript, explainTunnel, openScript, parseTunnelDiag, tlsReachable } from './tunnelcheck.js';
 
 const { Client } = ssh2;
 
@@ -38,6 +39,7 @@ export async function snippetOf(ctx: Ctx, r: ServerRow): Promise<string> {
 export async function bootstrapWithAuth(ctx: Ctx, r: ServerRow, auth: BootstrapAuth, log: Log): Promise<void> {
   const snippet = await snippetOf(ctx, r);
   let seenFp = '';
+  let tunnelProblem: string | null = null;
   // через прокси: временный проброс 127.0.0.1:<порт> → прокси → сервер:SSH (отдельный процесс Xray панели)
   let via: { port: number; close: () => Promise<void> } | null = null;
   if (auth.via) {
@@ -96,6 +98,15 @@ export async function bootstrapWithAuth(ctx: Ctx, r: ServerRow, auth: BootstrapA
       log(mask(`bootstrap: exit ${res.code}\n${res.out.trim()}`, secrets));
       if (res.code !== 0) throw new Error(`bootstrap завершился с ошибкой (код ${res.code}): ${mask(res.out.trim().split('\n').slice(-2).join(' '), secrets)}`);
       if (!res.out.includes(seenFp.replace(/^SHA256:/, ''))) log('предупреждение: отпечаток в выводе сниппета не найден (нестандартный ssh-keygen?)');
+      // туннель: проверяем порт сейчас, пока есть root-доступ, — тем же путём, каким пойдёт туннель
+      if (r.mgmt_mode === 'tunnel') {
+        const asRoot = async (cmd: string) => {
+          if (auth.user === 'root') return run('bash -s', cmd);
+          const r1 = await run('sudo -n bash -s', cmd);
+          return r1.code === 0 || !auth.password ? r1 : run(`sudo -S -p '' bash -s`, auth.password + '\n' + cmd);
+        };
+        tunnelProblem = await checkTunnelPort(ctx, r, auth, asRoot, log);
+      }
     } finally {
       client.end();
     }
@@ -105,9 +116,36 @@ export async function bootstrapWithAuth(ctx: Ctx, r: ServerRow, auth: BootstrapA
       ctx.updateServer(r.id, { mgmt_via: ctx.seal(JSON.stringify(auth.via)) });
       log('туннель управления будет идти через этот же прокси');
     }
+    if (tunnelProblem) throw new Error(tunnelProblem);
   } finally {
     await via?.close();
   }
+}
+
+/**
+ * Порт туннеля доступен тем путём, каким пойдёт туннель? Нет — диагностика по root-сессии, при необходимости
+ * открытие порта в firewall системы и повторная проверка. Возвращает понятную причину или null.
+ */
+async function checkTunnelPort(ctx: Ctx, r: ServerRow, auth: BootstrapAuth, root: (script: string) => Promise<{ code: number | null; out: string }>, log: Log): Promise<string | null> {
+  const creds = credsOf(ctx, ctx.server(r.id));
+  if (!creds) return null;
+  const viaChain = auth.via && auth.keepVia ? viaOutbound(ctx, auth.via) : null;
+  const probe = async () => {
+    if (!viaChain) return tlsReachable(r.host, creds.port, creds.sni);
+    if (!ctx.mgmt) return false;
+    const v = await ctx.mgmt.openVia(viaChain.outbound, r.host, creds.port);
+    try { return await tlsReachable('127.0.0.1', v.port, creds.sni); } finally { await v.close(); }
+  };
+  if (await probe().catch(() => false)) { log(`порт туннеля ${creds.port}/tcp отвечает${viaChain ? ` через прокси ${viaChain.label}` : ''}`); return null; }
+  const d = parseTunnelDiag((await root(diagScript(creds.port))).out, creds.port);
+  log(`порт туннеля ${creds.port}/tcp не отвечает: служба ${d.active ? 'работает' : 'не работает'}, порт ${d.listening ? 'слушается' : 'не слушается'}${d.iptablesBlocks ? ', iptables режет входящие' : ''}${d.nftChains.length ? `, nftables режет входящие (${d.nftChains.join('; ')})` : ''}`);
+  if (d.active && d.listening && (d.iptablesBlocks || d.nftChains.length)) {
+    const o = await root(openScript(creds.port, d));
+    log(o.code === 0 ? `открыл ${creds.port}/tcp в firewall системы` : `открыть порт в firewall системы не удалось: ${o.out.trim().slice(-200)}`);
+    if (o.code === 0 && await probe().catch(() => false)) { log(`порт туннеля ${creds.port}/tcp теперь отвечает`); return null; }
+    if (o.code === 0) return explainTunnel({ ...d, iptablesBlocks: false, nftChains: [] }, r.host, creds.port, viaChain?.label ?? null);
+  }
+  return explainTunnel(d, r.host, creds.port, viaChain?.label ?? null);
 }
 
 function explainConnect(e: Error & { level?: string; code?: string }, r: ServerRow, viaProxy = false): Error {
