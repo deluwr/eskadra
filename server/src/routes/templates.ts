@@ -88,7 +88,8 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
   };
 
   const validate = (b: z.infer<typeof body>) => {
-    for (const id of [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]) ctx.server(id);
+    const missing = [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])].filter((id) => !ctx.servers().some((s) => s.id === id));
+    if (missing.length) throw new HttpError(400, `в конфигурации серверы, которых уже нет в панели (${missing.join(', ')}) — обновите страницу`);
     const info = PROTOCOLS[b.protocol as Protocol];
     if (b.entryId) {
       if (!info.relay) throw new HttpError(400, `режим «через вход» не поддерживается для ${info.name}`);

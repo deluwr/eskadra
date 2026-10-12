@@ -1142,4 +1142,7 @@ export const EN: Record<string, string> = {
   "На серверах с 3x-ui маршрутизацию ведёт сама 3x-ui: BitTorrent она режет своими правилами (по умолчанию включено), остальное — в её настройках.": "On servers with 3x-ui, routing is done by 3x-ui itself: it blocks BitTorrent with its own rules (on by default), the rest is in its settings.",
   "Порты 25, 465, 587, 2525: через VPN нельзя рассылать почту — хостеры блокируют серверы за спам.": "Ports 25, 465, 587, 2525: no sending mail through the VPN — hosters suspend servers for spam.",
   "Протокол по содержимому (TCP и uTP), домены публичных трекеров; на Hysteria2 — ещё и UDP-трекеры. Распознавание работает даже в конфигурациях с выключенным sniffing. Полностью зашифрованные соединения торрент-клиента по содержимому не отличить, но без трекеров и uTP клиенту почти не найти пиров.": "The protocol by content (TCP and uTP) and public tracker domains; on Hysteria2 also UDP trackers. Detection works even in configurations with sniffing off. Fully encrypted torrent connections can't be told apart by content, but without trackers and uTP a client can hardly find peers.",
+  "найден 3x-ui {}: Эскадра будет добавлять свои inbounds в его Xray, второй Xray не запускается": "3x-ui {} found: Eskadra will add its inbounds to its Xray, a second Xray is not started",
+  "найдены остатки 3x-ui (служба {}): 3x-ui не работает — Эскадра поставит свой Xray": "3x-ui leftovers found (service {}): 3x-ui isn't running — Eskadra will install its own Xray",
+  "не запущена": "not running",
 };

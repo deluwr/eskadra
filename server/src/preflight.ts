@@ -152,7 +152,9 @@ export function summarize(raw: string, executorIps: string[]): PreflightSummary 
 
   const externalCores = coresFrom(s);
   const xui = externalCores.find((c) => c.name === '3x-ui');
-  if (xui) add('cores', 'Ядра', 'info', `найден 3x-ui ${xui.version} (${xui.active}): Эскадра будет добавлять свои inbounds в его Xray, второй Xray не запускается`);
+  if (xui) add('cores', 'Ядра', 'info', xui.active === 'active'
+    ? `найден 3x-ui ${xui.version}: Эскадра будет добавлять свои inbounds в его Xray, второй Xray не запускается`
+    : `найдены остатки 3x-ui (служба ${xui.active || 'не запущена'}): 3x-ui не работает — Эскадра поставит свой Xray`);
   else if (externalCores.length) add('cores', 'Ядра', 'warn', `уже работают: ${externalCores.map((c) => `${c.name} (${c.active})`).join(', ')} — Эскадра не запустит второе ядро того же типа`);
   else add('cores', 'Ядра', 'ok', 'сторонних VPN-ядер нет');
 

@@ -219,7 +219,8 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
   const dirty = JSON.stringify(d) !== JSON.stringify(draft);
   const body = () => ({
     name: d.name, protocol: d.protocol, port: Number(d.port), sni: d.sni.split(/[\s,]+/).filter(Boolean), fingerprint: d.fingerprint, ech: d.ech,
-    nodeIds: d.nodeIds, entryId: d.entryId || null, entryPort: d.entryId ? Number(d.entryPort) : null,
+    // серверы, которых уже нет в панели (удалены), не отправляем — иначе конфигурацию не сохранить
+    nodeIds: d.nodeIds.filter((id) => servers.some((s) => s.id === id)), entryId: d.entryId && servers.some((s) => s.id === d.entryId) ? d.entryId : null, entryPort: d.entryId ? Number(d.entryPort) : null,
     settings: {
       security: st.security, transport: st.transport, flow: st.transport === 'tcp' && st.security !== 'none' && d.protocol === 'vless' ? st.flow : '',
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,

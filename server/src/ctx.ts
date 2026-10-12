@@ -48,7 +48,8 @@ export interface ExternalCore { name: string; active: string; version: string }
 export function coreMode(s: ServerRow): 'own' | 'xui' {
   if (s.core_mode !== 'auto') return s.core_mode;
   const ext = JSON.parse(s.external_cores || '[]') as ExternalCore[];
-  return ext.some((e) => e.name === '3x-ui') ? 'xui' : 'own';
+  // только работающая 3x-ui: после её удаления на диске часто остаются папка и юнит — тогда ставим свой Xray
+  return ext.some((e) => e.name === '3x-ui' && e.active === 'active') ? 'xui' : 'own';
 }
 
 /** Чужие ядра того же типа, что не дают запустить своё (конфликт за порты и ресурсы). */

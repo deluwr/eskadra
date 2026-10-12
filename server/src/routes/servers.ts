@@ -15,12 +15,13 @@ import { checkLogin, installNodekit, onboardingRunning, runPreflight, snippetOf,
 import { fetchHostKey, withNodeLock, withSession } from '../ssh/executor.js';
 import { kitVersion } from '../nodekit.js';
 import { Ops, startJob, XUI_TOKEN } from '../ops.js';
-import { json } from '../vpn.js';
+import { json, Vpn } from '../vpn.js';
 import { CHECKLIST, renderPlan } from '../firewall.js';
 import { certProblems } from '../certs.js';
 import { localRaw, parseHostStat } from '../hoststats.js';
 import { botProxyOptions } from '../botproxy.js';
 import { scanSni } from '../sni.js';
+import { pruneServerRefs } from '../prune.js';
 import { mgmtVia, viaLabel, viaOutbound } from '../via.js';
 
 const sshUtils = ssh2.utils;
@@ -660,8 +661,12 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   app.delete<{ Params: { id: string } }>('/api/v1/servers/:id', { preHandler: guard(ctx, 'servers.manage', { otp: true }) }, async (req) => {
     const r = ctx.server(req.params.id);
     db.prepare('DELETE FROM servers WHERE id = ?').run(r.id);
-    audit(db, who(req), 'server.delete', r.id, { host: r.host });
-    return { ok: true };
+    // id сервера остаётся в конфигурациях, у пользователей и в ролях — без этого конфигурацию было не сохранить
+    const fixed = pruneServerRefs(ctx);
+    // входы, которые вели на этот сервер, получают новый конфиг без него
+    new Vpn(ctx).markDirty();
+    audit(db, who(req), 'server.delete', r.id, { host: r.host, cleaned: fixed });
+    return { ok: true, cleaned: fixed };
   });
 }
 

@@ -23,6 +23,7 @@ import { Backups } from './backup.js';
 import { SubService } from './subsvc.js';
 import { Workers } from './workers.js';
 import { Mgmt } from './mgmt.js';
+import { pruneServerRefs } from './prune.js';
 import { applyStagedRestore } from './restorelib.js';
 
 fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
@@ -57,6 +58,12 @@ const mgmt = new Mgmt(ctx, config.dataDir, app.log);
 ctx.mgmt = mgmt;
 for (const sig of ['SIGTERM', 'SIGINT'] as const) process.once(sig, () => { mgmt.stop(); process.exit(0); });
 process.once('exit', () => mgmt.stop());
+
+// ссылки на удалённые серверы (конфигурации, пользователи, роли) — от прежних версий, где удаление их не чистило
+{
+  const fixed = pruneServerRefs(ctx);
+  if (fixed.length) console.log(`убраны ссылки на удалённые серверы: ${fixed.join(', ')}`);
+}
 
 // v0.17: в inbounds Xray узлов добавлен служебный клиент svc.mgmt (первичный доступ через прокси) — переприменить один раз
 // конфиги узлов, которые эта версия панели формирует иначе, чем выкачено, — переприменить (фоновая синхронизация)
