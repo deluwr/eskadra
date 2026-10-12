@@ -13,7 +13,7 @@ import { parseSections, summarize } from './preflight.js';
 import { buildInstallScript, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from './nodekit.js';
 import { Ops, startJob, type JobHandle } from './ops.js';
 import { viaOutbound, type BootstrapVia } from './via.js';
-import { diagScript, explainTunnel, openScript, parseTunnelDiag, tlsReachable } from './tunnelcheck.js';
+import { beaconAnswers, beaconScript, diagScript, explainTunnel, openScript, parseTunnelDiag, tlsReachable, TUNNEL_PORT_CANDIDATES } from './tunnelcheck.js';
 
 const { Client } = ssh2;
 
@@ -130,22 +130,45 @@ async function checkTunnelPort(ctx: Ctx, r: ServerRow, auth: BootstrapAuth, root
   const creds = credsOf(ctx, ctx.server(r.id));
   if (!creds) return null;
   const viaChain = auth.via && auth.keepVia ? viaOutbound(ctx, auth.via) : null;
-  const probe = async () => {
-    if (!viaChain) return tlsReachable(r.host, creds.port, creds.sni);
-    if (!ctx.mgmt) return false;
-    const v = await ctx.mgmt.openVia(viaChain.outbound, r.host, creds.port);
-    try { return await tlsReachable('127.0.0.1', v.port, creds.sni); } finally { await v.close(); }
+  // тем же путём, каким пойдёт туннель: напрямую с главного сервера или через прокси
+  const through = async <T>(port: number, fn: (host: string, port: number) => Promise<T>, fallback: T): Promise<T> => {
+    if (!viaChain) return fn(r.host, port);
+    if (!ctx.mgmt) return fallback;
+    const v = await ctx.mgmt.openVia(viaChain.outbound, r.host, port);
+    try { return await fn('127.0.0.1', v.port); } finally { await v.close(); }
   };
-  if (await probe().catch(() => false)) { log(`порт туннеля ${creds.port}/tcp отвечает${viaChain ? ` через прокси ${viaChain.label}` : ''}`); return null; }
-  const d = parseTunnelDiag((await root(diagScript(creds.port))).out, creds.port);
+  const probe = (port: number) => through(port, (h, p) => tlsReachable(h, p, creds.sni), false).catch(() => false);
+  const via = viaChain ? ` через прокси ${viaChain.label}` : '';
+  if (await probe(creds.port)) { log(`порт туннеля ${creds.port}/tcp отвечает${via}`); return null; }
+  let d = parseTunnelDiag((await root(diagScript(creds.port))).out, creds.port);
   log(`порт туннеля ${creds.port}/tcp не отвечает: служба ${d.active ? 'работает' : 'не работает'}, порт ${d.listening ? 'слушается' : 'не слушается'}${d.iptablesBlocks ? ', iptables режет входящие' : ''}${d.nftChains.length ? `, nftables режет входящие (${d.nftChains.join('; ')})` : ''}`);
-  if (d.active && d.listening && (d.iptablesBlocks || d.nftChains.length)) {
+  if (!d.active || !d.listening) return explainTunnel(d, r.host, creds.port, viaChain?.label ?? null);
+  if (d.iptablesBlocks || d.nftChains.length) {
     const o = await root(openScript(creds.port, d));
     log(o.code === 0 ? `открыл ${creds.port}/tcp в firewall системы` : `открыть порт в firewall системы не удалось: ${o.out.trim().slice(-200)}`);
-    if (o.code === 0 && await probe().catch(() => false)) { log(`порт туннеля ${creds.port}/tcp теперь отвечает`); return null; }
-    if (o.code === 0) return explainTunnel({ ...d, iptablesBlocks: false, nftChains: [] }, r.host, creds.port, viaChain?.label ?? null);
+    if (o.code !== 0) return explainTunnel(d, r.host, creds.port, viaChain?.label ?? null);
+    if (await probe(creds.port)) { log(`порт туннеля ${creds.port}/tcp теперь отвечает`); return null; }
+    d = { ...d, iptablesBlocks: false, nftChains: [] };
   }
-  return explainTunnel(d, r.host, creds.port, viaChain?.label ?? null);
+  // в системе порт открыт, а снаружи — нет: firewall хостера. Ищем порт, который он пропускает, и переносим туннель туда
+  const ports = TUNNEL_PORT_CANDIDATES.filter((p) => p !== r.ssh_port && p !== creds.port);
+  const b = await root(beaconScript(ports));
+  const bound = (b.out.match(/^bound=([\d,]*)$/m)?.[1] ?? '').split(',').filter(Boolean).map(Number);
+  if (!bound.length) return `${explainTunnel(d, r.host, creds.port, viaChain?.label ?? null)}. Подобрать другой порт не удалось: популярные порты на сервере заняты`;
+  log(`порт ${creds.port} закрыт снаружи — ищу порт, который пропускает firewall хостера: ${bound.join(', ')}`);
+  let picked: number | null = null;
+  for (const port of bound) {
+    if (await through(port, (h, p) => beaconAnswers(h, p, port), false).catch(() => false)) { picked = port; break; }
+  }
+  // маячки — освободить порты (сами завершатся через 90 с)
+  await root(`pkill -f '^python3 - ${ports.join(' ')}$' || true`);
+  if (!picked) return `${explainTunnel(d, r.host, creds.port, viaChain?.label ?? null)}. Проверил и другие порты (${bound.join(', ')}) — снаружи${via} не доходит ни один: похоже, хостер пропускает только SSH`;
+  log(`порт ${picked}/tcp пропускается — переношу туннель управления с ${creds.port} на ${picked}`);
+  ctx.updateServer(r.id, { mgmt_port: picked });
+  const re = await root(await snippetOf(ctx, ctx.server(r.id)));
+  if (re.code !== 0) return `перенести туннель на порт ${picked} не удалось: ${re.out.trim().split('\n').slice(-2).join(' ')}`;
+  if (await probe(picked)) { log(`туннель управления отвечает на порту ${picked}/tcp${via}`); return null; }
+  return `туннель перенесён на порт ${picked}, но рукопожатие не проходит — нажмите «Повторить»; если не поможет, откройте ${picked}/tcp у хостера`;
 }
 
 function explainConnect(e: Error & { level?: string; code?: string }, r: ServerRow, viaProxy = false): Error {

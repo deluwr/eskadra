@@ -9,6 +9,7 @@
  * bootstrap открывает порт только в ufw и firewalld); режет — открываем и проверяем снова. Локально всё
  * открыто, а снаружи нет — это firewall хостера, о нём и пишем.
  */
+import net from 'node:net';
 import tls from 'node:tls';
 
 /** TLS-рукопожатие с портом туннеля: true — порт отвечает как сайт маскировки. */
@@ -86,4 +87,62 @@ export function explainTunnel(d: TunnelDiag, host: string, port: number, viaLabe
   if (!d.active) return `служба туннеля fleet-mgmt на ${host} не работает${d.log.length ? `: ${d.log.join(' ')}` : ''}`;
   if (!d.listening) return `служба туннеля fleet-mgmt работает, но порт ${port}/tcp не слушается${d.log.length ? `: ${d.log.join(' ')}` : ''}`;
   return `порт туннеля ${port}/tcp на ${host} закрыт снаружи (${path}): служба слушает, firewall системы порт пропускает — откройте ${port}/tcp во входящих в firewall хостера (панель провайдера) и нажмите «Повторить»`;
+}
+
+// ───── подбор порта туннеля, который пропускает firewall хостера ─────
+
+/**
+ * Кандидаты: популярные порты, которые хостеры обычно не закрывают (HTTPS-альтернативы Cloudflare, веб).
+ * 443 и 80 — в конце: они нужнее пользовательским конфигурациям (порт туннеля зарезервирован на узле).
+ */
+export const TUNNEL_PORT_CANDIDATES = [2083, 2087, 8880, 2052, 2082, 2086, 2095, 8080, 8443, 2053, 2096, 443, 80];
+
+/** Маячки на узле: слушают свободные из ports ~90 с, на подключение отвечают «fleet-probe <порт>». Печатает занятые ими порты. */
+export const beaconScript = (ports: number[]) => `python3 - ${ports.join(' ')} <<'PY'
+import os, select, socket, sys, time
+socks = {}
+for p in map(int, sys.argv[1:]):
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        s.bind(("::", p))
+    except OSError:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("0.0.0.0", p))
+        except OSError:
+            continue   # порт занят — не трогаем
+    s.listen(8)
+    socks[s] = p
+print("bound=" + ",".join(str(p) for p in socks.values()), flush=True)
+if os.fork():
+    os._exit(0)
+os.setsid()
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+end = time.time() + 90
+while time.time() < end:
+    ready, _, _ = select.select(list(socks), [], [], 1)
+    for s in ready:
+        try:
+            c, _ = s.accept()
+            c.sendall(("fleet-probe %d\\n" % socks[s]).encode())
+            c.close()
+        except OSError:
+            pass
+PY
+`;
+
+/** Ответил ли маячок на порту: читаем «fleet-probe <порт>» (через прокси TCP «соединяется» всегда, доказывает только ответ узла). */
+export function beaconAnswers(host: string, port: number, expectPort: number, timeoutMs = 8000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = net.connect({ host, port });
+    let buf = '';
+    const done = (ok: boolean) => { clearTimeout(t); s.destroy(); resolve(ok); };
+    const t = setTimeout(() => done(false), timeoutMs);
+    s.on('data', (d) => { buf += d.toString('utf8'); if (buf.includes(`fleet-probe ${expectPort}`)) done(true); });
+    s.once('error', () => done(false));
+    s.once('close', () => done(buf.includes(`fleet-probe ${expectPort}`)));
+  });
 }

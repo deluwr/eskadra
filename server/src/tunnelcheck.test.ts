@@ -37,3 +37,21 @@ test('туннель: объяснение причины — служба, по
   assert.match(explainTunnel({ ...base, active: false }, 'h', 34611, null), /не работает/);
   assert.equal(parseTunnelDiag(out('', '', ''), 34611).listening, false);
 });
+
+test('подбор порта: засчитывается только ответ маячка узла — «молчащий» приём (как у прокси без узла за ним) нет', async () => {
+  const { beaconAnswers, beaconScript, TUNNEL_PORT_CANDIDATES } = await import('./tunnelcheck.js');
+  const net = await import('node:net');
+  const listen = (onConn: (s: import('node:net').Socket) => void) => new Promise<import('node:net').Server>((res) => { const srv = net.createServer(onConn); srv.listen(0, '127.0.0.1', () => res(srv)); });
+  const port = (srv: import('node:net').Server) => (srv.address() as import('node:net').AddressInfo).port;
+  const beacon = await listen((s) => s.end('fleet-probe 2083\n'));
+  const silent = await listen(() => undefined);
+  const other = await listen((s) => s.end('SSH-2.0-OpenSSH\n'));
+  try {
+    assert.equal(await beaconAnswers('127.0.0.1', port(beacon), 2083), true);
+    assert.equal(await beaconAnswers('127.0.0.1', port(beacon), 2087), false, 'метка другого порта — не тот маячок');
+    assert.equal(await beaconAnswers('127.0.0.1', port(silent), 2083, 500), false);
+    assert.equal(await beaconAnswers('127.0.0.1', port(other), 2083), false);
+  } finally { for (const s of [beacon, silent, other]) s.close(); }
+  assert.match(beaconScript([2083, 443]), /python3 - 2083 443 <<'PY'/);
+  assert.ok(TUNNEL_PORT_CANDIDATES.indexOf(443) > TUNNEL_PORT_CANDIDATES.indexOf(2083), '443 — в конце: он нужнее пользовательским конфигурациям');
+});
