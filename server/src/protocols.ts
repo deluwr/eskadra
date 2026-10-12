@@ -67,6 +67,8 @@ export interface Spec {
   orderMinMbps: number;
   /** «по порядку» с порогом: замер скорости каждые N минут; решение о пропуске — раз в checkMin по медиане замеров за это время */
   speedEveryMin: number;
+  /** «по порядку» с порогом: решение о пропуске медленного выхода — раз в столько минут, по медиане замеров за это время */
+  decideMin: number;
 }
 
 /** Настройки шаблона с умолчаниями; старый протокол «vless-reality» = VLESS + REALITY + Vision. */
@@ -101,6 +103,7 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     testMB: raw.testMB ?? 5,
     orderMinMbps: raw.orderMinMbps ?? 0,
     speedEveryMin: raw.speedEveryMin ?? 1,
+    decideMin: raw.decideMin ?? 1,
   };
 }
 

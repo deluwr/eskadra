@@ -1186,4 +1186,5 @@ export const EN: Record<string, string> = {
   "медиана {}": "median {}",
   "список версий с GitHub недоступен: {}": "version list from GitHub unavailable: {}",
   "— журнал ниже. Панель осталась на прежней версии.": "— log below. The panel stayed on the previous version.",
+  "Выход пропускается или возвращается по медиане замеров за это время. 1 минута — по последнему замеру, реакция быстрее всего; больше — одна неудачная минута трафик не перекидывает. Само переключение делает Xray на входе за секунды.": "An exit is skipped or restored by the median of measurements over this period. 1 minute — by the latest measurement, the fastest reaction; more — one bad minute doesn't move traffic. Xray on the entry does the switch itself within seconds.",
 };

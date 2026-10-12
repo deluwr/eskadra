@@ -40,7 +40,7 @@ const AUTO_HINT: Record<AutoMode, string> = {
 interface Settings {
   security: Security; transport: Transport; flow: string; path: string; host: string; serviceName: string; xhttpMode: string;
   alpn: string[]; certMode: CertMode; domain: string; domains: Record<string, string>; ssMethod: string; hy2Obfs: string; mtDomain: string; sniffing: boolean;
-  autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number;
+  autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
 }
 
 interface Draft {
@@ -53,7 +53,7 @@ const defaults = (p: Protocol): Settings => ({
   security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
-  autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1,
+  autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -226,7 +226,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
-      autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0, speedEveryMin: Number(st.speedEveryMin) || 1,
+      autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0, speedEveryMin: Number(st.speedEveryMin) || 1, decideMin: Number(st.decideMin) || 1,
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -397,7 +397,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
                   <input className="inp mono" inputMode="decimal" value={st.orderMinMbps} onChange={(e) => setSt({ orderMinMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} placeholder="0" /></label>
                 {st.orderMinMbps > 0 && <>
                   <label className="fld">Мерить скорость каждые, мин<input className="inp mono" inputMode="numeric" value={st.speedEveryMin} onChange={(e) => setSt({ speedEveryMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                  <label className="fld"><span>Решать о переключении каждые, мин <Info>Выход пропускается или возвращается по медиане замеров за это время — одна неудачная минута трафик не перекидывает. Само переключение делает Xray на входе за секунды.</Info></span><input className="inp mono" inputMode="numeric" value={st.checkMin} onChange={(e) => setSt({ checkMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                  <label className="fld"><span>Решать о переключении каждые, мин <Info>Выход пропускается или возвращается по медиане замеров за это время. 1 минута — по последнему замеру, реакция быстрее всего; больше — одна неудачная минута трафик не перекидывает. Само переключение делает Xray на входе за секунды.</Info></span><input className="inp mono" inputMode="numeric" value={st.decideMin} onChange={(e) => setSt({ decideMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
                   <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при замере. Меньше объём — меньше трафика, но замер грубее на быстрых каналах.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
                   <span className="k" style={{ gridColumn: '1 / -1' }}>{`Трафик на замеры: около ${speedTraffic(st.testMB, st.speedEveryMin)} ГБ в сутки на каждый выход.`}</span>
                 </>}
@@ -493,14 +493,14 @@ const countryOf = (cc: string) => { try { return new Intl.DisplayNames([getLang(
 function ExitHealth({ t }: { t: Template }) {
   const { data, reload } = usePoll(() => api.get<Health>(`/api/v1/templates/${t.id}/health`), 60_000, [t.id]);
   const { busy, error, run } = useAsync();
-  const sp = t.spec as { maxRttMs?: number; minMbps?: number; autoMode?: string; orderMinMbps?: number; checkMin?: number; speedEveryMin?: number };
+  const sp = t.spec as { maxRttMs?: number; minMbps?: number; autoMode?: string; orderMinMbps?: number; checkMin?: number; speedEveryMin?: number; decideMin?: number };
   const thr = sp.orderMinMbps ?? 0;
   const order = sp.autoMode === 'order';
   const lead = data?.actual ?? data?.selected ?? null;   // реальный выбор входа; если его ещё не видели — назначенный
   return (
     <section className="card">
       <div className="card-head">
-        <h2>Выходы «Авто» <Info>{order ? <>По порядку: трафик идёт через первый отвечающий выход. Переключает сам вход за ~10 секунд; таблица обновляется раз в минуту.{thr > 0 && <> {`Выход медленнее ${thr} Мбит/с пропускается: скорость меряется каждые ${sp.speedEveryMin ?? 1} мин, решение — раз в ${sp.checkMin ?? 15} мин по медиане замеров; по кнопке «Проверить сейчас» — сразу.`}</>}</> : `Пороги: задержка не больше ${sp.maxRttMs ?? 100} мс, скорость не меньше ${sp.minMbps ?? 10} Мбит/с. Выбранный выход меняется, только когда текущий перестаёт проходить пороги.`}</Info></h2>
+        <h2>Выходы «Авто» <Info>{order ? <>По порядку: трафик идёт через первый отвечающий выход. Переключает сам вход за ~10 секунд; таблица обновляется раз в минуту.{thr > 0 && <> {`Выход медленнее ${thr} Мбит/с пропускается: скорость меряется каждые ${sp.speedEveryMin ?? 1} мин, решение — раз в ${sp.decideMin ?? 1} мин по медиане замеров; по кнопке «Проверить сейчас» — сразу.`}</>}</> : `Пороги: задержка не больше ${sp.maxRttMs ?? 100} мс, скорость не меньше ${sp.minMbps ?? 10} Мбит/с. Выбранный выход меняется, только когда текущий перестаёт проходить пороги.`}</Info></h2>
         <span className="flex">
           {data?.checkedAt && <span className="k">проверено {ago(data.checkedAt)}</span>}
           <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/templates/${t.id}/health/check`); await reload(); })}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>

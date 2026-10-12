@@ -33,7 +33,7 @@ function fixture() {
   const ctx = new Ctx(db, new Sealer(Buffer.alloc(32, 6)));
   for (const [id, role] of [['relay', 'entry'], ['es', 'exit'], ['pl', 'exit'], ['fi', 'exit']] as const)
     db.prepare(`INSERT INTO servers (id, name, host, role, key_pub, key_priv_sealed, sudo_mode) VALUES (?, ?, '203.0.113.1', ?, 'k', 'x', 'restricted')`).run(id, id, role);
-  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids, entry_id, entry_port, settings) VALUES ('t', 'trio', 'xray', 'vless', 8443, '[]', '["es","pl","fi"]', 'relay', 9443, '{"security":"none","autoMode":"order","exitOrder":["es","pl","fi"],"orderMinMbps":50,"checkMin":15,"testMB":5}')`).run();
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids, entry_id, entry_port, settings) VALUES ('t', 'trio', 'xray', 'vless', 8443, '[]', '["es","pl","fi"]', 'relay', 9443, '{"security":"none","autoMode":"order","exitOrder":["es","pl","fi"],"orderMinMbps":50,"checkMin":15,"decideMin":15,"testMB":5}')`).run();
   for (const s of ['es', 'pl', 'fi']) db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state) VALUES (?, 't', ?, 'direct', 8443, 'tcp', 'active')`).run(`ib-${s}`, s);
   const speed: Record<string, number> = { es: 30, pl: 80, fi: 90 };
   const alive: Record<string, boolean> = { es: true, pl: true, fi: true };
@@ -101,6 +101,21 @@ test('«по порядку» с порогом: замер каждую мин�
   r = await f.ops.checkExits(f.tpl(), () => undefined, { force: true });
   assert.deepEqual([f.bo['bal-t'], f.bo['bal-t-2']], ['lb-t-2', 'lb-t-3']);
   assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-fi');
+});
+
+test('«по порядку» с порогом: по умолчанию решение раз в минуту — по последнему замеру', async () => {
+  const f = fixture();
+  f.db.prepare(`UPDATE templates SET settings = '{"security":"none","autoMode":"order","exitOrder":["es","pl","fi"],"orderMinMbps":50}' WHERE id = 't'`).run();
+  const back = (key: string) => setSetting(f.db, key, new Date(Date.now() - 61_000).toISOString());
+  f.speed.es = 100;
+  await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.equal(f.bo['bal-t'], null);
+  // через минуту es просел — в эту же проверку и замер, и решение
+  f.db.prepare('DELETE FROM exit_speed').run();
+  f.speed.es = 20; back('auto.speedAt.t'); back('auto.decideAt.t');
+  await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.equal(f.bo['bal-t'], 'lb-t-2');
+  assert.equal(getSetting(f.db, 'auto.actual.t', null), 'to-t-pl');
 });
 
 test('«по порядку» без порога — ничего не мерим и не пропускаем', async () => {

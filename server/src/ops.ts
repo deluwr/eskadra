@@ -463,12 +463,12 @@ export class Ops {
     let actualAfter: string | null = null;
     // по порядку — только «отвечает ли выход» (таймаут = выход недоступен), без замера скорости и порогов
     const order = sp.autoMode === 'order';
-    // по порядку с порогом скорости: замер каждые speedEveryMin минут, решение о пропуске — раз в checkMin минут по медиане
+    // по порядку с порогом скорости: замер каждые speedEveryMin минут, решение о пропуске — раз в decideMin минут по медиане
     // замеров за это время (одна неудачная минута трафик не перекидывает); по кнопке «Проверить сейчас» — и замер, и решение
     const thr = order ? sp.orderMinMbps : 0;
     const due = (key: string, min: number) => { const at = getSetting<string>(this.ctx.db, key, ''); return !at || Date.now() - Date.parse(at) >= min * 60_000 - 5_000; };
     const measure = !order || (thr > 0 && (opts.force || due(`auto.speedAt.${t.id}`, sp.speedEveryMin)));
-    const decide = thr > 0 && (opts.force || due(`auto.decideAt.${t.id}`, sp.checkMin));
+    const decide = thr > 0 && (opts.force || due(`auto.decideAt.${t.id}`, sp.decideMin));
     const prevSlow = getSetting<string[]>(this.ctx.db, `auto.slow.${t.id}`, []);
     let slow: string[] = prevSlow;
     const tagOf = (exitId: string) => `to-${t.id}-${exitId}`;
@@ -523,8 +523,8 @@ export class Ops {
           for (const r of results) if (r.ok) ins.run(t.id, r.exitId, now, r.mbps ?? 0);   // отвечает, но не скачал — 0
           this.ctx.db.prepare(`DELETE FROM exit_speed WHERE at < ?`).run(new Date(Date.now() - 24 * 3600_000).toISOString());
         }
-        // решение — по медиане замеров за окно checkMin (по кнопке — по только что сделанному замеру)
-        const window = opts.force ? 0 : sp.checkMin;
+        // решение — по медиане замеров за окно decideMin (по кнопке — по только что сделанному замеру)
+        const window = opts.force ? 0 : sp.decideMin;
         const basis = results.map((r) => ({ ...r, mbps: opts.force ? r.mbps : medianSpeed(this.ctx, t.id, r.exitId, window) }));
         slow = decide ? slowExits(basis, prevSlow, thr, true) : slowExits(results, prevSlow, thr, false);
         for (const r of results) r.slow = slow.includes(r.exitId);
@@ -534,7 +534,7 @@ export class Ops {
           const st = await this.setOverride(n, t.id, skip[i] ? `lb-${t.id}-${i + 2}` : null, orderBalancer(t.id, i));
           if (!st) log(`${entry.name}: уровень ${i + 1} не принял ${skip[i] ? 'пропуск' : 'снятие пропуска'} — повторю при следующей проверке`);
         }
-        if (thr && decide) for (const [i, r] of results.entries()) if (skip[i]) log(`${r.name}: медиана ${medianSpeed(this.ctx, t.id, r.exitId, opts.force ? 0 : sp.checkMin) ?? '—'} Мбит/с — медленнее ${thr} Мбит/с, трафик идёт на следующий по порядку`);
+        if (thr && decide) for (const [i, r] of results.entries()) if (skip[i]) log(`${r.name}: медиана ${medianSpeed(this.ctx, t.id, r.exitId, opts.force ? 0 : sp.decideMin) ?? '—'} Мбит/с — медленнее ${thr} Мбит/с, трафик идёт на следующий по порядку`);
         setSetting(this.ctx.db, `auto.slow.${t.id}`, slow);
         if (measure && thr) setSetting(this.ctx.db, `auto.speedAt.${t.id}`, new Date().toISOString());
         if (decide) setSetting(this.ctx.db, `auto.decideAt.${t.id}`, new Date().toISOString());
