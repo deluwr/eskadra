@@ -31,7 +31,7 @@ function fixture() {
   const n = {
     op: async (a: (string | number)[]) => {
       if (a[0] === 'version') return ok(kitVersion());
-      if (a[0] === 'exit-probe') { const x = Object.keys(alive).find((k) => probePort('t', k) === a[1])!; return ok(alive[x] ? `rtt_ms=180\n${Number(a[2]) > 0 ? 'mbps=50\n' : ''}` : 'rtt_ms=fail\nmbps=fail\n'); }
+      if (a[0] === 'exit-probe') { const x = Object.keys(alive).find((k) => probePort('t', k) === a[1])!; return ok(alive[x] ? `rtt_ms=180\nexit_ip=198.51.100.${x === 'pl' ? 7 : 8}\nexit_loc=${x.toUpperCase()}\n${Number(a[2]) > 0 ? 'mbps=50\n' : ''}` : 'rtt_ms=fail\nmbps=fail\n'); }
       if (a[0] === 'xray-bo') { xray.override = a[2] === 'clear' ? null : String(a[2]); return ok('ok'); }
       // как настоящий Xray «по порядку»: балансировщик видит только первый выход; не отвечает — «Selects» пуст (трафик в fallback)
       if (a[0] === 'xray-bi') { const sel = xray.override ?? (alive.pl ? 'to-t-pl' : ''); return ok(`  - Selecting Override:\n    1   ${xray.override ?? ''}\n  - Selects:\n${sel ? `    1   ${sel}\n` : ''}`); }
@@ -99,4 +99,15 @@ test('«Авто» по порядку: не отвечают первые дв�
   r = await f.ops.checkExits(f.tpl(), () => undefined);
   assert.equal(f.xray.override, null);
   assert.deepEqual(r?.switched, { from: 'es', to: 'pl' });
+});
+
+test('проверка выходов: адрес и страна выхода в интернет сохраняются и не стираются, когда выход не ответил', async () => {
+  const f = fixture();
+  let r = await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.deepEqual(r?.results.map((x) => [x.exitId, x.exitIp, x.exitLoc]), [['pl', '198.51.100.7', 'PL'], ['fi', '198.51.100.8', 'FI']]);
+  f.alive.fi = false;
+  r = await f.ops.checkExits(f.tpl(), () => undefined);
+  assert.equal(r?.results.find((x) => x.exitId === 'fi')?.exitIp, null);
+  const row = f.db.prepare(`SELECT exit_ip, exit_loc FROM exit_health WHERE template_id = 't' AND exit_id = 'fi'`).get() as { exit_ip: string; exit_loc: string };
+  assert.deepEqual({ ...row }, { exit_ip: '198.51.100.8', exit_loc: 'FI' });
 });

@@ -19,6 +19,7 @@ import { CHECKLIST, renderPlan } from '../firewall.js';
 import { certProblems } from '../certs.js';
 import { localRaw, parseHostStat } from '../hoststats.js';
 import { botProxyOptions } from '../botproxy.js';
+import { scanSni } from '../sni.js';
 import { mgmtVia, viaLabel, viaOutbound } from '../via.js';
 
 const sshUtils = ssh2.utils;
@@ -313,6 +314,15 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     const st = await new Ops(ctx).checkCerts(r, req.params.act === 'renew');
     if (req.params.act === 'renew') audit(db, who(req), 'server.certs_renew', r.id, { renew: st.renew });
     return publicView(ctx, ctx.server(r.id));
+  });
+
+  /** Подбор сайтов маскировки REALITY: проверка кандидатов с узла (и, по желанию, соседей узла по /24). */
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/sni-scan', { preHandler: guard(ctx, 'operator') }, async (req) => {
+    const r = ctx.server(req.params.id);
+    const b = z.object({ neighbors: z.boolean().default(false), domains: z.array(z.string().max(253)).max(60).optional() }).parse(req.body ?? {});
+    const res = await scanSni(ctx, r, b);
+    audit(db, who(req), 'server.sni_scan', r.id, { neighbors: b.neighbors, ok: res.results.filter((x) => x.ok).length });
+    return res;
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/check', async (req) => {

@@ -24,6 +24,8 @@ export const userBody = z.object({
   templateIds: z.array(z.string()).nullable().default(null),
   wlMode: z.enum(['exact', 'prefix', 'asn']).default('exact'),
   status: z.enum(['active', 'disabled']).default('active'),
+  /** Комментарий: кто это. Не передан — прежний не меняется (бот и привязка Telegram его не шлют). */
+  note: z.string().trim().max(500).optional(),
 });
 
 export function subBase(ctx: Ctx): string | null {
@@ -43,13 +45,14 @@ export function saveUser(ctx: Ctx, id: string | null, b: z.infer<typeof userBody
   const vals = [b.name, b.tgId, b.limitGroup, b.trafficLimitGb, b.expireAt, b.deviceLimit, b.overAction, JSON.stringify(b.modes),
     b.nodeIds ? JSON.stringify(b.nodeIds) : null, b.templateIds ? JSON.stringify(b.templateIds) : null, b.wlMode, b.status];
   if (id) {
+    if (b.note !== undefined) db.prepare('UPDATE users SET note = ? WHERE id = ?').run(b.note || null, id);
     db.prepare(`UPDATE users SET name=?, tg_id=?, limit_group=?, traffic_limit_gb=?, expire_at=?, device_limit=?, over_action=?, modes=?, node_ids=?, template_ids=?, wl_mode=?, status=?,
       disabled_reason = CASE WHEN ? = 'active' THEN NULL ELSE disabled_reason END WHERE id=?`).run(...vals, b.status, id);
     return id;
   }
   const nid = 'u-' + randomBytes(4).toString('hex');
-  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18));
+  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token, note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18), b.note || null);
   return nid;
 }
 
@@ -75,7 +78,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
       .all(u.id, new Date().toISOString());
     const base = subBase(ctx);
     return {
-      id: u.id, name: u.name, tg_id: u.tg_id, status: u.status, disabled_reason: u.disabled_reason,
+      id: u.id, name: u.name, note: u.note ?? '', tg_id: u.tg_id, status: u.status, disabled_reason: u.disabled_reason,
       limit_group: u.limit_group, traffic_limit_gb: u.traffic_limit_gb, expire_at: u.expire_at, device_limit: u.device_limit,
       over_action: u.over_action, modes: json<string[]>(u.modes, []), node_ids: json<string[] | null>(u.node_ids, null), template_ids: json<string[] | null>(u.template_ids, null), wl_mode: u.wl_mode,
       configs: configsOf(u),

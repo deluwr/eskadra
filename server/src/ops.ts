@@ -35,7 +35,8 @@ export function parseBalancerInfo(out: string): BalancerState {
   return { override: after('Selecting Override:'), selected: after('Selects:') };
 }
 
-export interface ExitHealth { exitId: string; name: string; rttMs: number | null; mbps: number | null; ok: boolean; error: string | null }
+/** exitIp/exitLoc — адрес, с которым трафик выходит в интернет, и его страна по Cloudflare (проба через этот выход) */
+export interface ExitHealth { exitId: string; name: string; rttMs: number | null; mbps: number | null; ok: boolean; error: string | null; exitIp: string | null; exitLoc: string | null }
 
 const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
 import { buildKitBundle, kitVersion } from './nodekit.js';
@@ -443,11 +444,15 @@ export class Ops {
         const mbps = Number(r.stdout.match(/^mbps=([\d.]+)/m)?.[1] ?? NaN);
         const err = r.code !== 0 ? (r.stderr || r.stdout).trim().slice(0, 200) : Number.isNaN(rtt) ? 'выход не отвечает' : !order && Number.isNaN(mbps) ? 'скачивание не удалось' : null;
         const ok = !err && (order || (rtt <= sp.maxRttMs && mbps >= sp.minMbps));
-        results.push({ exitId: x.id, name: x.name, rttMs: Number.isNaN(rtt) ? null : rtt, mbps: Number.isNaN(mbps) ? null : mbps, ok, error: err });
-        this.ctx.db.prepare(`INSERT INTO exit_health (template_id, exit_id, rtt_ms, mbps, ok, error, checked_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-          ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, mbps = excluded.mbps, ok = excluded.ok, error = excluded.error, checked_at = excluded.checked_at`)
-          .run(t.id, x.id, Number.isNaN(rtt) ? null : rtt, Number.isNaN(mbps) ? null : mbps, ok ? 1 : 0, err);
-        log(`${entry.name} → ${x.name}: ${err ?? (order ? `отвечает, ${rtt} мс` : `${rtt} мс, ${mbps} Мбит/с`)}${ok || err ? '' : ' — не проходит пороги'}`);
+        const exitIp = r.stdout.match(/^exit_ip=([0-9a-fA-F.:]+)$/m)?.[1] ?? null;
+        const exitLoc = r.stdout.match(/^exit_loc=([A-Z]{2})$/m)?.[1] ?? null;
+        results.push({ exitId: x.id, name: x.name, rttMs: Number.isNaN(rtt) ? null : rtt, mbps: Number.isNaN(mbps) ? null : mbps, ok, error: err, exitIp, exitLoc });
+        // адрес выхода из прошлой проверки не стираем, если в этой его узнать не удалось
+        this.ctx.db.prepare(`INSERT INTO exit_health (template_id, exit_id, rtt_ms, mbps, ok, error, exit_ip, exit_loc, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, mbps = excluded.mbps, ok = excluded.ok, error = excluded.error,
+            exit_ip = COALESCE(excluded.exit_ip, exit_ip), exit_loc = COALESCE(excluded.exit_loc, exit_loc), checked_at = excluded.checked_at`)
+          .run(t.id, x.id, Number.isNaN(rtt) ? null : rtt, Number.isNaN(mbps) ? null : mbps, ok ? 1 : 0, err, exitIp, exitLoc);
+        log(`${entry.name} → ${x.name}: ${err ?? (order ? `отвечает, ${rtt} мс` : `${rtt} мс, ${mbps} Мбит/с`)}${ok || err ? '' : ' — не проходит пороги'}${exitIp ? ` · выход в интернет ${exitIp}${exitLoc ? ` (${exitLoc})` : ''}` : ''}`);
       }
       const good = results.filter((r) => r.ok).sort((a, b) => (b.mbps! - a.mbps!) || (a.rttMs! - b.rttMs!));
       const cur = prev ? results.find((r) => `to-${t.id}-${r.exitId}` === prev) : undefined;

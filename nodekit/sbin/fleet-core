@@ -204,10 +204,170 @@ cmd_probe() {  # probe <локальный SOCKS-порт выхода> <бай�
     if [ -z "$best" ] || awk -v a="$t" -v b="$best" 'BEGIN{exit !(a<b)}'; then best="$t"; fi
   done
   [ -n "$best" ] && echo "rtt_ms=$(awk -v t="$best" 'BEGIN{printf "%d", t*1000}')" || echo "rtt_ms=fail"
+  # куда на самом деле выходит трафик: адрес и страна по Cloudflare (у клиентов GeoIP-база может быть другой)
+  if [ -n "$best" ]; then
+    r="$(curl -s --max-time 8 --socks5-hostname "127.0.0.1:$port" https://www.cloudflare.com/cdn-cgi/trace || true)"
+    printf '%s\n' "$r" | grep -E '^ip=[0-9a-fA-F.:]{3,45}$' | sed 's/^ip=/exit_ip=/' || true
+    printf '%s\n' "$r" | grep -E '^loc=[A-Z]{2}$' | sed 's/^loc=/exit_loc=/' || true
+  fi
   [ "$bytes" = 0 ] && return 0   # только задержка (быстрая проверка закреплённого выхода)
   r="$(curl -s -o /dev/null -w '%{http_code} %{speed_download}' --max-time 40 --socks5-hostname "127.0.0.1:$port" "https://speed.cloudflare.com/__down?bytes=$bytes" || true)"
   code="${r%% *}"; s="${r#* }"
   if [ "$code" = 200 ] && [[ "$s" =~ ^[0-9.]+$ ]] && [ "${s%%.*}" != "0" ]; then echo "mbps=$(awk -v b="$s" 'BEGIN{printf "%.1f", b*8/1000000}')"; else echo "mbps=fail"; fi
+}
+
+cmd_sni() {  # подбор сайтов маскировки REALITY (§10.6): stdin {"domains":[…],"neighbors":bool,"host":"<IPv4 узла>"} → JSON
+  # TLS 1.3, X25519, HTTP/2, сертификат на имя, редирект, задержка — с этого узла; neighbors — ещё имена из сертификатов соседей по /24
+  python3 -c "$(cat <<'PY'
+import ipaddress
+import json
+import re
+import socket
+import ssl
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from subprocess import PIPE
+
+DOMAIN = re.compile(r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+MAX_NEIGHBOR_NAMES = 40
+
+
+def tls13_only(ctx):
+    """Только TLS 1.3 (Python 3.6 — через флаги OpenSSL)."""
+    try:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    except AttributeError:
+        ctx.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_NO_TLSv1_2
+    return ctx
+
+
+def tls_check(domain):
+    """Рукопожатие как у клиента: TLS 1.3, ALPN h2, проверка сертификата по имени. Задержки — в мс."""
+    ctx = tls13_only(ssl.create_default_context())
+    ctx.set_alpn_protocols(["h2", "http/1.1"])
+    ip = socket.getaddrinfo(domain, 443, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+    t0 = time.monotonic()
+    with socket.create_connection((ip, 443), timeout=5) as s:
+        tcp = time.monotonic() - t0
+        with ctx.wrap_socket(s, server_hostname=domain) as t:
+            hs = time.monotonic() - t0
+            return {"ip": ip, "tcp_ms": int(tcp * 1000), "tls_ms": int(hs * 1000), "h2": t.selected_alpn_protocol() == "h2"}
+
+
+def x25519(domain):
+    """Сервер соглашается на X25519, когда клиент предлагает только его (так делает REALITY)."""
+    try:
+        r = subprocess.run(["openssl", "s_client", "-connect", f"{domain}:443", "-servername", domain, "-tls1_3", "-groups", "X25519"],
+                           input=b"", stdout=PIPE, stderr=PIPE, timeout=8)
+        return r.returncode == 0 and b"TLSv1.3" in r.stdout
+    except Exception:
+        return False
+
+
+def redirect(domain):
+    """Куда ведёт главная страница: редирект на другой сайт для маскировки хуже (проба увидит чужой домен)."""
+    try:
+        r = subprocess.run(["curl", "-s", "-o", "/dev/null", "--max-time", "8", "-w", "%{http_code} %{redirect_url}", f"https://{domain}/"],
+                           stdout=PIPE, stderr=PIPE, timeout=12)
+        code, _, url = r.stdout.decode(errors="replace").partition(" ")
+        if not code.startswith("3") or not url:
+            return None
+        host = re.sub(r"^https?://([^/:]+).*$", r"\1", url.strip()).lower()
+        return None if host == domain else host
+    except Exception:
+        return None
+
+
+def check(domain, source):
+    res = {"domain": domain, "source": source, "ok": False, "ip": None, "tcp_ms": None, "tls_ms": None,
+           "tls13": False, "h2": False, "x25519": False, "redirect": None, "error": None}
+    try:
+        res.update(tls_check(domain))
+        res["tls13"] = True
+    except ssl.SSLCertVerificationError:
+        res["error"] = "сертификат не подходит к имени"
+        return res
+    except ssl.SSLError:
+        res["error"] = "нет TLS 1.3"
+        return res
+    except socket.gaierror:
+        res["error"] = "имя не резолвится"
+        return res
+    except Exception:
+        res["error"] = "нет соединения на 443"
+        return res
+    res["x25519"] = x25519(domain)
+    res["redirect"] = redirect(domain)
+    if not res["h2"]:
+        res["error"] = "нет HTTP/2"
+    elif not res["x25519"]:
+        res["error"] = "нет X25519"
+    res["ok"] = res["error"] is None
+    return res
+
+
+def cert_names(ip):
+    """Имена из сертификата соседа: CN и DNS из SAN, без масок."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    tls13_only(ctx)
+    try:
+        with socket.create_connection((ip, 443), timeout=2) as s:
+            with ctx.wrap_socket(s) as t:
+                der = t.getpeercert(binary_form=True)
+    except Exception:
+        return []
+    if not der:
+        return []
+    try:
+        r = subprocess.run(["openssl", "x509", "-inform", "DER", "-noout", "-subject", "-ext", "subjectAltName"],
+                           input=der, stdout=PIPE, stderr=PIPE, timeout=5)
+        text = r.stdout.decode(errors="replace")
+    except Exception:
+        return []
+    names = re.findall(r"DNS:([^,\s]+)", text) + re.findall(r"CN\s*=\s*([^,/\n]+)", text)
+    return [n.strip().lower() for n in names if not n.startswith("*")]
+
+
+def neighbors(host):
+    try:
+        me = ipaddress.ip_address(host)
+    except ValueError:
+        return {}
+    if me.version != 4:
+        return {}
+    net = ipaddress.ip_network(f"{host}/24", strict=False)
+    found = {}
+    with ThreadPoolExecutor(64) as pool:
+        for ip, names in zip(net.hosts(), pool.map(lambda a: cert_names(str(a)) if a != me else [], net.hosts())):
+            for n in names:
+                if DOMAIN.match(n) and n not in found:
+                    found[n] = str(ip)
+    return dict(list(found.items())[:MAX_NEIGHBOR_NAMES])
+
+
+def main():
+    req = json.load(sys.stdin)
+    domains = [d.strip().lower() for d in req.get("domains", []) if isinstance(d, str)]
+    jobs = {d: "list" for d in domains if DOMAIN.match(d)}
+    near = neighbors(str(req.get("host", ""))) if req.get("neighbors") else {}
+    for d in near:
+        jobs.setdefault(d, "neighbor")
+    with ThreadPoolExecutor(16) as pool:
+        results = list(pool.map(lambda kv: check(*kv), jobs.items()))
+    for r in results:
+        if r["domain"] in near:
+            r["neighbor_ip"] = near[r["domain"]]
+    json.dump({"results": results, "neighbors_scanned": bool(req.get("neighbors"))}, sys.stdout, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    main()
+PY
+)"
 }
 
 cmd_hoststat() {  # сырые счётчики хоста для живой статистики панели (разбирает и считает скорости панель)
@@ -424,6 +584,7 @@ case "${1:-}" in
   x25519)  cmd_x25519 ;;
   hoststat) cmd_hoststat ;;
   probe)   cmd_probe "${2:?}" "${3:?}" ;;
+  sni)     cmd_sni ;;
   bo)      cmd_bo "${2:?}" "${3:?}" ;;
   bi)      cmd_bi "${2:?}" ;;
   stats)   cmd_stats ;;

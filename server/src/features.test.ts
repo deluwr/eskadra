@@ -70,6 +70,29 @@ test('xray render: direct inbound + relay routing by user', () => {
   const rule = en.routing.rules.find((r: any) => r.outboundTag === 'to-t1-de' && r.user);
   assert.deepEqual(rule.user, ['u-00000001.v-de']);
   assert.ok(en.routing.balancers[0].selector[0] === 'to-t1-');
+  // прямое подключение к выходу выпускается в интернет с самого выхода: правил, уводящих его inbound на другой сервер, нет
+  assert.ok(!de.routing.rules.some((r: any) => r.inboundTag?.includes('in-ib1')), 'direct-inbound без правил маршрутизации');
+  assert.equal(de.outbounds[0].protocol, 'freedom', 'первый outbound (по умолчанию) — выход в интернет с этого сервера');
+});
+
+test('комментарий пользователя: сохраняется, не стирается, когда не передан, пустой — снимается', async () => {
+  const { ctx } = fixture();
+  const { saveUser, userBody } = await import('./routes/users.js');
+  const id = saveUser(ctx, null, userBody.parse({ name: 'sasha', note: '  друг Пети  ' }));
+  const note = () => (ctx.db.prepare('SELECT note FROM users WHERE id = ?').get(id) as { note: string | null }).note;
+  assert.equal(note(), 'друг Пети');
+  saveUser(ctx, id, userBody.parse({ name: 'sasha' }));
+  assert.equal(note(), 'друг Пети', 'бот и привязка Telegram не шлют комментарий — он остаётся');
+  saveUser(ctx, id, userBody.parse({ name: 'sasha', note: '' }));
+  assert.equal(note(), null);
+});
+
+test('подбор SNI: подходящие выше, среди них соседи и меньшая задержка; редирект — ниже', async () => {
+  const { rankSni } = await import('./sni.js');
+  const r = (domain: string, ok: boolean, tcp: number, source: 'list' | 'neighbor' = 'list', redirect: string | null = null) =>
+    ({ domain, ok, tcp_ms: tcp, source, redirect, ip: null, tls_ms: null, tls13: ok, h2: ok, x25519: ok, error: ok ? null : 'нет X25519' });
+  const out = rankSni([r('bad.com', false, 1), r('far.com', true, 90), r('redir.com', true, 5, 'list', 'other.com'), r('near.com', true, 40, 'neighbor'), r('fast.com', true, 10)]);
+  assert.deepEqual(out.map((x) => x.domain), ['near.com', 'fast.com', 'far.com', 'redir.com', 'bad.com']);
 });
 
 test('profiles and links', () => {

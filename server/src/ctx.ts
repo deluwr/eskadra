@@ -76,6 +76,8 @@ export interface UserRow {
   traffic_limit_gb: number | null; expire_at: string | null; device_limit: number | null; over_action: string;
   modes: string; node_ids: string | null; template_ids: string | null; wl_mode: 'exact' | 'prefix' | 'asn'; sub_token: string; knock_token: string;
   disabled_reason: string | null; created_at: string;
+  /** комментарий администратора: кто это */
+  note: string | null;
 }
 
 export class HttpError extends Error {

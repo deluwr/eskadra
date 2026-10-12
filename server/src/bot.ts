@@ -23,6 +23,8 @@ interface TgUpdate {
 }
 
 const gb = (b: number) => `${(b / 1024 ** 3).toFixed(1)} ГБ`;
+/** Флаг страны по коду ISO (FI → 🇫🇮). */
+const flag = (cc: string) => String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
 
 /**
  * Telegram-бот (§14): long polling — входящий порт не нужен. Отвечает только в личных чатах и только тем, чей
@@ -358,10 +360,11 @@ export class Bot {
     const ts = vpn.templates().filter((t) => t.entry_id && vpn.spec(t).autoMode !== 'random');
     if (!ts.length) return { text: 'Нет конфигураций со входом, где «Авто» выбирает выход по качеству или по порядку.', kb: [[cb('‹ Меню', 'm')]] };
     const blocks = ts.map((t) => {
-      const rows = db.prepare(`SELECT h.exit_id, s.name, h.rtt_ms, h.mbps, h.ok FROM exit_health h JOIN servers s ON s.id = h.exit_id WHERE h.template_id = ?`).all(t.id) as Array<{ exit_id: string; name: string; rtt_ms: number | null; mbps: number | null; ok: number }>;
+      const rows = db.prepare(`SELECT h.exit_id, s.name, h.rtt_ms, h.mbps, h.ok, h.exit_ip, h.exit_loc FROM exit_health h JOIN servers s ON s.id = h.exit_id WHERE h.template_id = ?`).all(t.id) as Array<{ exit_id: string; name: string; rtt_ms: number | null; mbps: number | null; ok: number; exit_ip: string | null; exit_loc: string | null }>;
       const ov = getSetting<string | null>(db, `auto.actual.${t.id}`, null) ?? getSetting<string | null>(db, `auto.override.${t.id}`, null);
       const sel = ov?.slice(`to-${t.id}-`.length);
-      const list = rows.map((r) => `${r.ok ? '🟢' : '🔴'} ${esc(r.name)}${r.exit_id === sel ? ' ← ведёт трафик' : ''}: ${r.ok || r.rtt_ms !== null ? `${r.rtt_ms ?? '—'} мс${r.mbps !== null ? `, ${r.mbps} Мбит/с` : ''}` : 'не отвечает'}`);
+      const list = rows.map((r) => `${r.ok ? '🟢' : '🔴'} ${esc(r.name)}${r.exit_id === sel ? ' ← ведёт трафик' : ''}: ${r.ok || r.rtt_ms !== null ? `${r.rtt_ms ?? '—'} мс${r.mbps !== null ? `, ${r.mbps} Мбит/с` : ''}` : 'не отвечает'}${r.exit_ip ? `
+    выход: <code>${esc(r.exit_ip)}</code>${r.exit_loc ? ` ${flag(r.exit_loc)} ${r.exit_loc}` : ''}` : ''}`);
       return `<b>${esc(t.name)}</b>\n${list.join('\n') || 'проверок ещё не было'}`;
     });
     return { text: blocks.join('\n\n'), kb: [...ts.map((t) => [cb(`Проверить «${t.name}»`, `exc:${t.id}`)]), [cb('‹ Меню', 'm'), cb('Обновить', 'ex')]] };

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api, ago, type Job, type Server, type Template } from '../api';
 import { RouteMap, exitView, type MapExit } from '../RouteMap';
-import { CopyBlock, ErrorBox, Info, Seg, Switch, Tag, toast, useAsync, usePoll, ask } from '../ui';
+import { CopyBlock, ErrorBox, Info, Modal, Seg, Switch, Tag, toast, useAsync, usePoll, ask } from '../ui';
+import { getLang } from '../i18n';
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
 /** Имя конфигурации: строчная латиница, цифры и дефис — регистр и пробелы исправляются сами, кириллица транслитерируется. */
@@ -269,6 +270,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       </button>
     ) };
   });
+  const [pick, setPick] = useState(false);
   const pickProtocol = (p: Protocol) => setD({ ...d, protocol: p, port: PROTO[p].port, st: defaults(p), entryId: PROTO[p].relay ? d.entryId : '' });
 
   return (
@@ -299,9 +301,12 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
         </div>
       )}
       {st.security === 'reality' && info.sec.includes('reality') && (
-        <label className="fld"><span>Сайт маскировки (SNI) <Info>Чужой сайт с TLS 1.3, под который маскируется сервер: www.apple.com, dl.google.com, www.cloudflare.com, www.samsung.com. Можно несколько через пробел. www.microsoft.com с REALITY не работает.</Info></span>
-          <input className="inp mono" value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="www.apple.com" />
-        </label>
+        <div className="fld"><span>Сайт маскировки (SNI) <Info>Чужой сайт с TLS 1.3, под который маскируется сервер: www.apple.com, dl.google.com, www.cloudflare.com, www.samsung.com. Можно несколько через пробел — все имена должны обслуживаться первым сайтом. www.microsoft.com с REALITY не работает. «Подобрать» проверит кандидатов с самого сервера.</Info></span>
+          <span className="flex">
+            <input className="inp mono" style={{ flex: 1 }} value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="www.apple.com" aria-label="Сайт маскировки (SNI)" />
+            <button type="button" className="btn" disabled={!managed.length} onClick={() => setPick(true)}>Подобрать…</button>
+          </span>
+        </div>
       )}
       {tls && info.cert.length > 0 && (
         <div className="stack" style={{ gap: 8 }}>
@@ -447,6 +452,8 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
         <span className="spacer" />
         {d.id && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Снять «${d.name}» со всех серверов и удалить? Профили этой конфигурации пропадут из подписок.`)) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); toast(`«${d.name}» удалена`); onDeleted(); }); }}>Удалить</button>}
       </div>
+      {pick && <SniPicker servers={managed} prefer={[...d.nodeIds, ...(d.entryId ? [d.entryId] : [])]} current={d.sni.split(/[\s,]+/).filter(Boolean)}
+        onPick={(domain) => { setD({ ...d, sni: domain }); setPick(false); toast(`Сайт маскировки: ${domain}. Сохраните и выкатите конфигурацию`, 'info'); }} onClose={() => setPick(false)} />}
     </section>
   );
 }
@@ -463,7 +470,10 @@ function JobLog({ id, onDone }: { id: number; onDone: () => void }) {
   );
 }
 
-interface Health { rows: Array<{ exit_id: string; name: string; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null }
+interface Health { rows: Array<{ exit_id: string; name: string; host: string; exit_ip: string | null; exit_loc: string | null; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null }
+
+/** Страна по коду ISO на языке интерфейса (FI → «Финляндия»); флаги-эмодзи Windows не рисует. */
+const countryOf = (cc: string) => { try { return new Intl.DisplayNames([getLang()], { type: 'region' }).of(cc) ?? cc; } catch { return cc; } };
 
 /** Выходы «Авто через вход»: последние замеры, какой выбран; ручная проверка. */
 function ExitHealth({ t }: { t: Template }) {
@@ -483,17 +493,18 @@ function ExitHealth({ t }: { t: Template }) {
       </div>
       <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
         <table>
-          <thead><tr><th>Выход</th><th>Задержка</th>{!order && <th>Скорость</th>}<th>Состояние</th></tr></thead>
+          <thead><tr><th>Выход</th><th>Выходит в интернет <Info>Адрес, с которым сайты видят трафик этого выхода, и страна по базе Cloudflare. Пользователи «напрямую» к этому серверу выходят с того же адреса. Клиент (Тропа, Hiddify и др.) может показывать другую страну — у него своя база GeoIP; сверяйте по адресу.</Info></th><th>Задержка</th>{!order && <th>Скорость</th>}<th>Состояние</th></tr></thead>
           <tbody>
             {data?.rows.map((r) => (
               <tr key={r.exit_id}>
                 <td><b>{r.name}</b>{lead === r.exit_id && <> <Tag kind="acc" dot>ведёт трафик</Tag></>}{data.selected === r.exit_id && lead !== r.exit_id && <> <Tag kind="warn">назначен, вход ещё не переключился</Tag></>}</td>
+                <td>{r.exit_ip ? <span className="mono small">{r.exit_loc && <>{countryOf(r.exit_loc)} · </>}{r.exit_ip}{r.exit_ip !== r.host && <span className="k"> (сервер {r.host})</span>}</span> : <span className="k">—</span>}</td>
                 <td className="mono">{r.rtt_ms !== null ? `${r.rtt_ms} мс` : '—'}</td>
                 {!order && <td className="mono">{r.mbps !== null ? `${r.mbps} Мбит/с` : '—'}</td>}
                 <td>{r.ok ? <Tag kind="ok">{order ? 'отвечает' : 'проходит'}</Tag> : <Tag kind={r.error ? 'fail' : 'warn'}>{r.error === 'выход не отвечает' ? 'неактивен — нет связи' : r.error ?? 'ниже порога'}</Tag>}</td>
               </tr>
             ))}
-            {data && !data.rows.length && <tr><td colSpan={4} className="empty">Проверок ещё не было — нажмите «Проверить сейчас» или подождите расписания.</td></tr>}
+            {data && !data.rows.length && <tr><td colSpan={5} className="empty">Проверок ещё не было — нажмите «Проверить сейчас» или подождите расписания.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -520,5 +531,54 @@ function Preview({ t, servers }: { t: Template; servers: Server[] }) {
         {data?.config ? <CopyBlock text={data.config} /> : <p className="k">Конфиг появится после выката (нужны ключи с сервера).</p>}
       </div>
     </details>
+  );
+}
+
+interface SniResult {
+  domain: string; source: 'list' | 'neighbor'; ok: boolean; ip: string | null; tcp_ms: number | null; tls_ms: number | null;
+  tls13: boolean; h2: boolean; x25519: boolean; redirect: string | null; error: string | null; neighbor_ip?: string;
+}
+
+/** Подбор сайта маскировки REALITY: кандидаты проверяются с выбранного сервера (и соседи сервера по подсети). */
+function SniPicker({ servers, prefer, current, onPick, onClose }: { servers: Server[]; prefer: string[]; current: string[]; onPick: (domain: string) => void; onClose: () => void }) {
+  const [sid, setSid] = useState(prefer.find((id) => servers.some((s) => s.id === id)) ?? servers[0]?.id ?? '');
+  const [near, setNear] = useState(true);
+  const [res, setRes] = useState<SniResult[] | null>(null);
+  const { busy, error, run } = useAsync();
+  const scan = () => run(async () => { setRes(null); setRes((await api.post<{ results: SniResult[] }>(`/api/v1/servers/${sid}/sni-scan`, { neighbors: near })).results); });
+  const good = res?.filter((r) => r.ok) ?? [];
+  return (
+    <Modal title="Подбор сайта маскировки" onClose={onClose}>
+      <p className="k">Проверка идёт с самого сервера — оттуда, откуда Xray будет обращаться к сайту. Нужны TLS 1.3, X25519 и HTTP/2; лучше без редиректа на другой сайт и с малой задержкой. Соседи по подсети — сайты из того же дата-центра: для наблюдателя такой сервер выглядит естественнее всего.</p>
+      <div className="flex" style={{ alignItems: 'flex-end' }}>
+        <label className="fld" style={{ flex: '1 1 200px' }}>Сервер
+          <select className="inp" value={sid} onChange={(e) => { setSid(e.target.value); setRes(null); }}>{servers.map((s) => <option key={s.id} value={s.id}>{s.name}{prefer.includes(s.id) ? '' : ' · не в конфигурации'}</option>)}</select>
+        </label>
+        <label className="cb"><input type="checkbox" checked={near} onChange={(e) => setNear(e.target.checked)} />искать соседей по подсети /24</label>
+        <button className="btn pri" disabled={busy || !sid} onClick={() => void scan()}>{busy ? 'Проверяю… до 2 минут' : res ? 'Проверить заново' : 'Проверить'}</button>
+      </div>
+      <ErrorBox error={error} />
+      {res && (
+        <div className="table-wrap" style={{ maxHeight: '50vh', overflow: 'auto' }}>
+          <table>
+            <thead><tr><th>Сайт</th><th>Задержка</th><th>Проверка</th><th /></tr></thead>
+            <tbody>
+              {res.map((r) => (
+                <tr key={r.domain}>
+                  <td><b className="mono small">{r.domain}</b>{r.source === 'neighbor' && <> <Tag kind="acc">сосед{r.neighbor_ip ? ` · ${r.neighbor_ip}` : ''}</Tag></>}{current[0] === r.domain && <> <Tag>сейчас</Tag></>}</td>
+                  <td className="mono small">{r.tcp_ms !== null ? `${r.tcp_ms} мс` : '—'}</td>
+                  <td>{r.ok
+                    ? <span className="flex" style={{ gap: 4 }}><Tag kind="ok">подходит</Tag>{r.redirect && <Tag kind="warn">редирект на {r.redirect}</Tag>}</span>
+                    : <Tag kind="fail">{r.error ?? 'не подходит'}</Tag>}</td>
+                  <td>{r.ok && <button className="btn sm" onClick={() => onPick(r.domain)}>Использовать</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {res && <span className="k">Подходят {good.length} из {res.length}. «Использовать» заменит сайт маскировки конфигурации — изменение попадёт на серверы после выката.</span>}
+      <div className="flex"><button className="btn ghost" onClick={onClose}>Закрыть</button></div>
+    </Modal>
   );
 }

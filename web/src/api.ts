@@ -80,7 +80,7 @@ export interface Template {
 }
 
 export interface User {
-  id: string; name: string; tg_id: string | null; status: 'active' | 'disabled'; disabled_reason: string | null; limit_group: string;
+  id: string; name: string; note: string; tg_id: string | null; status: 'active' | 'disabled'; disabled_reason: string | null; limit_group: string;
   traffic_limit_gb: number | null; expire_at: string | null; device_limit: number | null; over_action: string;
   modes: string[]; node_ids: string[] | null; template_ids: string[] | null; wl_mode: 'exact' | 'prefix' | 'asn';
   configs: Array<{ id: string; name: string; allowed: boolean; profiles: string[] }>;

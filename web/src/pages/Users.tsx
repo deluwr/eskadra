@@ -3,12 +3,12 @@ import { api, fmtBytes, fmtTime, type Server, type User } from '../api';
 import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll, ask, Info, QrButton, Addr } from '../ui';
 
 interface Form {
-  name: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
+  name: string; note: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
   overAction: string; modes: string[]; nodeIds: string[] | null; templateIds: string[] | null; wlMode: 'exact' | 'prefix' | 'asn'; status: 'active' | 'disabled';
 }
-const emptyForm: Form = { name: '', tgId: '', limitGroup: 'default', trafficLimitGb: '', expireAt: '', deviceLimit: '', overAction: 'disable', modes: ['direct', 'via'], nodeIds: null, templateIds: null, wlMode: 'exact', status: 'active' };
+const emptyForm: Form = { name: '', note: '', tgId: '', limitGroup: 'default', trafficLimitGb: '', expireAt: '', deviceLimit: '', overAction: 'disable', modes: ['direct', 'via'], nodeIds: null, templateIds: null, wlMode: 'exact', status: 'active' };
 const toForm = (u: User): Form => ({
-  name: u.name, tgId: u.tg_id ?? '', limitGroup: u.limit_group, trafficLimitGb: u.traffic_limit_gb?.toString() ?? '', expireAt: u.expire_at?.slice(0, 10) ?? '',
+  name: u.name, note: u.note, tgId: u.tg_id ?? '', limitGroup: u.limit_group, trafficLimitGb: u.traffic_limit_gb?.toString() ?? '', expireAt: u.expire_at?.slice(0, 10) ?? '',
   deviceLimit: u.device_limit?.toString() ?? '', overAction: u.over_action, modes: u.modes, nodeIds: u.node_ids, templateIds: u.template_ids, wlMode: u.wl_mode, status: u.status,
 });
 const num = (s: string) => (s.trim() === '' ? null : Number(s));
@@ -46,7 +46,7 @@ export function UsersPage() {
                   const pct = u.effective.trafficGb ? Math.min(100, (used / (u.effective.trafficGb * 1024 ** 3)) * 100) : 0;
                   return (
                     <tr key={u.id} className={`clickable ${sel === u.id ? 'sel' : ''}`} onClick={() => setSel(u.id)}>
-                      <td><b>{u.name}</b><div className="k">{u.limit_group}{u.status === 'disabled' && ` · отключён${u.disabled_reason ? `: ${u.disabled_reason}` : ''}`}</div></td>
+                      <td><b>{u.name}</b>{u.note && <div className="k note-line" title={u.note}>{u.note}</div>}<div className="k">{u.limit_group}{u.status === 'disabled' && ` · отключён${u.disabled_reason ? `: ${u.disabled_reason}` : ''}`}</div></td>
                       <td><div className="stack" style={{ gap: 4 }}><span className="mono small">{fmtBytes(used)} / {u.effective.trafficGb ? `${u.effective.trafficGb} ГБ` : '∞'}</span>{u.effective.trafficGb ? <div className={`bar ${pct > 80 ? 'hot' : ''}`}><span style={{ width: `${pct}%` }} /></div> : null}</div></td>
                       <td>{u.effective.expireAt ? <span className={soon(u) ? 'tag warn' : 'k'}>до {u.effective.expireAt.slice(0, 10)}</span> : <span className="k">бессрочно</span>}</td>
                       <td><span className="flex" style={{ gap: 4 }}>{u.modes.map((m) => <Tag key={m}>{m === 'via' ? 'вход' : 'напрямую'}</Tag>)}</span></td>
@@ -100,7 +100,7 @@ function importLinks(url: string, name: string): Array<[string, string]> {
   ];
 }
 
-const bodyOf = (f: Form) => ({ name: f.name, tgId: f.tgId || null, limitGroup: f.limitGroup, trafficLimitGb: num(f.trafficLimitGb), expireAt: f.expireAt ? new Date(f.expireAt + 'T23:59:59Z').toISOString() : null,
+const bodyOf = (f: Form) => ({ name: f.name, note: f.note, tgId: f.tgId || null, limitGroup: f.limitGroup, trafficLimitGb: num(f.trafficLimitGb), expireAt: f.expireAt ? new Date(f.expireAt + 'T23:59:59Z').toISOString() : null,
   deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, templateIds: f.templateIds, wlMode: f.wlMode, status: f.status });
 
 function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; wlOn: boolean }) {
@@ -147,6 +147,8 @@ function UserCard({ user, servers, onSaved, onDeleted, wlOn }: { user: User | nu
                 onSaveId={(v) => api.put(`/api/v1/users/${user.id}`, { ...bodyOf(toForm(user)), tgId: v })} /></span></div>
           ) : <label className="fld">Telegram ID (необязательно)<input className="inp mono" inputMode="numeric" value={f.tgId} onChange={(e) => setF({ ...f, tgId: e.target.value.replace(/\D/g, '') })} placeholder="привязать можно и после создания" /></label>}
         </div>
+        <label className="fld" style={{ marginTop: 12 }}>Комментарий <span className="k">видят только администраторы</span>
+          <textarea className="inp" rows={2} maxLength={500} value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} placeholder="кто это: друг Саши, рабочий ноутбук, оплатил до мая…" /></label>
       </div>
       <div className="row stack" style={{ alignItems: 'stretch' }}>
         <h3>Ограничения</h3>

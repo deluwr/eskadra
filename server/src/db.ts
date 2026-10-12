@@ -273,6 +273,13 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE servers ADD COLUMN mgmt_via TEXT;
   `,
+  `
+  ALTER TABLE users ADD COLUMN note TEXT;
+  `,
+  `
+  ALTER TABLE exit_health ADD COLUMN exit_ip TEXT;
+  ALTER TABLE exit_health ADD COLUMN exit_loc TEXT;
+  `,
 ];
 
 export type Db = DatabaseSync;
