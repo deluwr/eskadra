@@ -2,6 +2,7 @@
   "name": "fleet-ui",
   "private": true,
   "version": "0.1.0",
+  "license": "GPL-3.0-only",
   "workspaces": [
     "server",
     "web"
