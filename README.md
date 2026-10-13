@@ -1,177 +1,183 @@
-# Эскадра
+# Eskadra
 
-Панель управления личным флотом VPN-серверов: один главный сервер управляет нодами в разных странах по SSH, выкатывает конфигурации Xray / sing-box, ведёт пользователей и подписки, держит белые списки и защиту хостов — так, чтобы никакая блокировка не отрезала доступ к серверу.
+**English** · [Русский](README.ru.md)
 
-> Статус: ранняя версия (beta). Перед продакшеном прочитайте раздел «Ограничения».
+A control panel for a personal fleet of VPN servers. One main server manages nodes in different countries over SSH, rolls out Xray / sing-box configurations, keeps users and subscriptions, and maintains allowlists and host protection — so that no block can cut you off from your own servers.
 
-## Установка главного сервера
+> Status: early version (beta). Read "Current limitations" before using it in production.
 
-На любом Linux с systemd под root:
+## Installing the main server
+
+On any Linux with systemd, as root:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/deluwr/eskadra/main/scripts/install.sh)
 ```
 
-Установщик:
+The installer:
 
-- ставит Node.js из официальных сборок и релиз Эскадры с GitHub (обе загрузки проверяются по SHA-256);
-- запускает панель отдельным пользователем `eskadra` под systemd;
-- выбирает **случайный порт** и **случайный секретный путь** панели;
-- выпускает сертификат **Let's Encrypt** до первого запуска панели: на IP сервера (без домена, 6-дневный, продлевается сам) или на домен. Самоподписанных сертификатов нет: если выпуск не удался, установка останавливается с причиной, а повторный запуск продолжает с этого места;
-- сам ставит Python ≥ 3.9 с venv (если его нет или он старый) и certbot;
-- если на сервере уже есть **3x-ui** — спрашивает: дополнить (Эскадра положит свои inbounds в его Xray) или удалить (с резервной копией базы); отдельные xray / sing-box — оставить или остановить;
-- выбирает случайный порт сервиса подписок;
-- если включён ufw — открывает в нём только эти два порта;
-- печатает одноразовую ссылку создания владельца.
+- installs Node.js from the official builds and the Eskadra release from GitHub (both downloads are verified by SHA-256);
+- runs the panel as a dedicated `eskadra` user under systemd;
+- picks a **random port** and a **random secret path** for the panel;
+- issues a **Let's Encrypt** certificate before the panel's first start: for the server's IP (no domain needed, 6-day certificate, renews itself) or for a domain. There are no self-signed certificates: if issuance fails, the installation stops with the reason, and re-running it resumes from that point;
+- installs Python ≥ 3.9 with venv (if missing or too old) and certbot;
+- if **3x-ui** is already on the server, asks whether to extend it (Eskadra puts its inbounds into 3x-ui's Xray) or remove it (with a database backup); standalone xray / sing-box can be kept or stopped;
+- picks a random port for the subscription service;
+- if ufw is enabled, opens only these two ports in it;
+- prints a one-time link for creating the owner account.
 
-Повторный запуск той же команды обновляет панель, сохраняя данные (`/var/lib/eskadra`) и настройки (`/etc/eskadra`). Если установка оборвалась (например, отвалился SSH), повторный запуск продолжит первичную настройку с места обрыва; весь вывод пишется в `/var/log/eskadra-install.log`.
+Running the same command again updates the panel and keeps your data (`/var/lib/eskadra`) and settings (`/etc/eskadra`). If an installation was interrupted (for example, SSH dropped), re-running continues the initial setup from where it stopped; all output is written to `/var/log/eskadra-install.log`.
 
-Без вопросов: `ESKADRA_TLS=ip|domain`, `ESKADRA_DOMAIN=…`, `ESKADRA_XUI=keep|remove` (выбор Let's Encrypt означает согласие с его условиями).
+Unattended: `ESKADRA_TLS=ip|domain`, `ESKADRA_DOMAIN=…`, `ESKADRA_XUI=keep|remove` (choosing Let's Encrypt means you accept its terms).
 
-**Let's Encrypt.** certbot ≥ 5.4 ставится в отдельное окружение (`/opt/eskadra/certbot`) и держит сертификат в своём каталоге `/etc/eskadra/letsencrypt` — системный certbot и сертификаты других сайтов на сервере не затрагиваются; выпуск — по HTTP-01: порт 80 открывается в ufw только на время выпуска и продления; если его занимает другой сервис, установщик спросит, можно ли останавливать его на ~30 с. Продление — таймер `eskadra-certbot.timer` дважды в сутки, новый сертификат панель подхватывает без перезапуска. С сертификатом Let's Encrypt подписки тоже отдаются по HTTPS.
+**Let's Encrypt.** certbot ≥ 5.4 is installed into its own environment (`/opt/eskadra/certbot`) and keeps the certificate in its own directory `/etc/eskadra/letsencrypt` — the system certbot and other sites' certificates on the server are not touched. Issuance uses HTTP-01: port 80 is opened in ufw only while issuing and renewing; if another service occupies it, the installer asks whether it may stop that service for ~30 s. Renewal runs from the `eskadra-certbot.timer` twice a day, and the panel picks up the new certificate without a restart. With a Let's Encrypt certificate, subscriptions are also served over HTTPS.
 
-## Поддерживаемые системы
+## Supported systems
 
-Главный сервер и узлы — любой Linux с **systemd** и **glibc ≥ 2.28**, на amd64 или arm64:
+Main server and nodes — any Linux with **systemd** and **glibc ≥ 2.28**, on amd64 or arm64:
 
-| Семейство | Пакетный менеджер | Статус |
+| Family | Package manager | Status |
 |---|---|---|
-| Ubuntu 20.04+, Debian 11+ | apt | проверено (Ubuntu 22.04 / 24.04) |
-| RHEL 8+, Rocky, AlmaLinux, CentOS Stream, Fedora | dnf / yum | поддерживается |
-| openSUSE Leap / Tumbleweed | zypper | поддерживается |
-| Arch Linux | pacman | поддерживается |
-| Alpine (musl, OpenRC) | — | не поддерживается: нет systemd, Node.js собирается под glibc |
+| Ubuntu 20.04+, Debian 11+ | apt | tested (Ubuntu 22.04 / 24.04) |
+| RHEL 8+, Rocky, AlmaLinux, CentOS Stream, Fedora | dnf / yum | supported |
+| openSUSE Leap / Tumbleweed | zypper | supported |
+| Arch Linux | pacman | supported |
+| Alpine (musl, OpenRC) | — | not supported: no systemd, Node.js is built for glibc |
 
-Что учитывается: имена пакетов в разных дистрибутивах, firewall хоста — ufw или firewalld, сервис SSH — `ssh` или `sshd`, подключение `sshd_config.d` и `sudoers.d` там, где они выключены, группа администраторов `sudo` или `wheel`, SELinux, Python 3.6 на RHEL 8 (для certbot доустанавливается Python ≥ 3.9).
+What is taken into account: package names across distributions, the host firewall (ufw or firewalld), the SSH service name (`ssh` or `sshd`), enabling `sshd_config.d` and `sudoers.d` where they are disabled, the admin group (`sudo` or `wheel`), SELinux, Python 3.6 on RHEL 8 (Python ≥ 3.9 is installed for certbot).
 
-## Управление в терминале
+## Terminal management
 
 ```bash
 eskadra
 ```
 
-Интерактивное меню с номерами: **флот** — обзор, серверы, пользователи, конфигурации, ядра, бэкапы, аудит (с переходом внутрь: сервер → проверить, preflight, nodekit, временно открыть SSH, обновить ядро…; пользователь → подписка, ссылки, лимиты, отключить…), и **панель** — адрес, сертификат, порты, путь, пароли, 3x-ui, обновление. Разделы флота работают через API панели под консольной сессией: права и аудит те же, что в веб-интерфейсе. Команды без меню:
+An interactive numbered menu: **fleet** — overview, servers, users, configurations, cores, backups, audit (with drill-down: server → check, preflight, nodekit, temporarily open SSH, update core…; user → subscription, links, limits, disable…), and **panel** — address, certificate, ports, path, passwords, 3x-ui, update. The fleet sections work through the panel's API under a console session: the permissions and audit are the same as in the web interface. Commands without the menu:
 
-| Команда | Что делает |
+| Command | What it does |
 |---|---|
-| `eskadra fleet [раздел]` | интерактивное управление флотом (servers, users, configs, cores…) |
-| `eskadra url` | адрес панели (или одноразовая ссылка создания владельца) |
-| `eskadra status` | состояние, порты, число серверов и пользователей |
-| `eskadra port [N\|random]` | сменить порт панели (ufw обновится) |
-| `eskadra path [имя]` | сменить секретный путь панели |
-| `eskadra sub-port [N\|random]` | сменить порт подписок |
-| `eskadra reset-password [логин]` | новый пароль администратора |
-| `eskadra disable-2fa <логин>` | отключить 2FA, если потерян аутентификатор |
-| `eskadra backup` | бэкап сейчас |
-| `eskadra cert letsencrypt [ip / domain <домен>]` | выпустить сертификат Let's Encrypt |
-| `eskadra conflicts` | 3x-ui / xray / sing-box на этом сервере: дополнить или удалить |
-| `eskadra update [версия]` | обновить |
-| `eskadra uninstall [--purge]` | удалить программу (данные сохраняются) или полностью — с базой, ключами, сертификатом и портами в firewall |
+| `eskadra fleet [section]` | interactive fleet management (servers, users, configs, cores…) |
+| `eskadra url` | panel address (or the one-time owner-creation link) |
+| `eskadra status` | state, ports, number of servers and users |
+| `eskadra port [N\|random]` | change the panel port (ufw is updated) |
+| `eskadra path [name]` | change the panel's secret path |
+| `eskadra sub-port [N\|random]` | change the subscription port |
+| `eskadra reset-password [login]` | new administrator password |
+| `eskadra disable-2fa <login>` | disable 2FA if the authenticator is lost |
+| `eskadra backup` | make a backup now |
+| `eskadra cert letsencrypt [ip / domain <domain>]` | issue a Let's Encrypt certificate |
+| `eskadra conflicts` | 3x-ui / xray / sing-box on this server: extend or remove |
+| `eskadra update [version]` | update |
+| `eskadra uninstall [--purge]` | remove the program (data is kept) or everything — database, keys, certificate and firewall ports |
 
-## Подключение нод
+## Connecting nodes
 
-**Серверы → Добавить сервер**: адрес, роль (вход или выход), логин (обычно root) и пароль или ваш SSH-ключ. Дальше панель всё делает сама: подключается, добавляет свой ключ, закрепляет ключ сервера, проверяет систему и ставит служебные скрипты (sudo сужается до одной обёртки). Пароль используется один раз и нигде не сохраняется. Если прямого SSH с главного сервера нет, ту же настройку можно запустить командой на самом сервере — она есть в карточке сервера.
+**Servers → Add server**: address, role (entry or exit), login (usually root), and a password or your SSH key. The panel does the rest: it connects, adds its key, pins the server's host key, checks the system and installs the helper scripts (sudo is narrowed to a single wrapper). The password is used once and is never stored. If the main server has no direct SSH access, the same setup can be run as a command on the server itself — it is shown in the server card.
 
-**Канал управления** выбирается при добавлении:
+The **management channel** is chosen when adding a node:
 
-- **напрямую по SSH** — главный сервер вне РФ;
-- **через туннель** — главный сервер в РФ: SSH панели идёт внутри VLESS-REALITY (для ТСПУ — обычный HTTPS), на узле ставится отдельный Xray `fleet-mgmt` на случайном TCP-порту; если у хостера свой firewall, откройте этот порт. Узел пускает панель по ключу туннеля, а не по IP.
+- **direct over SSH** — the main server is outside Russia;
+- **through a tunnel** — the main server is in Russia: the panel's SSH runs inside VLESS-REALITY (ordinary HTTPS to the DPI), and a separate Xray `fleet-mgmt` is installed on the node on a random TCP port; if your hosting provider has its own firewall, open this port. The node lets the panel in by the tunnel key, not by IP.
 
-**Первичный доступ через прокси.** Чтобы поставить туннель, панели нужно один раз зайти на сервер. Если SSH из РФ до сервера режется, в форме подключения выберите «Первичный доступ»: через конфигурацию панели (например, выход за границей — панель заходит через служебного клиента `svc.mgmt`) или через свою ссылку `vless://` / `trojan://` / `vmess://` / `ss://` / JSON outbound. Панель поднимает отдельный процесс Xray с пробросом `127.0.0.1 → прокси → сервер:SSH` только на время подключения; ссылка не сохраняется. То же — в боте (`/addserver`).
+**Initial access through a proxy.** To set up the tunnel, the panel has to reach the server once. If SSH from Russia to the server is blocked, choose "Initial access" in the connect form: through a fleet configuration (for example, an exit abroad — the panel goes in via the service client `svc.mgmt`) or through your own `vless://` / `trojan://` / `vmess://` / `ss://` link or JSON outbound. The panel starts a separate Xray process that forwards `127.0.0.1 → proxy → server:SSH` only for the duration of the connection; the link is not stored. The same is available in the bot (`/addserver`).
 
-**Главный сервер — вход.** Кнопка на странице «Серверы» делает сервер с панелью входом для пользователей (например, вход в РФ → выходы за рубежом). Порты панели и подписок при этом остаются открытыми.
+**Main server as an entry.** The button on the "Servers" page turns the server running the panel into an entry for users (for example, entry in Russia → exits abroad). The panel and subscription ports stay open.
 
-Роли и порядок действий — в разделе «Справка» в самой панели.
+Roles and the order of actions are described in the "Help" section of the panel itself.
 
-## Конфигурации
+## Configurations
 
-**Конфигурации → Новая конфигурация**: протокол, порт, защита, серверы и (необязательно) вход.
+**Configurations → New configuration**: protocol, port, security, servers and (optionally) an entry.
 
-| Протокол | Ядро | Защита | Транспорты |
+| Protocol | Core | Security | Transports |
 |---|---|---|---|
-| VLESS | Xray | REALITY · TLS · без шифрования | TCP, WebSocket, gRPC, XHTTP, HTTPUpgrade |
-| VMess | Xray | TLS · без шифрования | TCP, WebSocket, gRPC, HTTPUpgrade |
+| VLESS | Xray | REALITY · TLS · none | TCP, WebSocket, gRPC, XHTTP, HTTPUpgrade |
+| VMess | Xray | TLS · none | TCP, WebSocket, gRPC, HTTPUpgrade |
 | Trojan | Xray | TLS · REALITY | TCP, WebSocket, gRPC, HTTPUpgrade |
 | Shadowsocks-2022 | Xray | — | TCP |
 | Hysteria2 | sing-box | TLS (QUIC) | — |
 | MTProto (Telegram) | telemt | fake-TLS | — |
 
-**TLS-сертификат:** Let's Encrypt на IP сервера (по умолчанию, выпускается и продлевается на самом сервере — таймер дважды в сутки; на время выпуска и продления нужен порт 80; панель каждые 3 часа проверяет сроки и результат продления, при сбое предупреждает в «Требует внимания» и в бот, есть кнопка «Продлить сейчас» на вкладке «Хост»), свой домен на каждом сервере или загруженный сертификат — например, wildcard для общего домена. Транспорт, путь, ALPN, отпечаток и прочее — в «Дополнительно». MTProto выдаётся отдельной ссылкой `tg://` (в VPN-подписку не попадает).
+**TLS certificate:** Let's Encrypt for the server's IP (the default; issued and renewed on the server itself — a timer twice a day; port 80 is needed while issuing and renewing; the panel checks expiry dates and the renewal result every 3 hours, warns in "Needs attention" and in the bot on failure, and there is a "Renew now" button on the "Host" tab), your own domain on each server, or an uploaded certificate — for example, a wildcard for a shared domain. Transport, path, ALPN, fingerprint and the rest are under "Advanced". MTProto is issued as a separate `tg://` link (it is not included in the VPN subscription).
 
-**Вход и «Авто».** Если у конфигурации есть вход, в подписке появляется профиль «вход → авто». Как он выбирает выход — настраивается для каждой конфигурации:
+**Entry and "Auto".** If a configuration has an entry, the subscription gets an "entry → auto" profile. How it picks the exit is set per configuration:
 
-- **по качеству** — выход, проходящий пороги задержки и скорости (по умолчанию 100 мс и 10 Мбит/с); держится, пока проходит, иначе — самый быстрый из подходящих;
-- **по порядку** — список выходов, который задаёте вы: трафик идёт через первый проходящий пороги, при его восстановлении возвращается к нему;
-- **случайно** — любой выход на каждое соединение.
+- **by quality** — an exit that passes the latency and speed thresholds (100 ms and 10 Mbit/s by default); it is kept while it passes, otherwise the fastest suitable one is chosen;
+- **in order** — a list of exits that you set: traffic goes through the first one that passes the thresholds, and returns to it when it recovers;
+- **random** — any exit for each connection.
 
-Задержку вход проверяет сам раз в минуту, скорость панель меряет по расписанию; переключение без разрыва соединений, о каждом бот пишет админам.
+The entry checks latency itself once a minute, and the panel measures speed on a schedule; switching does not drop connections, and the bot notifies admins about every switch.
 
-## Telegram-бот
+## Telegram bot
 
-Бот отвечает только привязанным людям и только в личных чатах; незнакомцу на `/start` он показывает лишь его Telegram ID — ни названия панели, ни логинов, ни серверов. Привязка — кнопкой «Привязать» в «Права и роли» и в карточке пользователя: панель выдаёт одноразовую ссылку на бота (15 минут), человек нажимает «Старт». Всё управление — кнопками под сообщением:
+The bot answers only linked people and only in private chats; to a stranger on `/start` it shows only their own Telegram ID — no panel name, no logins, no servers. Linking is done with the "Link" button in "Access and roles" and in the user card: the panel issues a one-time bot link (valid for 15 minutes), and the person presses "Start". All management is done with buttons under the message:
 
-- owner, admin и operator: пользователи — добавить по Telegram ID (`/adduser имя 123456789`), подписка и отдельные ссылки, какие конфигурации попадут в подписку, включить/отключить; удалять — admin и owner;
-- серверы: состояние, уровень защиты, включить/выключить ядра; подключить новый по логину и паролю или ключу (`/addserver`, admin и owner) — сообщение с паролем бот удаляет сразу после чтения;
-- «Требует внимания», выходы «Авто» с проверкой, бэкап (owner и admin);
-- уведомления: каждый админ выбирает свои (`/notify` или «Права и роли» → «Мои уведомления»); пользователям VPN такие сообщения не приходят;
-- пользователь: `/sub` — подписка, `/links` — ссылки на профили, трафик за месяц, открыть доступ с нового адреса (если включён белый список);
-- `/help` — команды для своей роли.
+- owner, admin and operator: users — add by Telegram ID (`/adduser name 123456789`), subscription and individual links, which configurations go into the subscription, enable/disable; deleting is for admin and owner;
+- servers: state, protection level, enable/disable cores; connect a new one by login and password or key (`/addserver`, admin and owner) — the bot deletes the message with the password right after reading it;
+- "Needs attention", "Auto" exits with a check, backup (owner and admin);
+- notifications: each admin chooses their own (`/notify` or "Access and roles" → "My notifications"); VPN users do not receive such messages;
+- user: `/sub` — subscription, `/links` — profile links, traffic for the month, opening access from a new address (if the allowlist is on);
+- `/help` — commands for your role.
 
-**Страница подписки.** Ссылка подписки, открытая в браузере, показывает страницу: QR и кнопки для приложений, срок, трафик и лимиты, доступные узлы, отдельные ссылки с QR. Приложения по той же ссылке получают подписку как раньше.
+**Subscription page.** A subscription link opened in a browser shows a page: a QR code and buttons for apps, expiry, traffic and limits, available nodes, individual links with QR codes. Apps get the subscription from the same link as before.
 
-**Обновление и восстановление из панели.** Кнопка «Обновить» внизу меню (owner) запускает `eskadra update` через root-помощник и показывает журнал; помощник ставится обновлением из консоли, поэтому первый раз после v0.15 обновите командой `eskadra update`. В «Бэкапах» — восстановление: файл копии и приватный ключ age → проверка и сводка → подмена данных и перезапуск панели (прежние файлы остаются на сервере).
+**Updating and restoring from the panel.** The "Update" button at the bottom of the menu (owner) runs `eskadra update` through a root helper and shows the log; the helper is installed by an update from the console, so the first time after v0.15 update with the `eskadra update` command. "Backups" has a restore: the backup file and the age private key → check and summary → data swap and panel restart (the previous files stay on the server).
 
-**Уже установленные ядра.** Preflight находит 3x-ui, xray, sing-box и т. п.:
+**Already installed cores.** Preflight finds 3x-ui, xray, sing-box, etc.:
 
-- если на узле есть **3x-ui**, Эскадра не запускает второй Xray, а добавляет свои inbounds (с пометкой `eskadra-…`) в Xray 3x-ui через его API. Логин и пароль 3x-ui вводятся один раз на вкладке «Хост» и хранятся зашифрованными; чужие inbounds 3x-ui не трогаются;
-- если работает другое ядро того же типа, Эскадра не ставит своё и объясняет почему.
+- if a node has **3x-ui**, Eskadra does not start a second Xray but adds its own inbounds (marked `eskadra-…`) to 3x-ui's Xray through its API. The 3x-ui login and password are entered once on the "Host" tab and stored encrypted; 3x-ui's own inbounds are left alone;
+- if another core of the same kind is running, Eskadra does not install its own and explains why.
 
-## Обновление ядер
+## Updating cores
 
-**Конфигурации → Ядра**: версии Xray и sing-box на каждом узле, последние релизы с GitHub, закрепление версии для новых узлов.
+**Configurations → Cores**: Xray and sing-box versions on each node, the latest releases from GitHub, pinning a version for new nodes.
 
-- Обновление на узле безопасное: новая версия ставится рядом со старой, текущий конфиг проверяется новым бинарником, затем переключение и перезапуск. Если ядро не поднялось или перестали слушаться порты inbounds — узел сам возвращает прежнюю версию. Хранятся текущая и предыдущая версии, есть ручной откат.
-- «Обновить все узлы» — волнами: canary, затем остальные по одному; первая ошибка останавливает выкат.
-- Раз в 6 часов панель проверяет новые релизы и один раз пишет о новой версии в Telegram-бот.
-- Xray узлов с 3x-ui принадлежит 3x-ui и обновляется в нём; Эскадра показывает его версию.
+- Updating on a node is safe: the new version is installed next to the old one, the current config is checked with the new binary, then it switches over and restarts. If the core does not start or the inbound ports stop listening, the node returns to the previous version by itself. The current and previous versions are kept, and there is a manual rollback.
+- "Update all nodes" works in waves: canary first, then the rest one by one; the first error stops the rollout.
+- Every 6 hours the panel checks for new releases and notifies the Telegram bot once per version.
+- A node's Xray with 3x-ui belongs to 3x-ui and is updated there; Eskadra shows its version.
 
-## Безопасность (кратко)
+## Security (in brief)
 
-- Ключ на каждый сервер, ручная сверка host key (без доверия при первом подключении), `from=` и строгий режим ключа панели.
-- Блокировки firewall применяются только после ручного чек-листа, сначала в shadow-режиме, затем под таймером отката, который работает на самом узле.
-- Аварийный доступ: «временно открыть SSH», аварийное снятие блокировок, короткая команда для KVM-консоли хостера (`sudo fleetctl allow 1 2 3 4`).
-- Секреты в базе зашифрованы мастер-ключом; бэкапы шифруются age на публичные ключи получателей.
-- Роли owner / admin / operator, TOTP 2FA, журнал аудита с цепочкой хэшей.
+- A key per server, manual host-key verification (no trust on first use), `from=` and a strict mode for the panel's key.
+- Firewall blocks are applied only after a manual checklist — first in shadow mode, then under a rollback timer that runs on the node itself.
+- Emergency access: "temporarily open SSH", emergency lifting of blocks, a short command for the hosting provider's KVM console (`sudo fleetctl allow 1 2 3 4`).
+- Secrets in the database are encrypted with a master key; backups are encrypted with age to the recipients' public keys.
+- Roles owner / admin / operator, TOTP 2FA, an audit log with a hash chain.
 
-Подробная архитектура и принятые решения — [`fleet-ui-architecture.md`](fleet-ui-architecture.md).
+Detailed architecture (in Russian) — [`eskadra-architecture.md`](eskadra-architecture.md).
 
-## Ограничения текущей версии
+## Current limitations
 
-- Канал управления фиксирован на узел: автоматического переключения между туннелем и прямым SSH пока нет (§5.8).
-- Нет интеграции с API firewall провайдеров и ACME; интерактивного терминала нет (только отдельные команды под аудитом).
-- Лимит устройств отображается, но не применяется; статистика трафика sing-box не собирается.
-- На узлах в режиме 3x-ui недоступен «универсальный вход» (relay).
+- The management channel is fixed per node: there is no automatic switching between the tunnel and direct SSH yet (see the architecture, §4.3).
+- No integration with hosting providers' firewall APIs; no interactive terminal (only individual commands under audit).
+- The device limit is displayed but is not enforced on 3x-ui nodes; sing-box traffic statistics are not collected.
+- The "universal entry" (relay) is not available on nodes in 3x-ui mode.
 
-## Разработка
+## Development
 
-Нужен Node.js 24.
+Requires Node.js 24.
 
 ```bash
 npm install
 npm run build -w web
-npm run dev          # панель на http://127.0.0.1:7070
+npm run dev          # panel at http://127.0.0.1:7070
 npm test
 ```
 
-Структура: `server/` — API, SSH-исполнитель, воркеры (TypeScript, Fastify, встроенный SQLite); `web/` — интерфейс (React + Vite); `nodekit/` — скрипты, которые ставятся на узлы; `scripts/` — установщик, меню `eskadra`, сборка релиза.
+Layout: `server/` — API, SSH executor, workers (TypeScript, Fastify, built-in SQLite); `web/` — the interface (React + Vite); `nodekit/` — scripts installed on nodes; `scripts/` — the installer, the `eskadra` menu, release build.
 
-## Выпуск релиза
+## Making a release
 
-Релиз собирается GitHub Actions по тегу:
+A release is built by GitHub Actions on a tag:
 
 ```bash
 git tag v0.4.0
 git push origin v0.4.0
 ```
 
-Workflow `.github/workflows/release.yml` прогоняет тесты, собирает `eskadra.tar.gz` с контрольной суммой и публикует их в Releases — оттуда их берёт установщик.
+The workflow `.github/workflows/release.yml` runs the tests, builds `eskadra.tar.gz` with a checksum and publishes them to Releases — that is where the installer fetches them from.
+
+## License
+
+[GNU GPL v3](LICENSE).
