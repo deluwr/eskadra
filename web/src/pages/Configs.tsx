@@ -634,7 +634,7 @@ function SpreadHealth({ t, data, busy, error, check }: { t: Template; data: Heal
         </table>
       </div>
       {st && st.groups.some((g) => g.cur !== g.home) && (
-        <div className="k" style={{ padding: '10px 20px' }}>{`Переведены: ${st.groups.filter((g) => g.cur !== g.home).map((g) => `группа ${g.g + 1} (${g.users} польз.)`).join(', ')}. Вернутся на свои выходы, когда там освободится место.`}</div>
+        <div className="k" style={{ padding: '10px 20px' }}>{`Переведены группы: ${st.groups.filter((g) => g.cur !== g.home).map((g) => g.g + 1).join(', ')}. Вернутся на свои выходы, когда там освободится место.`}</div>
       )}
       <div style={{ padding: '0 20px' }}><ErrorBox error={error} /></div>
     </section>
