@@ -16,7 +16,7 @@ interface Overview {
   routes: Route[];
 }
 
-const MODE: Record<string, string> = { smart: 'по качеству', order: 'по порядку', random: 'случайно' };
+const MODE: Record<string, string> = { smart: 'по качеству', order: 'по порядку', spread: 'по нагрузке', random: 'случайно' };
 
 export function OverviewPage() {
   const { data: d, error } = usePoll(() => api.get<Overview>('/api/v1/overview'), 30_000);
@@ -49,7 +49,7 @@ export function OverviewPage() {
                         const lead = r.autoMode !== 'random' && (r.selected ? r.selected === x.id : r.exits.find((e) => e.health?.ok)?.id === x.id);
                         return { id: x.id, name: s?.name ?? x.id, href: `#/server/${x.id}`, ...exitView(x.health, { lead, failSince: s?.fail_since, mode: r.autoMode, ago }) };
                       })}
-                      ordered={r.autoMode === 'order'}
+                      ordered={r.autoMode === 'order' || r.autoMode === 'spread'}
                       empty="Выходов пока нет: выкатите конфигурацию на серверы-выходы."
                     />
                   </div>

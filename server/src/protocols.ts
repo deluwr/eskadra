@@ -56,7 +56,7 @@ export interface Spec {
    * выше maxRttMs (leastLoad + наблюдение), а панель раз в checkMin минут меряет скорость скачивания через каждый
    * выход (testMB) и переключает вход на другой выход, если текущий медленнее minMbps или с задержкой выше порога.
    */
-  autoMode: 'random' | 'smart' | 'order';
+  autoMode: 'random' | 'smart' | 'order' | 'spread';
   /** Порядок выходов для order: трафик идёт через первый выход, проходящий пороги; вернулся вышестоящий — трафик возвращается к нему. */
   exitOrder: string[];
   maxRttMs: number;
@@ -69,6 +69,14 @@ export interface Spec {
   speedEveryMin: number;
   /** «по порядку» с порогом: решение о пропуске медленного выхода — раз в столько минут, по медиане замеров за это время */
   decideMin: number;
+  /** «по нагрузке» (spread.ts): на сколько групп делятся пользователи «Авто» */
+  spreadGroups: number;
+  /** «по нагрузке»: ёмкость канала выхода, Мбит/с (serverId → число); нет или 0 — загрузку выхода не контролировать */
+  exitCapMbps: Record<string, number>;
+  /** «по нагрузке»: загрузка канала выхода, %, выше которой группы переводятся на выходы с запасом */
+  spreadHighPct: number;
+  /** «по нагрузке»: справедливое деление канала на выходах — cake на 95% ёмкости + BBR (nodekit net-fair) */
+  spreadFair: boolean;
 }
 
 /** Настройки шаблона с умолчаниями; старый протокол «vless-reality» = VLESS + REALITY + Vision. */
@@ -104,6 +112,10 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     orderMinMbps: raw.orderMinMbps ?? 0,
     speedEveryMin: raw.speedEveryMin ?? 1,
     decideMin: raw.decideMin ?? 1,
+    spreadGroups: raw.spreadGroups ?? 6,
+    exitCapMbps: raw.exitCapMbps ?? {},
+    spreadHighPct: raw.spreadHighPct ?? 80,
+    spreadFair: raw.spreadFair ?? false,
   };
 }
 

@@ -25,7 +25,7 @@ const settingsBody = z.object({
   hy2Obfs: z.string().max(128).optional(),
   mtDomain: z.string().max(253).regex(/^[A-Za-z0-9.-]*$/).optional(),
   sniffing: z.boolean().optional(),
-  autoMode: z.enum(['random', 'smart', 'order']).optional(),
+  autoMode: z.enum(['random', 'smart', 'order', 'spread']).optional(),
   exitOrder: z.array(z.string().max(64)).max(64).optional(),
   maxRttMs: z.number().int().min(20).max(2000).optional(),
   minMbps: z.number().min(0.5).max(10000).optional(),
@@ -34,6 +34,10 @@ const settingsBody = z.object({
   orderMinMbps: z.number().min(0).max(10000).optional(),
   speedEveryMin: z.number().int().min(1).max(1440).optional(),
   decideMin: z.number().int().min(1).max(1440).optional(),
+  spreadGroups: z.number().int().min(2).max(16).optional(),
+  exitCapMbps: z.record(z.string().max(64), z.number().min(0).max(100000)).optional(),
+  spreadHighPct: z.number().int().min(30).max(95).optional(),
+  spreadFair: z.boolean().optional(),
 }).default({});
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -164,7 +168,9 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
       slow: getSetting<string[]>(db, `auto.slow.${t.id}`, []), speedAt: getSetting<string>(db, `auto.speedAt.${t.id}`, '') || null,
       decideAt: getSetting<string>(db, `auto.decideAt.${t.id}`, '') || null,
       // медиана скорости за окно решения — то, по чему выход пропускается
-      median: Object.fromEntries(vpn.relayTargets(t).map((x) => [x.id, medianSpeed(ctx, t.id, x.id, specOf(t).decideMin)])) };
+      median: Object.fromEntries(vpn.relayTargets(t).map((x) => [x.id, medianSpeed(ctx, t.id, x.id, specOf(t).decideMin)])),
+      // «по нагрузке»: загрузка каналов выходов и где сейчас каждая группа (последняя проверка)
+      spread: specOf(t).autoMode === 'spread' ? getSetting<unknown>(db, `spread.state.${t.id}`, null) : null };
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/templates/:id/health/check', { preHandler: guard(ctx, 'configs.rollout') }, async (req) => {

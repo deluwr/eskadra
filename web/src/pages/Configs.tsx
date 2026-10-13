@@ -30,10 +30,11 @@ const CERT_LABEL: Record<CertMode, string> = {
   ip: 'Let\'s Encrypt на IP сервера (рекомендуется)', domain: 'Свой домен на каждом сервере', custom: 'Загрузить свой (общий домен или wildcard)', self: 'Самоподписанный (без домена, с привязкой отпечатка)',
 };
 
-type AutoMode = 'smart' | 'order' | 'random';
+type AutoMode = 'smart' | 'order' | 'spread' | 'random';
 const AUTO_HINT: Record<AutoMode, string> = {
   smart: 'Трафик идёт через выход, который проходит пороги задержки и скорости. Пока он их проходит — не меняется; перестал — вход переключается на самый быстрый из подходящих.',
   order: 'Трафик идёт через первый отвечающий выход в списке. Выход не отвечает — вход сам переводит трафик на следующий по списку примерно за 10 секунд, на любом уровне: второй, третий и дальше. Вышестоящий снова отвечает — трафик возвращается к нему. Не отвечает никто — через первый. Вход проверяет выходы каждые 5 секунд, без замера скорости.',
+  spread: 'Пользователи делятся на группы, у каждой свой выход: групп на выходе — по ёмкости его канала. У пользователя постоянный выход и IP. Канал выхода загружен выше порога — самая тяжёлая группа, которая поместится, переводится на выход с запасом; нагрузка спала — возвращается. Выход не отвечает — группа сама уходит на следующий по порядку за ~10 секунд.',
   random: 'Каждое соединение — через любой выход наугад. Без проверок задержки и скорости.',
 };
 
@@ -41,6 +42,7 @@ interface Settings {
   security: Security; transport: Transport; flow: string; path: string; host: string; serviceName: string; xhttpMode: string;
   alpn: string[]; certMode: CertMode; domain: string; domains: Record<string, string>; ssMethod: string; hy2Obfs: string; mtDomain: string; sniffing: boolean;
   autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
+  spreadGroups: number; exitCapMbps: Record<string, number>; spreadHighPct: number; spreadFair: boolean;
 }
 
 interface Draft {
@@ -54,6 +56,7 @@ const defaults = (p: Protocol): Settings => ({
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
   autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
+  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false,
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -211,6 +214,22 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
   const rank = (id: string) => (st.exitOrder.includes(id) ? st.exitOrder.indexOf(id) : st.exitOrder.length);
   const exits = managed.filter((s) => d.nodeIds.includes(s.id) && s.id !== d.entryId).sort((a, b) => rank(a.id) - rank(b.id));
   const { data: health } = usePoll(() => (current?.entry_id ? api.get<Health>(`/api/v1/templates/${current.id}/health`) : Promise.resolve(null)), 60_000, [current?.id]);
+  // замеры каналов серверов (на самих серверах) — ёмкость выходов «по нагрузке», если своё значение не задано
+  const { data: links, reload: reloadLinks } = usePoll(() => api.get<Record<string, LinkTest>>('/api/v1/links'), null);
+  const [measuring, setMeasuring] = useState<string | null>(null);
+  const measure = async (ids: string[]) => {
+    const names = ids.map((id) => servers.find((s) => s.id === id)?.name ?? id).join(', ');
+    if (!(await ask(`Замерить канал: ${names}? На каждом сервере ~25 секунд канал будет занят целиком (пользователям этого сервера медленнее), трафик — до ${ids.length > 1 ? 'пары ГБ на сервер' : 'пары ГБ'} на гигабитном канале.`))) return;
+    for (const id of ids) {
+      setMeasuring(id);
+      try {
+        const r = await api.post<LinkTest>(`/api/v1/servers/${id}/link-test`);
+        toast(`${servers.find((s) => s.id === id)?.name}: ↓${r.down} ↑${r.up} Мбит/с`);
+      } catch (e) { toast((e as Error).message, 'fail'); }
+    }
+    setMeasuring(null);
+    void reloadLinks();
+  };
   const move = (i: number, dir: -1 | 1) => {
     const ids = exits.map((s) => s.id);
     [ids[i], ids[i + dir]] = [ids[i + dir]!, ids[i]!];
@@ -227,6 +246,8 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
       autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0, speedEveryMin: Number(st.speedEveryMin) || 1, decideMin: Number(st.decideMin) || 1,
+      spreadGroups: Math.min(16, Math.max(2, Number(st.spreadGroups) || 6)), spreadHighPct: Math.min(95, Math.max(30, Number(st.spreadHighPct) || 80)), spreadFair: st.spreadFair,
+      exitCapMbps: Object.fromEntries(exits.map((s) => [s.id, Number(st.exitCapMbps[s.id]) || 0])),
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -372,7 +393,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
             }
             entryOff={!d.entryId}
             exits={mapExits}
-            ordered={!!d.entryId && st.autoMode === 'order'}
+            ordered={!!d.entryId && (st.autoMode === 'order' || st.autoMode === 'spread')}
             onToggle={toggleNode}
             onMove={(id, dir) => move(exits.findIndex((x) => x.id === id), dir)}
           />
@@ -381,14 +402,49 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
         {d.entryId && info.relay && (
           <div className="stack" style={{ gap: 8 }}>
             <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
-            <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ['random', 'случайно']]} />
-            <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}{st.autoMode === 'order' ? ' Порядок — стрелками на схеме.' : ''}</span>
+            <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ['spread', 'по нагрузке'], ['random', 'случайно']]} />
+            <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}{st.autoMode === 'order' ? ' Порядок — стрелками на схеме.' : st.autoMode === 'spread' ? ' Порядок запасных выходов — стрелками на схеме.' : ''}</span>
             {st.autoMode === 'smart' && (
               <div className="grid g4">
                 <label className="fld">Задержка не больше, мс<input className="inp mono" inputMode="numeric" value={st.maxRttMs} onChange={(e) => setSt({ maxRttMs: Number(e.target.value.replace(/\D/g, '')) })} /></label>
                 <label className="fld">Скорость не меньше, Мбит/с<input className="inp mono" inputMode="decimal" value={st.minMbps} onChange={(e) => setSt({ minMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} /></label>
                 <label className="fld">Проверять каждые, мин<input className="inp mono" inputMode="numeric" value={st.checkMin} onChange={(e) => setSt({ checkMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
                 <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при проверке скорости. 5 МБ раз в 15 минут — около 0,5 ГБ трафика в сутки на выход.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+              </div>
+            )}
+            {st.autoMode === 'spread' && (
+              <div className="stack" style={{ gap: 10 }}>
+                <div className="flex" style={{ justifyContent: 'space-between' }}>
+                  <span className="k">Каналы выходов <Info>Замер идёт на самом сервере: 8 потоков к Cloudflare по 10 секунд на скачивание и на отдачу; ёмкость — меньшее из двух. На время замера (~25 с) канал занят целиком — пользователям этого сервера будет медленнее. Своё значение в поле важнее замера; пусто — по замеру; ни того, ни другого — загрузка выхода не контролируется, группы делятся поровну. Новая ёмкость меняет раскладку групп при следующем выкате.</Info></span>
+                  <button type="button" className="btn sm" disabled={!!measuring || !exits.length} onClick={() => void measure(exits.map((x) => x.id))}>{measuring ? `Замеряю ${servers.find((s) => s.id === measuring)?.name ?? ''}…` : 'Замерить все'}</button>
+                </div>
+                <div className="grid g4">
+                  {exits.map((x) => {
+                    const l = links?.[x.id];
+                    const cap = linkCap(l);
+                    return (
+                      <div key={x.id} className="fld">
+                        <label className="stack" style={{ gap: 4 }}><span>Канал {x.name}, Мбит/с</span>
+                          <input className="inp mono" inputMode="numeric" value={st.exitCapMbps[x.id] || ''} placeholder={cap ? `${cap} — по замеру` : 'не замерен'} aria-label={`Канал ${x.name}, Мбит/с`}
+                            onChange={(e) => setSt({ exitCapMbps: { ...st.exitCapMbps, [x.id]: Number(e.target.value.replace(/\D/g, '')) } })} /></label>
+                        <span className="k flex" style={{ gap: 6, flexWrap: 'wrap' }}>
+                          {l ? <span className="mono">{`↓${l.down} ↑${l.up} · ${ago(l.at)}`}</span> : <span>замера нет</span>}
+                          <button type="button" className="btn ghost sm" disabled={!!measuring} onClick={() => void measure([x.id])}>{measuring === x.id ? 'замеряю…' : 'Замерить'}</button>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="grid g4">
+                  <label className="fld"><span>Переводить при загрузке выше, % <Info>Канал выхода загружен сильнее — самая тяжёлая группа, которая поместится, переводится на выход с запасом. Домой группа возвращается, когда дома с ней будет на 20% ниже порога. Между переводами — не меньше 3 минут: нагрузка перетекает с новыми соединениями.</Info></span>
+                    <input className="inp mono" inputMode="numeric" value={st.spreadHighPct} onChange={(e) => setSt({ spreadHighPct: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                  <label className="fld"><span>Групп пользователей <Info>Больше групп — точнее делится нагрузка, но чаще меняется выход у части пользователей. Для 10–50 пользователей и 2–4 выходов хватает 6. Смена числа групп или ёмкостей заново раскладывает пользователей по выходам.</Info></span>
+                    <input className="inp mono" inputMode="numeric" value={st.spreadGroups} onChange={(e) => setSt({ spreadGroups: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                </div>
+                <div className="flex" style={{ justifyContent: 'space-between', maxWidth: '68ch' }}>
+                  <span className="small">Делить канал выхода поровну между соединениями <Info>Пока группы переезжают, перегруженный канал делится честно: у каждого соединения своя доля, видео у остальных идёт в меньшем качестве, а не встаёт. На выходах с заданной ёмкостью ставится очередь cake на 95% канала и BBR; переживает перезагрузку. Ёмкость указывайте реальную: заниженная — урежет скорость. Выключить — снять галочку и выкатить.</Info></span>
+                  <Switch label="Делить канал поровну" on={st.spreadFair} onChange={(v) => setSt({ spreadFair: v })} />
+                </div>
               </div>
             )}
             {st.autoMode === 'order' && (
@@ -481,7 +537,15 @@ function JobLog({ id, onDone }: { id: number; onDone: () => void }) {
   );
 }
 
-interface Health { rows: Array<{ exit_id: string; name: string; host: string; exit_ip: string | null; exit_loc: string | null; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null; slow: string[]; speedAt: string | null; decideAt: string | null; median: Record<string, number | null> }
+interface Health { rows: Array<{ exit_id: string; name: string; host: string; exit_ip: string | null; exit_loc: string | null; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null; slow: string[]; speedAt: string | null; decideAt: string | null; median: Record<string, number | null>; spread?: SpreadState | null }
+
+/** Замер канала сервера на нём самом, Мбит/с. */
+interface LinkTest { down: number; up: number; at: string }
+/** Ёмкость по замеру — как на сервере (spread.ts measuredCap): меньшее из направлений, шагом 10. */
+const linkCap = (l: LinkTest | undefined) => (l && l.down > 0 && l.up > 0 ? Math.max(10, Math.round(Math.min(l.down, l.up) / 10) * 10) : 0);
+
+/** «по нагрузке»: последняя проверка — загрузка каналов и где каждая группа. */
+interface SpreadState { at: string; high: number; exits: Array<{ id: string; cap: number; capFrom?: 'manual' | 'test' | null; load: number; measured: boolean }>; groups: Array<{ g: number; home: string; cur: string; mbps: number; users: number }> }
 
 /** ГБ в сутки на замеры скорости одного выхода. */
 const speedTraffic = (mb: number, everyMin: number) => Math.round(((mb || 5) * (1440 / Math.max(1, everyMin || 1))) / 102.4) / 10;
@@ -497,6 +561,7 @@ function ExitHealth({ t }: { t: Template }) {
   const thr = sp.orderMinMbps ?? 0;
   const order = sp.autoMode === 'order';
   const lead = data?.actual ?? data?.selected ?? null;   // реальный выбор входа; если его ещё не видели — назначенный
+  if (sp.autoMode === 'spread') return <SpreadHealth t={t} data={data ?? null} busy={busy} error={error} check={() => void run(async () => { await api.post(`/api/v1/templates/${t.id}/health/check`); await reload(); })} />;
   return (
     <section className="card">
       <div className="card-head">
@@ -526,6 +591,51 @@ function ExitHealth({ t }: { t: Template }) {
       {order
         ? !!data?.rows.length && !data.rows.some((r) => r.ok) && <div className="k" style={{ padding: '10px 20px' }}>Ни один выход не отвечает — вход держит трафик на первом по порядку.</div>
         : !data?.selected && !!data?.rows.length && <div className="k" style={{ padding: '10px 20px' }}>Выход не закреплён: Xray выбирает по наименьшей задержке.</div>}
+      <div style={{ padding: '0 20px' }}><ErrorBox error={error} /></div>
+    </section>
+  );
+}
+
+/** Выходы «Авто по нагрузке»: загрузка каналов, группы пользователей на каждом выходе. */
+function SpreadHealth({ t, data, busy, error, check }: { t: Template; data: Health | null; busy: boolean; error: string | null | undefined; check: () => void }) {
+  const st = data?.spread ?? null;
+  const pct = (load: number, cap: number) => Math.round((load / cap) * 100);
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Выходы «Авто» <Info>По нагрузке: у каждой группы пользователей свой выход. Канал загружен выше {st?.high ?? 80}% — самая тяжёлая группа, которая поместится, переводится на выход с запасом (не чаще раза в 3 минуты); нагрузка спала — возвращается домой. Таблица обновляется раз в минуту.</Info></h2>
+        <span className="flex">
+          {data?.checkedAt && <span className="k">проверено {ago(data.checkedAt)}</span>}
+          <button className="btn sm" disabled={busy} onClick={check}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>
+        </span>
+      </div>
+      <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
+        <table>
+          <thead><tr><th>Выход</th><th>Выходит в интернет</th><th>Задержка</th><th>Канал <Info>Загрузка канала сервера целиком (все конфигурации и прямые пользователи) по счётчикам его сетевых интерфейсов. «по входу» — счётчиков сервера ещё нет, показан только трафик этой конфигурации.</Info></th><th>Группы <Info>Сколько групп «Авто» сейчас идут через выход, сколько в них пользователей и сколько они качают. «чужих» — переведены сюда с перегруженных выходов.</Info></th><th>Состояние</th></tr></thead>
+          <tbody>
+            {data?.rows.map((r) => {
+              const e = st?.exits.find((x) => x.id === r.exit_id);
+              const here = st?.groups.filter((g) => g.cur === r.exit_id) ?? [];
+              const guests = here.filter((g) => g.home !== r.exit_id).length;
+              const over = e && e.cap > 0 && pct(e.load, e.cap) > (st?.high ?? 80);
+              return (
+                <tr key={r.exit_id}>
+                  <td><b>{r.name}</b></td>
+                  <td>{r.exit_ip ? <span className="mono small">{r.exit_loc && <>{countryOf(r.exit_loc)} · </>}{r.exit_ip}</span> : <span className="k">—</span>}</td>
+                  <td className="mono">{r.rtt_ms !== null ? `${r.rtt_ms} мс` : '—'}</td>
+                  <td className="mono">{e ? <>{Math.round(e.load)}{e.cap > 0 ? ` / ${e.cap} Мбит/с` : ' Мбит/с'}{e.cap > 0 && <> {over ? <Tag kind="warn">{pct(e.load, e.cap)}%</Tag> : <span className="k">{pct(e.load, e.cap)}%</span>}</>}<div className="k">{[e.cap > 0 ? (e.capFrom === 'manual' ? 'ёмкость своя' : 'ёмкость по замеру') : 'ёмкость не задана', !e.measured ? 'нагрузка по входу' : ''].filter(Boolean).join(' · ')}</div></> : '—'}</td>
+                  <td>{st ? <span className="small">{here.length} · {here.reduce((a, g) => a + g.users, 0)} польз. · {Math.round(here.reduce((a, g) => a + g.mbps, 0))} Мбит/с{guests > 0 && <div className="k">{`из них чужих: ${guests}`}</div>}</span> : '—'}</td>
+                  <td>{r.ok ? <Tag kind="ok">отвечает</Tag> : <Tag kind="fail">{r.error === 'выход не отвечает' ? 'неактивен — нет связи' : r.error ?? 'не отвечает'}</Tag>}</td>
+                </tr>
+              );
+            })}
+            {data && !data.rows.length && <tr><td colSpan={6} className="empty">Проверок ещё не было — нажмите «Проверить сейчас» или подождите минуту.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {st && st.groups.some((g) => g.cur !== g.home) && (
+        <div className="k" style={{ padding: '10px 20px' }}>{`Переведены: ${st.groups.filter((g) => g.cur !== g.home).map((g) => `группа ${g.g + 1} (${g.users} польз.)`).join(', ')}. Вернутся на свои выходы, когда там освободится место.`}</div>
+      )}
       <div style={{ padding: '0 20px' }}><ErrorBox error={error} /></div>
     </section>
   );

@@ -465,6 +465,10 @@ cmd_stats() {  # счётчики пользователей с обнулени
   "$BIN/eskadra-xray" api statsquery --server=127.0.0.1:10085 -pattern 'user>>>' -reset 2>/dev/null || echo '{}'
 }
 
+cmd_ostats() {  # счётчики outbound'ов групп «Авто по нагрузке» (sp-…) с обнулением; пользовательские не трогает
+  "$BIN/eskadra-xray" api statsquery --server=127.0.0.1:10085 -pattern 'outbound>>>sp-' -reset 2>/dev/null || echo '{}'
+}
+
 cmd_tls() {  # самоподписанный сертификат для Hysteria2 (sing-box); выводит sha256 сертификата для pinning
   local sni="$1" d="$ETC/sing-box/tls"
   [[ "$sni" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || die "bad sni"
@@ -627,6 +631,82 @@ cmd_cert_set() {  # cert-set <имя> <fullchain> <privkey>: загруженн�
   echo "cert $name: установлен, действует до $(openssl x509 -in "$d/fullchain.pem" -noout -enddate | cut -d= -f2)"
 }
 
+# пропускная способность канала сервера: 8 параллельных потоков к Cloudflare по 10 с на скачивание и на отдачу.
+# Скорость — по счётчикам интерфейса (вместе с текущим трафиком пользователей: канал занят целиком — это и есть его ёмкость)
+cmd_linktest() {
+  local dev secs=10 streams=8 url=https://speed.cloudflare.com
+  dev="$(netfair_dev)"; [ -n "$dev" ] && [ -r "/sys/class/net/$dev/statistics/rx_bytes" ] || die "нет маршрута по умолчанию"
+  lt_down() { local end=$((SECONDS + secs)); while [ "$SECONDS" -lt "$end" ]; do curl -s -o /dev/null --max-time "$((end - SECONDS + 1))" "$url/__down?bytes=200000000" || true; done; }
+  lt_up() { local end=$((SECONDS + secs)); while [ "$SECONDS" -lt "$end" ]; do head -c 100000000 /dev/zero | curl -s -o /dev/null --max-time "$((end - SECONDS + 1))" -X POST --data-binary @- "$url/__up" || true; done; }
+  lt_run() {  # lt_run rx|tx <функция> → Мбит/с
+    local col="$1" fn="$2" a b t0 t1 i
+    a="$(cat "/sys/class/net/$dev/statistics/${col}_bytes")"; t0="$(date +%s.%N)"
+    for i in $(seq 1 "$streams"); do "$fn" & done; wait
+    b="$(cat "/sys/class/net/$dev/statistics/${col}_bytes")"; t1="$(date +%s.%N)"
+    awk -v a="$a" -v b="$b" -v t0="$t0" -v t1="$t1" 'BEGIN { printf "%.0f", (b - a) * 8 / (t1 - t0) / 1000000 }'
+  }
+  # своё ограничение cake (netfair) на время замера снимаем — иначе отдача упрётся в него, а не в канал
+  local fair=0
+  if tc qdisc show dev "$dev" root 2>/dev/null | grep -q '^qdisc cake'; then fair=1; tc qdisc del dev "$dev" root 2>/dev/null || true; fi
+  echo "dev=$dev"
+  echo "down_mbps=$(lt_run rx lt_down)"
+  echo "up_mbps=$(lt_run tx lt_up)"
+  [ "$fair" = 1 ] && { cmd_netfair boot || true; }
+  return 0
+}
+
+# справедливое деление исходящего канала (§«Авто по нагрузке»): cake с ограничением чуть ниже ёмкости канала —
+# очередь копится здесь, а не у хостера, и каждое соединение получает свою долю; плюс BBR. Переживает перезагрузку.
+#   netfair on <Мбит/с> · netfair off · netfair status · netfair boot (из юнита при загрузке)
+netfair_dev() { ip -o route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}'; }
+cmd_netfair() {
+  local mode="$1" mbit="${2:-}" dev conf="$ETC/netfair" unit="$UNITS/eskadra-netfair.service"
+  case "$mode" in
+    on|boot)
+      if [ "$mode" = boot ]; then [ -f "$conf" ] || exit 0; mbit="$(sed -n 's/^MBIT=//p' "$conf")"; fi
+      [[ "$mbit" =~ ^[0-9]{2,6}$ ]] || die "bad bandwidth"
+      dev="$(netfair_dev)"; [ -n "$dev" ] || die "нет маршрута по умолчанию"
+      modprobe sch_cake 2>/dev/null || true
+      tc qdisc replace dev "$dev" root cake bandwidth "${mbit}mbit" besteffort 2>/dev/null || die "ядро не поддерживает cake (sch_cake)"
+      if modprobe tcp_bbr 2>/dev/null || grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
+        printf 'net.ipv4.tcp_congestion_control = bbr\n' > /etc/sysctl.d/90-eskadra-bbr.conf
+        sysctl -q -w net.ipv4.tcp_congestion_control=bbr || true
+      fi
+      [ "$mode" = boot ] && exit 0
+      install -d -m 755 "$ETC"
+      printf 'MBIT=%s\n' "$mbit" > "$conf"
+      cat > "$unit" <<UNIT
+[Unit]
+Description=Eskadra fair queueing (cake) on the uplink
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fleet-core netfair boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+      systemctl daemon-reload; systemctl enable eskadra-netfair.service >/dev/null 2>&1 || true
+      echo "on dev=$dev mbit=$mbit" ;;
+    off)
+      dev="$(netfair_dev)"
+      if [ -n "$dev" ] && tc qdisc show dev "$dev" root 2>/dev/null | grep -q '^qdisc cake'; then tc qdisc del dev "$dev" root 2>/dev/null || true; fi
+      systemctl disable eskadra-netfair.service >/dev/null 2>&1 || true
+      rm -f "$unit" "$conf" /etc/sysctl.d/90-eskadra-bbr.conf; systemctl daemon-reload
+      echo off ;;
+    status)
+      dev="$(netfair_dev)"
+      echo "dev=$dev"
+      echo "qdisc=$(tc qdisc show dev "$dev" root 2>/dev/null | head -1)"
+      echo "saved=$(sed -n 's/^MBIT=//p' "$conf" 2>/dev/null)"
+      echo "cc=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)" ;;
+    *) die "usage: netfair on <mbit>|off|status" ;;
+  esac
+}
+
 case "${1:-}" in
   install) cmd_install "${2:?}" "${3:?}" "${4:?}" ;;
   rollback) cmd_rollback "${2:?}" ;;
@@ -645,6 +725,9 @@ case "${1:-}" in
   bo)      cmd_bo "${2:?}" "${3:?}" ;;
   bi)      cmd_bi "${2:?}" ;;
   stats)   cmd_stats ;;
+  ostats)  cmd_ostats ;;
+  linktest) cmd_linktest ;;
+  netfair) cmd_netfair "${2:?}" "${3:-}" ;;
   online)  cmd_online ;;
   rules)   cmd_rules ;;
   tls)     cmd_tls "${2:?}" ;;

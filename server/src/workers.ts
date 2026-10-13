@@ -249,7 +249,10 @@ export class Workers {
         if (sp.autoMode === 'smart' && last && Date.now() - Date.parse(last) < sp.checkMin * 60_000 && (await this.ops.pinnedAlive(t).catch(() => true))) continue;
         const r = await this.ops.checkExits(t, () => undefined);
         if (r?.switched) {
-          const msg = r.switched.to
+          const sw = r.switched;
+          const msg = sw.spread
+            ? `«${t.name}»: группа ${sw.spread.group} «Авто» переведена с ${sw.from} на ${sw.to} — ${sw.spread.reason === 'overload' ? `канал ${sw.from} загружен выше ${sp.spreadHighPct}%` : sw.spread.reason === 'dead' ? `${sw.from} не отвечает, группа вернулась на свой выход` : 'нагрузка спала, группа вернулась на свой выход'}`
+            : r.switched.to
             ? `«${t.name}»: «Авто» переключён ${r.switched.from ? `с ${r.switched.from} ` : ''}на ${r.switched.to}${r.switched.slow ? ` — ${r.switched.from} медленнее ${sp.orderMinMbps} Мбит/с` : ''}`
             : sp.autoMode === 'order' ? `«${t.name}»: ни один выход не отвечает`
             : `«${t.name}»: ни один выход не проходит пороги (задержка ≤ ${sp.maxRttMs} мс, скорость ≥ ${sp.minMbps} Мбит/с) — выбор по наименьшей задержке`;

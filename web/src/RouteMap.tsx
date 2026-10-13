@@ -87,7 +87,9 @@ export function exitView(h: { rtt_ms: number | null; mbps: number | null; ok: nu
   let metric = h && (h.rtt_ms !== null || h.mbps !== null) ? `${h.rtt_ms ?? '—'} мс · ${h.mbps ?? '—'} Мбит/с` : undefined;
   if (opts.failSince) return { state: 'fail', note: opts.ago ? `нет связи · ${opts.ago(opts.failSince)}` : 'нет связи', metric };
   if (h && !h.ok) return { state: 'fail', note: h.error === 'выход не отвечает' ? 'неактивен' : h.error ?? 'ниже порога', metric };
-  if (opts.mode === 'order') metric = h?.rtt_ms != null ? `${h.rtt_ms} мс` : undefined;
+  if (opts.mode === 'order' || opts.mode === 'spread') metric = h?.rtt_ms != null ? `${h.rtt_ms} мс` : undefined;
+  // по нагрузке трафик идёт через все отвечающие выходы — у каждого свои группы пользователей
+  if (opts.lead || (opts.mode === 'spread' && h?.ok)) return { state: 'lead', note: opts.mode === 'spread' ? 'в работе' : 'ведёт трафик', metric };
   if (opts.lead) return { state: 'lead', note: 'ведёт трафик', metric };
   return { state: 'ok', note: opts.mode === 'random' ? 'в пуле' : 'в резерве', metric };
 }

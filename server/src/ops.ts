@@ -6,6 +6,8 @@ import { json, orderBalancer, Vpn } from './vpn.js';
 import { releaseFor, type Core } from './releases.js';
 import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
 import { blockedDevices, limitRules, updateDevices, userOfEmail } from './devices.js';
+import { parseHostStat } from './hoststats.js';
+import { parseSpreadStats, planSpread, SPREAD_COOLDOWN_MIN, spreadBal, spreadChain, spreadCaps, spreadGroupOf, spreadLayout, spreadLoop, parseLinkTest, type LinkTest, type SpreadExit, type SpreadGroup, type SpreadMove } from './spread.js';
 
 /** Ядра узла, остановленные вручную на вкладке «Хост». */
 export const coresOff = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx.db, `core.off.${serverId}`, []);
@@ -348,6 +350,22 @@ export class Ops {
     // перезапуск Xray сбрасывает переключение балансировщика — возвращаем выбранные выходы «Авто» входа
     // (с повтором: сразу после перезапуска API Xray может ещё не отвечать) и сверяем с тем, что реально выбрано
     if (!xuiMode) for (const t of this.vpn.templates().filter((x) => x.entry_id === s.id)) {
+      const sp = this.vpn.spec(t);
+      if (sp.autoMode === 'spread') {
+        // «по нагрузке»: запоминаем раскладку, которую получил вход (по ней панель переводит группы, а не по черновику);
+        // раскладка та же — переведённые группы снова на их выходы (дома балансировщику назначать нечего), другая — переводы сброшены
+        const layout = spreadLayout(this.vpn, this.ctx.db, t);
+        const { ids, homes } = layout;
+        const same = JSON.stringify(getSetting(this.ctx.db, `spread.layout.${t.id}`, null)) === JSON.stringify(layout);
+        if (!same) { setSetting(this.ctx.db, `spread.layout.${t.id}`, layout); setSetting(this.ctx.db, `spread.cur.${t.id}`, {}); }
+        const assigned = same ? getSetting<Record<string, string>>(this.ctx.db, `spread.cur.${t.id}`, {}) : {};
+        for (const [g, to] of Object.entries(assigned)) {
+          const home = homes[Number(g)];
+          if (!home || !ids.includes(to) || to === home) continue;
+          if (!(await this.spreadAssign(n, t.id, Number(g), spreadChain(home, ids), to).catch(() => null))) log(`«${t.name}»: группа ${Number(g) + 1} не принята входом — повторю при следующей проверке`);
+        }
+        continue;
+      }
       const ov = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
       if (ov && this.vpn.spec(t).autoMode !== 'random') {
         const st = await this.setOverride(n, t.id, ov).catch(() => null);
@@ -449,13 +467,14 @@ export class Ops {
     return out;
   }
 
-  async checkExits(t: TemplateRow, log: (l: string) => void, opts: { force?: boolean } = {}): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null; slow?: boolean } | null } | null> {
+  async checkExits(t: TemplateRow, log: (l: string) => void, opts: { force?: boolean } = {}): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null; slow?: boolean; spread?: { group: number; reason: SpreadMove['reason'] } } | null } | null> {
     const sp = this.vpn.spec(t);
     if (sp.autoMode === 'random' || !t.entry_id) return null;
     const entry = this.ctx.server(t.entry_id);
     if (entry.sudo_mode !== 'restricted' || coreMode(entry) === 'xui') return null;
     const targets = this.vpn.relayTargets(t);
     if (!targets.length) return null;
+    if (sp.autoMode === 'spread') return this.spreadTick(t, entry, targets, log, opts);
     const results: ExitHealth[] = [];
     const prev = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
     let next: string | null = prev;
@@ -551,6 +570,152 @@ export class Ops {
     // уведомляем о реальной смене выхода, через который идёт трафик
     const fromSlow = !!actualBefore && slow.some((id) => tagOf(id) === actualBefore);
     return { results, switched: actualAfter && actualAfter !== actualBefore ? { from: nameOf(actualBefore), to: nameOf(actualAfter), ...(fromSlow ? { slow: true } : {}) } : !next && prev && sp.autoMode !== 'order' ? { from: nameOf(prev), to: null } : null };
+  }
+
+  /**
+   * Замер канала сервера на нём самом: ~20 с канал занят целиком (скачивание, затем отдача). Результат — по серверу;
+   * в «Авто по нагрузке» он ёмкость выхода, если в конфигурации не задано своё значение.
+   */
+  async measureLink(s: ServerRow, log: (l: string) => void = () => undefined): Promise<LinkTest> {
+    const out = await this.ctx.onNode(s, async (n) => {
+      await this.ensureKit(s, n, log);   // link-test появился вместе с замером каналов
+      return n.must(['link-test'], { timeoutMs: 120_000 });
+    });
+    const res = parseLinkTest(out);
+    if (!res) throw new Error(`замер не удался: ${out.trim().slice(-200) || 'нет ответа от speed.cloudflare.com'}`);
+    setSetting(this.ctx.db, `link.${s.id}`, res);
+    return res;
+  }
+
+  /** Пользователи «Авто» конфигурации по группам «по нагрузке» (как в рендере входа). */
+  spreadMembers(t: TemplateRow, groups: number): number[] {
+    const ready = this.vpn.relayTargets(t);
+    const count = Array.from({ length: groups }, () => 0);
+    for (const u of this.vpn.users(true))
+      if (json<string[]>(u.modes, []).includes('via') && ready.some((x) => this.vpn.userAllows(u, x.id, t.id)) && !this.vpn.profileOff(u, `v:${t.id}:auto`))
+        count[spreadGroupOf(u.id, groups)]!++;
+    return count;
+  }
+
+  /** Назначить группе выход: балансировщик её первого уровня ведёт на уровень этого выхода в её цепочке (домашний — снять). */
+  private spreadAssign(n: NodeSession, t: string, g: number, chain: string[], to: string) {
+    const k = chain.indexOf(to);
+    return this.setOverride(n, t, k > 0 ? spreadLoop(t, g, k) : null, spreadBal(t, g, 0));
+  }
+
+  /**
+   * «Авто» по нагрузке (spread.ts), раз в минуту: доступность выходов (короткая проба), нагрузка групп (счётчики их
+   * outbound'ов на входе) и каналов выходов (счётчики интерфейсов серверов) → не больше одного перевода группы.
+   */
+  async spreadTick(t: TemplateRow, entry: ServerRow, targets: ServerRow[], log: (l: string) => void, opts: { force?: boolean } = {}) {
+    const sp = this.vpn.spec(t);
+    const db = this.ctx.db;
+    // раскладка групп — та, что выкачена на вход (запоминается при выкате); до первого выката переводить нечего
+    const layout = getSetting<{ ids: string[]; homes: string[] } | null>(db, `spread.layout.${t.id}`, null);
+    const ids = layout?.ids.filter((id) => targets.some((x) => x.id === id)) ?? [];
+    const homes = layout && ids.length === layout.ids.length ? layout.homes : [];
+    const assigned = getSetting<Record<string, string>>(db, `spread.cur.${t.id}`, {});   // группа → выход, куда переведена
+    const curOf = (g: number) => (assigned[g] && ids.includes(assigned[g]!) ? assigned[g]! : homes[g]!);
+    const nameOf = (id: string) => targets.find((x) => x.id === id)?.name ?? id;
+    const caps = spreadCaps(db, sp.exitCapMbps, targets.map((x) => x.id));   // своё значение, иначе замер на сервере
+    const cap = (id: string) => caps[id] ?? 0;
+    // каналы выходов: счётчики интерфейсов сервера, скорость — по разнице с прошлой проверкой (первая — без неё)
+    const linkLoad = new Map<string, number>();
+    for (const x of targets) {
+      if (x.fail_since) continue;
+      // справедливое деление канала: cake чуть ниже ёмкости — очередь у нас, а не у хостера; меняем только при смене
+      const fair = sp.spreadFair && cap(x.id) > 0 ? Math.round(cap(x.id) * 0.95) : 0;
+      const fairWas = getSetting<number>(db, `netfair.${x.id}`, 0);
+      if (fair !== fairWas) {
+        try {
+          const out = await this.ctx.onNode(x, async (n) => { await this.ensureKit(x, n, log); return n.must(fair ? ['net-fair', 'on', fair] : ['net-fair', 'off'], { timeoutMs: 60_000 }); });
+          setSetting(db, `netfair.${x.id}`, fair);
+          log(`${x.name}: ${fair ? `деление канала включено (cake ${fair} Мбит/с, BBR)` : 'деление канала выключено'} — ${out.trim()}`);
+        } catch (e) { log(`${x.name}: деление канала не ${fair ? 'включилось' : 'выключилось'}: ${(e as Error).message}`); }
+      }
+      if (!(cap(x.id) > 0)) continue;
+      try {
+        const r = await this.ctx.onNode(x, (n) => n.op(['host-stat'], { timeoutMs: 20_000 }));
+        const net = parseHostStat(`spread:${x.id}`, r.stdout).net;
+        if (net?.rxBps != null && net.txBps != null) linkLoad.set(x.id, (Math.max(net.rxBps, net.txBps) * 8) / 1e6);
+      } catch { /* нет связи — оценим по счётчикам входа */ }
+    }
+    const results: ExitHealth[] = [];
+    const groupMbps = homes.map(() => 0);
+    const viaEntry = new Map<string, number>();
+    let move: SpreadMove | null = null;
+    await this.ctx.onNode(entry, async (n) => {
+      await this.ensureKit(entry, n, log);   // xray-ostats появился вместе с режимом «по нагрузке»
+      for (const x of targets) {
+        const r = await n.op(['exit-probe', probePort(t.id, x.id), 0], { timeoutMs: 60_000 });
+        const rtt = Number(r.stdout.match(/^rtt_ms=(\d+)/m)?.[1] ?? NaN);
+        const err = r.code !== 0 ? (r.stderr || r.stdout).trim().slice(0, 200) : Number.isNaN(rtt) ? 'выход не отвечает' : null;
+        const exitIp = r.stdout.match(/^exit_ip=([0-9a-fA-F.:]+)$/m)?.[1] ?? null;
+        const exitLoc = r.stdout.match(/^exit_loc=([A-Z]{2})$/m)?.[1] ?? null;
+        results.push({ exitId: x.id, name: x.name, rttMs: Number.isNaN(rtt) ? null : rtt, mbps: null, ok: !err, error: err, exitIp, exitLoc });
+        db.prepare(`INSERT INTO exit_health (template_id, exit_id, rtt_ms, mbps, ok, error, exit_ip, exit_loc, checked_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, ok = excluded.ok, error = excluded.error,
+            exit_ip = COALESCE(excluded.exit_ip, exit_ip), exit_loc = COALESCE(excluded.exit_loc, exit_loc), checked_at = excluded.checked_at`)
+          .run(t.id, x.id, Number.isNaN(rtt) ? null : rtt, err ? 0 : 1, err, exitIp, exitLoc);
+      }
+      // нагрузка групп: счётчики их outbound'ов с прошлой проверки (счётчики обнуляются при чтении)
+      const prevAt = getSetting<string>(db, `spread.statsAt.${t.id}`, '');
+      const st = await n.op(['xray-ostats'], { timeoutMs: 20_000 });
+      const now = Date.now();
+      setSetting(db, `spread.statsAt.${t.id}`, new Date(now).toISOString());
+      const dt = prevAt ? (now - Date.parse(prevAt)) / 1000 : 0;
+      if (st.code === 0 && dt >= 10 && dt <= 1800)
+        for (const [tag, bytes] of parseSpreadStats(st.stdout)) {
+          const m = tag.startsWith(`sp-${t.id}-`) ? tag.slice(`sp-${t.id}-`.length).match(/^(\d+)-(.+)$/) : null;
+          if (!m || Number(m[1]) >= homes.length) continue;
+          const mbps = (bytes * 8) / dt / 1e6;
+          groupMbps[Number(m[1])]! += mbps;
+          viaEntry.set(m[2]!, (viaEntry.get(m[2]!) ?? 0) + mbps);
+        }
+      const exits: SpreadExit[] = targets.map((x) => ({
+        id: x.id, cap: cap(x.id), alive: !!results.find((r) => r.exitId === x.id)?.ok,
+        // канал целиком (все конфигурации и прямые пользователи); нет счётчиков сервера — хотя бы эта конфигурация
+        load: linkLoad.get(x.id) ?? viaEntry.get(x.id) ?? 0,
+      }));
+      const groups: SpreadGroup[] = homes.map((home, g) => ({ g, home, cur: curOf(g), mbps: groupMbps[g]! }));
+      const movedAt = getSetting<string>(db, `spread.movedAt.${t.id}`, '');
+      const cooldownOk = !!opts.force || !movedAt || now - Date.parse(movedAt) >= SPREAD_COOLDOWN_MIN * 60_000;
+      move = homes.length ? planSpread(exits, groups, sp.spreadHighPct / 100, cooldownOk) : null;
+      if (move) {
+        const ok = await this.spreadAssign(n, t.id, move.g, spreadChain(homes[move.g]!, ids), move.to);
+        if (ok) {
+          if (move.to === homes[move.g]) delete assigned[move.g]; else assigned[move.g] = move.to;
+          groups[move.g]!.cur = move.to;
+          setSetting(db, `spread.cur.${t.id}`, assigned);
+          setSetting(db, `spread.movedAt.${t.id}`, new Date(now).toISOString());
+        } else {
+          log(`${entry.name}: группа ${move.g + 1} не принята входом — повторю при следующей проверке`);
+          move = null;
+        }
+      } else {
+        // переведённые группы: вход мог перезапуститься и забыть назначение — сверяем и возвращаем
+        for (const gr of groups) {
+          if (gr.cur === gr.home) continue;
+          const want = spreadLoop(t.id, gr.g, spreadChain(gr.home, ids).indexOf(gr.cur));
+          const bi = await this.balancerState(n, t.id, spreadBal(t.id, gr.g, 0));
+          if (bi && bi.override !== want) await this.spreadAssign(n, t.id, gr.g, spreadChain(gr.home, ids), gr.cur);
+        }
+      }
+      const users = this.spreadMembers(t, homes.length);
+      setSetting(db, `spread.state.${t.id}`, {
+        at: new Date(now).toISOString(), high: sp.spreadHighPct,
+        exits: exits.map((e) => ({ id: e.id, cap: e.cap, capFrom: (sp.exitCapMbps[e.id] ?? 0) > 0 ? 'manual' : e.cap > 0 ? 'test' : null, load: Math.round(e.load * 10) / 10, measured: linkLoad.has(e.id) })),
+        groups: groups.map((gr) => ({ g: gr.g, home: gr.home, cur: gr.cur, mbps: Math.round(gr.mbps * 10) / 10, users: users[gr.g] ?? 0 })),
+      });
+      for (const e of exits) log(`${nameOf(e.id)}: ${e.alive ? 'отвечает' : 'не отвечает'}, канал ${Math.round(e.load)}${e.cap ? ` из ${e.cap} Мбит/с (${Math.round((e.load / e.cap) * 100)}%)` : ' Мбит/с'}, групп: ${groups.filter((gr) => gr.cur === e.id).length}`);
+    });
+    setSetting(db, `auto.checked.${t.id}`, new Date().toISOString());
+    const mv = move as SpreadMove | null;
+    if (mv) log(`группа ${mv.g + 1} переведена с ${nameOf(mv.from)} на ${nameOf(mv.to)}`);
+    return {
+      results,
+      switched: mv ? { from: nameOf(mv.from), to: nameOf(mv.to), spread: { group: mv.g + 1, reason: mv.reason } } : null,
+    };
   }
 
   /**

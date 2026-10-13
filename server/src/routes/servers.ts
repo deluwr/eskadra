@@ -22,6 +22,7 @@ import { localRaw, parseHostStat } from '../hoststats.js';
 import { botProxyOptions } from '../botproxy.js';
 import { scanSni } from '../sni.js';
 import { pruneServerRefs } from '../prune.js';
+import { linkTestOf } from '../spread.js';
 import { mgmtVia, viaLabel, viaOutbound } from '../via.js';
 
 const sshUtils = ssh2.utils;
@@ -297,6 +298,17 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       return res.stdout;
     });
     return parseHostStat(r.id, raw);
+  });
+
+  // Замеры каналов серверов (на самих серверах): по ним «Авто по нагрузке» знает ёмкость выходов без своих значений
+  app.get('/api/v1/links', async () => Object.fromEntries(ctx.servers().map((s) => [s.id, linkTestOf(ctx.db, s.id)]).filter(([, l]) => l)));
+
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/link-test', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
+    const r = ctx.server(req.params.id);
+    requireKit(r);
+    const res = await new Ops(ctx).measureLink(r).catch((e: Error) => { throw new HttpError(502, `${r.name}: ${e.message}`); });
+    audit(ctx.db, req.admin!.username, 'server.link_test', r.id, res);
+    return res;
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/restart', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {

@@ -4,6 +4,7 @@ import { getSetting } from './db.js';
 import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
 import { blockedDevices, limitRules } from './devices.js';
 import { blocksOf, needsSniff, singboxBlockRules, xrayBlockRules } from './blocks.js';
+import { spreadBal, spreadCaps, spreadChain, spreadGroupOf, spreadHomes, spreadLoop, spreadLoopIn, spreadOut } from './spread.js';
 import { certName, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
@@ -163,6 +164,7 @@ export class Vpn {
     const observed: string[] = [];   // префиксы outbound'ов выходов, за которыми следит Xray (умный «Авто»)
     let observeRtt = 0;
     let fastObserve = false;   // есть «по порядку» — вход проверяет выходы часто (≈ 8 с на переключение)
+    let spreadStats = false;   // есть «по нагрузке» — счётчики outbound'ов групп (только тогда: прочим конфигам они не нужны)
 
     for (const ib of ibs) {
       const t = this.template(ib.template_id)!;
@@ -193,14 +195,44 @@ export class Vpn {
         }
         if (ready.length) {
           const autoEmails: string[] = [];
+          const autoUsers: string[] = [];
           for (const u of users)
             // «авто» — только если конфигурация пользователю выдана (есть хоть один доступный выход) и вариант не выключен
             if (json<string[]>(u.modes, []).includes('via') && ready.some((x) => this.userAllows(u, x.id, t.id)) && !this.profileOff(u, `v:${t.id}:auto`)) {
               const email = `${u.id}.a-${t.id}`;
               clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:auto`), email));
               autoEmails.push(email);
+              autoUsers.push(u.id);
             }
-          if (sp.autoMode !== 'random') {
+          if (sp.autoMode === 'spread') {
+            // по нагрузке (spread.ts): у каждой группы пользователей своя цепочка уровней — домашний выход, затем остальные;
+            // свои outbound'ы к выходам — по их счётчикам панель видит нагрузку группы и переводит группы между выходами
+            observed.push(`sp-${t.id}-`);
+            fastObserve = true;
+            spreadStats = true;
+            const ids = ready.map((x) => x.id);
+            const homes = spreadHomes(ids, spreadCaps(this.db, sp.exitCapMbps, ids), sp.spreadGroups);
+            homes.forEach((home, g) => {
+              for (const x of ready) {
+                const xi = this.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct'`, t.id, x.id)[0]!;
+                outbounds.push(xrayOutbound(sp, xi, spreadOut(t.id, g, x.id), x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id));
+              }
+              const chain = spreadChain(home, ids);
+              chain.forEach((x, i) => {
+                balancers.push({
+                  tag: spreadBal(t.id, g, i), selector: [spreadOut(t.id, g, x)],
+                  fallbackTag: i === chain.length - 1 ? spreadOut(t.id, g, chain[0]!) : spreadLoop(t.id, g, i + 1),
+                  strategy: { type: 'leastLoad', settings: { expected: 1, tolerance: 0.5 } },
+                });
+                if (i) {
+                  outbounds.push({ tag: spreadLoop(t.id, g, i), protocol: 'loopback', settings: { inboundTag: spreadLoopIn(t.id, g, i) } });
+                  rules.push({ type: 'field', inboundTag: [spreadLoopIn(t.id, g, i)], balancerTag: spreadBal(t.id, g, i) });
+                }
+              });
+              const emails = autoEmails.filter((_, k) => spreadGroupOf(autoUsers[k]!, homes.length) === g);
+              if (emails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: emails, balancerTag: spreadBal(t.id, g, 0) });
+            });
+          } else if (sp.autoMode !== 'random') {
             // по качеству и по порядку (fallback — первый в порядке): Xray выбирает выход с наименьшей задержкой и не берёт выходы с задержкой выше порога;
             // если все выше порога — первый выход (fallback). Скорость меряет панель и переключает через API (ops.checkExits)
             observed.push(`to-${t.id}-`);
@@ -231,7 +263,7 @@ export class Vpn {
           } else {
             balancers.push({ tag: `bal-${t.id}`, selector: [`to-${t.id}-`], strategy: { type: 'random' } });
           }
-          if (autoEmails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: autoEmails, balancerTag: `bal-${t.id}` });
+          if (autoEmails.length && sp.autoMode !== 'spread') rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: autoEmails, balancerTag: `bal-${t.id}` });
         }
         // всё прочее с входа, не попавшее в правила, не выпускаем наружу с самого входа
         rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], outboundTag: 'block' });
@@ -257,7 +289,7 @@ export class Vpn {
       } : {}),
       stats: {},
       // statsUserOnline — IP с открытыми соединениями по каждому пользователю: по ним считается лимит устройств (devices.ts)
-      policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true, statsUserOnline: true } }, system: { statsInboundUplink: false } },
+      policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true, statsUserOnline: true } }, system: { statsInboundUplink: false, ...(spreadStats ? { statsOutboundUplink: true, statsOutboundDownlink: true } : {}) } },
       inbounds,
       outbounds,
       routing: { domainStrategy: 'IPOnDemand', rules: [...head, ...tagRules([...(opts.limits === false ? [] : limitRules(blockedDevices(this.ctx))), ...rules], 'r0')], balancers },
