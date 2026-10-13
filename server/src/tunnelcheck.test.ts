@@ -38,6 +38,22 @@ test('туннель: объяснение причины — служба, по
   assert.equal(parseTunnelDiag(out('', '', ''), 34611).listening, false);
 });
 
+test('туннель: сайт маскировки с узла не открывается — рукопожатие REALITY не пройдёт', async () => {
+  const { parseDest, snippetFailure } = await import('./tunnelcheck.js');
+  const base = out('-P INPUT ACCEPT');
+  assert.equal(parseTunnelDiag(`${base}@dest\n200\n`, 34611).destOk, true);
+  const bad = parseTunnelDiag(`${base}@dest\ncurl: (28) Connection timed out after 8001 milliseconds\n@log started\n`, 34611);
+  assert.deepEqual([bad.destOk, bad.log], [false, ['started']]);
+  assert.equal(parseTunnelDiag(`${base}@dest\n000\n`, 34611).destOk, false);
+  assert.equal(parseTunnelDiag(base, 34611).destOk, true, 'старый вывод без секции — не ошибка');
+  const m = parseDest('www.apple.com=curl: (6) Could not resolve host\ndl.google.com=ok\n');
+  assert.equal(m.get('dl.google.com'), 'ok');
+  assert.match(m.get('www.apple.com')!, /resolve/);
+  // из вывода сниппета — настоящая причина, а не общий «Failed with result»
+  const fail = 'x\nOct 13 xray[1]: Failed to start: main: failed to listen TCP on 2087 > listen tcp [::]:2087: bind: address already in use\nOct 13 systemd[1]: fleet-mgmt.service: Failed with result \'exit-code\'.\nслужба туннеля fleet-mgmt не запустилась';
+  assert.match(snippetFailure(fail), /address already in use.*не запустилась/);
+});
+
 test('подбор порта: засчитывается только ответ маячка узла — «молчащий» приём (как у прокси без узла за ним) нет', async () => {
   const { beaconAnswers, beaconScript, TUNNEL_PORT_CANDIDATES } = await import('./tunnelcheck.js');
   const net = await import('node:net');

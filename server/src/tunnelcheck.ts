@@ -23,16 +23,27 @@ export function tlsReachable(host: string, port: number, servername: string, tim
   });
 }
 
-/** Состояние порта на узле: слушает ли служба, что в firewall системы. Вывод разбирает parseTunnelDiag. */
-export const diagScript = (port: number) => `P=${port}
+/**
+ * Состояние порта на узле: слушает ли служба, что в firewall системы, открывается ли с узла сайт маскировки
+ * (REALITY чужому клиенту отвечает им: не открывается — рукопожатие не проходит, хотя порт открыт). Вывод разбирает parseTunnelDiag.
+ */
+export const diagScript = (port: number, sni: string) => `P=${port}
 echo "@active"; systemctl is-active fleet-mgmt 2>/dev/null || true
 echo "@listen"; ss -Hltn "sport = :$P" 2>/dev/null | head -3
 echo "@ipt"; iptables -S INPUT 2>/dev/null | head -60
 echo "@nft"; nft -a list ruleset 2>/dev/null | grep -E '^table |hook input|dport|policy' | head -80
+echo "@dest"; curl -sS -o /dev/null --max-time 8 -w '%{http_code}\\n' 'https://${sni}/' 2>&1 | tail -1
 journalctl -u fleet-mgmt -n 5 --no-pager -o cat 2>/dev/null | sed 's/^/@log /'
 `;
 
-export interface TunnelDiag { active: boolean; listening: boolean; iptablesBlocks: boolean; nftChains: string[]; log: string[] }
+export interface TunnelDiag { active: boolean; listening: boolean; iptablesBlocks: boolean; nftChains: string[]; destOk: boolean; destErr: string; log: string[] }
+
+/** Какие сайты маскировки открываются с узла: строки «sni=ok» / «sni=<ошибка curl>». */
+export const destScript = (snis: string[]) => snis.map((s) =>
+  `c="$(curl -sS -o /dev/null --max-time 8 -w '%{http_code}' 'https://${s}/' 2>&1 | tail -1)"; case "$c" in [1-5][0-9][0-9]) echo "${s}=ok" ;; *) echo "${s}=$c" ;; esac`).join('\n') + '\n';
+
+export const parseDest = (out: string): Map<string, string> =>
+  new Map(out.split('\n').map((l) => l.match(/^([a-z0-9.-]+)=(.*)$/i)).filter((m): m is RegExpMatchArray => !!m).map((m) => [m[1]!, m[2]!.trim()]));
 
 /** Разбор вывода diagScript: блокирует ли iptables/nftables входящие на порт по умолчанию. */
 export function parseTunnelDiag(out: string, port: number): TunnelDiag {
@@ -46,6 +57,7 @@ export function parseTunnelDiag(out: string, port: number): TunnelDiag {
   const iptDefaultDeny = ipt.some((l) => /^-P INPUT (DROP|REJECT)/.test(l)) || ipt.some((l) => /^-A INPUT( -j| .*-j) (DROP|REJECT)/.test(l) && !/--dport|-s |-i lo/.test(l));
   const iptablesBlocks = iptDefaultDeny && !ipt.some(portOk);
   // цепочки nftables с hook input и policy drop (кроме таблицы панели inet fleet — на шаге 1 её ещё нет)
+  const dest = (sec('dest')[0] ?? '').trim();
   const nftChains: string[] = [];
   let table = '';
   for (const l of sec('nft')) {
@@ -59,6 +71,9 @@ export function parseTunnelDiag(out: string, port: number): TunnelDiag {
     listening: sec('listen').length > 0,
     iptablesBlocks,
     nftChains,
+    // нет секции (старый вывод) — не считаем сайт недоступным
+    destOk: !out.includes('@dest') || /^[1-5]\d\d$/.test(dest),
+    destErr: dest,
     log: out.split('\n').filter((l) => l.startsWith('@log ')).map((l) => l.slice(5)),
   };
 }
@@ -118,6 +133,8 @@ print("bound=" + ",".join(str(p) for p in socks.values()), flush=True)
 if os.fork():
     os._exit(0)
 os.setsid()
+with open("/run/fleet-beacon.pid", "w") as f:
+    f.write(str(os.getpid()))
 null = os.open(os.devnull, os.O_RDWR)
 for fd in (0, 1, 2):
     os.dup2(null, fd)
@@ -133,6 +150,26 @@ while time.time() < end:
             pass
 PY
 `;
+
+/** Погасить маячки и дождаться, пока их порты освободятся: иначе Xray туннеля на выбранном порту не встанет. */
+export const beaconStopScript = (ports: number[], bound: number[]) => `pid="$(cat /run/fleet-beacon.pid 2>/dev/null || true)"
+[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+pkill -f '^python3 - ${ports.join(' ')}$' 2>/dev/null || true
+rm -f /run/fleet-beacon.pid
+for i in $(seq 1 25); do
+  ss -Hltn 2>/dev/null | grep -Eq ':(${bound.join('|') || '0'})\\s' || exit 0
+  [ "$i" = 10 ] && { [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null; pkill -9 -f '^python3 - ${ports.join(' ')}$' 2>/dev/null; } || true
+  sleep 0.2
+done
+echo "порты маячков не освободились" >&2
+`;
+
+/** Из вывода сниппета — строки, по которым видно, почему не встала служба (ошибка Xray, а не общий «Failed»). */
+export function snippetFailure(out: string): string {
+  const lines = out.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  const why = lines.filter((l) => /address already in use|bind:|listen tcp|permission denied|failed to|\[Error\]|Failed to start|конфиг туннеля/i.test(l) && !/Failed with result/.test(l));
+  return [...new Set([...why.slice(-2), ...lines.slice(-1)])].join(' ');
+}
 
 /** Ответил ли маячок на порту: читаем «fleet-probe <порт>» (через прокси TCP «соединяется» всегда, доказывает только ответ узла). */
 export function beaconAnswers(host: string, port: number, expectPort: number, timeoutMs = 8000): Promise<boolean> {

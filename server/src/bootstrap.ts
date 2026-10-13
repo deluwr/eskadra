@@ -151,7 +151,8 @@ if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; t
   firewall-cmd -q --permanent --add-port="$MGMT_PORT/tcp" && firewall-cmd -q --reload
 fi
 
-sleep 1
+# Restart=always: если порт на миг был занят, служба поднимется со второй попытки (RestartSec=3)
+for i in $(seq 1 10); do sleep 1; systemctl is-active --quiet fleet-mgmt && break; done
 systemctl is-active --quiet fleet-mgmt || { journalctl -u fleet-mgmt -n 20 --no-pager; echo "служба туннеля fleet-mgmt не запустилась" >&2; exit 1; }
 echo "Туннель управления слушает порт $MGMT_PORT/tcp. Если у хостера есть свой firewall — откройте в нём этот порт."
 `;

@@ -7,13 +7,13 @@ import ssh2, { type Client as SshClient } from 'ssh2';
 import { HttpError, type Ctx, type ServerRow, expectedPanelIps } from './ctx.js';
 import { audit } from './lib/audit.js';
 import { bootstrapSnippet } from './bootstrap.js';
-import { credsOf, xrayPin } from './mgmt.js';
+import { credsOf, MGMT_SNIS, xrayPin } from './mgmt.js';
 import { fetchHostKey, fingerprintOf, HostKeyError, mask, withNodeLock, withSession } from './ssh/executor.js';
 import { parseSections, summarize } from './preflight.js';
 import { buildInstallScript, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from './nodekit.js';
 import { Ops, startJob, type JobHandle } from './ops.js';
 import { viaOutbound, type BootstrapVia } from './via.js';
-import { beaconAnswers, beaconScript, diagScript, explainTunnel, openScript, parseTunnelDiag, tlsReachable, TUNNEL_PORT_CANDIDATES } from './tunnelcheck.js';
+import { beaconAnswers, beaconScript, beaconStopScript, destScript, diagScript, explainTunnel, openScript, parseDest, parseTunnelDiag, snippetFailure, tlsReachable, TUNNEL_PORT_CANDIDATES } from './tunnelcheck.js';
 
 const { Client } = ssh2;
 
@@ -140,9 +140,21 @@ async function checkTunnelPort(ctx: Ctx, r: ServerRow, auth: BootstrapAuth, root
   const probe = (port: number) => through(port, (h, p) => tlsReachable(h, p, creds.sni), false).catch(() => false);
   const via = viaChain ? ` через прокси ${viaChain.label}` : '';
   if (await probe(creds.port)) { log(`порт туннеля ${creds.port}/tcp отвечает${via}`); return null; }
-  let d = parseTunnelDiag((await root(diagScript(creds.port))).out, creds.port);
-  log(`порт туннеля ${creds.port}/tcp не отвечает: служба ${d.active ? 'работает' : 'не работает'}, порт ${d.listening ? 'слушается' : 'не слушается'}${d.iptablesBlocks ? ', iptables режет входящие' : ''}${d.nftChains.length ? `, nftables режет входящие (${d.nftChains.join('; ')})` : ''}`);
+  let d = parseTunnelDiag((await root(diagScript(creds.port, creds.sni))).out, creds.port);
+  log(`порт туннеля ${creds.port}/tcp не отвечает: служба ${d.active ? 'работает' : 'не работает'}, порт ${d.listening ? 'слушается' : 'не слушается'}${d.iptablesBlocks ? ', iptables режет входящие' : ''}${d.nftChains.length ? `, nftables режет входящие (${d.nftChains.join('; ')})` : ''}${d.destOk ? '' : `, сайт маскировки ${creds.sni} с сервера не открывается (${d.destErr || 'нет ответа'})`}`);
   if (!d.active || !d.listening) return explainTunnel(d, r.host, creds.port, viaChain?.label ?? null);
+  // REALITY отвечает чужому клиенту сайтом маскировки: сервер его не достаёт — рукопожатие не пройдёт ни на каком порту
+  if (!d.destOk) {
+    const reach = parseDest((await root(destScript(MGMT_SNIS))).out);
+    const sni = MGMT_SNIS.find((s) => s !== creds.sni && reach.get(s) === 'ok');
+    if (!sni) return `сервер ${r.host} не открывает сайты маскировки (${MGMT_SNIS.map((s) => `${s}: ${reach.get(s) || 'нет ответа'}`).join('; ')}): проверьте на нём выход в интернет и DNS (curl -I https://www.apple.com) и нажмите «Повторить»`;
+    log(`сайт маскировки ${sni} с сервера открывается — переключаю туннель на него`);
+    ctx.updateServer(r.id, { mgmt_sni: sni });
+    const re = await root(await snippetOf(ctx, ctx.server(r.id)));
+    if (re.code !== 0) return `переключить сайт маскировки не удалось: ${snippetFailure(re.out)}`;
+    if (await probe(creds.port)) { log(`порт туннеля ${creds.port}/tcp отвечает${via}`); return null; }
+    log(`с сайтом ${sni} рукопожатие тоже не проходит — проверяю порт`);
+  }
   if (d.iptablesBlocks || d.nftChains.length) {
     const o = await root(openScript(creds.port, d));
     log(o.code === 0 ? `открыл ${creds.port}/tcp в firewall системы` : `открыть порт в firewall системы не удалось: ${o.out.trim().slice(-200)}`);
@@ -150,23 +162,33 @@ async function checkTunnelPort(ctx: Ctx, r: ServerRow, auth: BootstrapAuth, root
     if (await probe(creds.port)) { log(`порт туннеля ${creds.port}/tcp теперь отвечает`); return null; }
     d = { ...d, iptablesBlocks: false, nftChains: [] };
   }
-  // в системе порт открыт, а снаружи — нет: firewall хостера. Ищем порт, который он пропускает, и переносим туннель туда
-  const ports = TUNNEL_PORT_CANDIDATES.filter((p) => p !== r.ssh_port && p !== creds.port);
-  const b = await root(beaconScript(ports));
+  // в системе порт открыт, а снаружи рукопожатия нет. Сначала — доходит ли вообще TCP до самого порта туннеля:
+  // служба на время уступает его маячку. Доходит — firewall хостера ни при чём, порт переносить бесполезно.
+  // Нет — ищем порт, который хостер пропускает, и переносим туннель туда
+  const ports = [creds.port, ...TUNNEL_PORT_CANDIDATES.filter((p) => p !== r.ssh_port && p !== creds.port)];
+  const b = await root(`systemctl stop fleet-mgmt\n${beaconScript(ports)}`);
   const bound = (b.out.match(/^bound=([\d,]*)$/m)?.[1] ?? '').split(',').filter(Boolean).map(Number);
-  if (!bound.length) return `${explainTunnel(d, r.host, creds.port, viaChain?.label ?? null)}. Подобрать другой порт не удалось: популярные порты на сервере заняты`;
-  log(`порт ${creds.port} закрыт снаружи — ищу порт, который пропускает firewall хостера: ${bound.join(', ')}`);
+  const answers = (port: number) => through(port, (h, p) => beaconAnswers(h, p, port), false).catch(() => false);
+  const own = bound.includes(creds.port) && await answers(creds.port);
   let picked: number | null = null;
-  for (const port of bound) {
-    if (await through(port, (h, p) => beaconAnswers(h, p, port), false).catch(() => false)) { picked = port; break; }
+  if (!own) {
+    const others = bound.filter((p) => p !== creds.port);
+    if (others.length) log(`порт ${creds.port} закрыт снаружи — ищу порт, который пропускает firewall хостера: ${others.join(', ')}`);
+    for (const port of others) if (await answers(port)) { picked = port; break; }
   }
-  // маячки — освободить порты (сами завершатся через 90 с)
-  await root(`pkill -f '^python3 - ${ports.join(' ')}$' || true`);
+  // маячки — освободить порты до запуска туннеля (сами завершились бы только через 90 с)
+  const stop = await root(beaconStopScript(ports, bound));
+  if (stop.code !== 0) log(`предупреждение: ${stop.out.trim()}`);
+  if (!picked) {
+    const back = await root('systemctl start fleet-mgmt; sleep 2; systemctl is-active fleet-mgmt; journalctl -u fleet-mgmt -n 5 --no-pager -o cat');
+    if (own) return `порт туннеля ${creds.port}/tcp снаружи${via} открыт (TCP доходит), но Xray туннеля не отвечает на TLS-рукопожатие — firewall хостера ни при чём. Журнал службы: ${back.out.trim().split('\n').slice(-4).join(' | ')}`;
+    if (!bound.length) return `${explainTunnel(d, r.host, creds.port, viaChain?.label ?? null)}. Подобрать другой порт не удалось: популярные порты на сервере заняты`;
+  }
   if (!picked) return `${explainTunnel(d, r.host, creds.port, viaChain?.label ?? null)}. Проверил и другие порты (${bound.join(', ')}) — снаружи${via} не доходит ни один: похоже, хостер пропускает только SSH`;
   log(`порт ${picked}/tcp пропускается — переношу туннель управления с ${creds.port} на ${picked}`);
   ctx.updateServer(r.id, { mgmt_port: picked });
   const re = await root(await snippetOf(ctx, ctx.server(r.id)));
-  if (re.code !== 0) return `перенести туннель на порт ${picked} не удалось: ${re.out.trim().split('\n').slice(-2).join(' ')}`;
+  if (re.code !== 0) return `перенести туннель на порт ${picked} не удалось: ${snippetFailure(re.out)}`;
   if (await probe(picked)) { log(`туннель управления отвечает на порту ${picked}/tcp${via}`); return null; }
   return `туннель перенесён на порт ${picked}, но рукопожатие не проходит — нажмите «Повторить»; если не поможет, откройте ${picked}/tcp у хостера`;
 }
