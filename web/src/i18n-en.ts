@@ -1237,4 +1237,8 @@ export const EN: Record<string, string> = {
   "ёмкость не задана": "capacity not set",
   "ёмкость по замеру": "capacity measured",
   "ёмкость своя": "capacity set manually",
+  "Новая конфигурация получает случайный свободный порт; «Случайный» — подобрать другой. Откроется на серверах сам после проверки: не SSH, не занят, в диапазоне группы.": "A new configuration gets a random free port; “Random” picks another one. It opens on the servers by itself after the check: not SSH, not taken, within the group's range.",
+  "Случайный": "Random",
+  "Случайный свободный порт на серверах конфигурации": "Random free port on the configuration's servers",
+  "Случайный свободный порт на сервере-входе": "Random free port on the entry server",
 };

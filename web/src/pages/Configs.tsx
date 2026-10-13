@@ -217,6 +217,25 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
   // замеры каналов серверов (на самих серверах) — ёмкость выходов «по нагрузке», если своё значение не задано
   const { data: links, reload: reloadLinks } = usePoll(() => api.get<Record<string, LinkTest>>('/api/v1/links'), null);
   const [measuring, setMeasuring] = useState<string | null>(null);
+  // случайные свободные порты: проверяются на серверах конфигурации (не выбраны — на всех) так же, как при выкате
+  const randomPorts = async (which: 'port' | 'entry' | 'both', base: Draft = d) => {
+    const ids = [...base.nodeIds, ...(base.entryId ? [base.entryId] : [])];
+    const q = new URLSearchParams({ proto: PROTO[base.protocol].udp ? 'udp' : 'tcp', count: which === 'both' ? '2' : '1', servers: ids.join(','),
+      avoid: which === 'port' ? base.entryPort : which === 'entry' ? base.port : '' });
+    try {
+      const { ports } = await api.get<{ ports: number[] }>(`/api/v1/free-ports?${q}`);
+      return which === 'both' ? { ...base, port: String(ports[0]), entryPort: String(ports[1]) }
+        : which === 'port' ? { ...base, port: String(ports[0]) } : { ...base, entryPort: String(ports[0]) };
+    } catch (e) { toast((e as Error).message, 'fail'); return base; }
+  };
+  // новая конфигурация — сразу со случайными свободными портами (и после смены протокола)
+  useEffect(() => {
+    if (draft.id) return;
+    let live = true;
+    void randomPorts('both', d).then((next) => { if (live) setD((cur) => (cur.protocol === next.protocol && !cur.id ? { ...cur, port: next.port, entryPort: next.entryPort } : cur)); });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.id, d.protocol]);
   const measure = async (ids: string[]) => {
     const names = ids.map((id) => servers.find((s) => s.id === id)?.name ?? id).join(', ');
     if (!(await ask(`Замерить канал: ${names}? На каждом сервере ~25 секунд канал будет занят целиком (пользователям этого сервера медленнее), трафик — до ${ids.length > 1 ? 'пары ГБ на сервер' : 'пары ГБ'} на гигабитном канале.`))) return;
@@ -307,8 +326,11 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
           </select>
         </label>
         <label className="fld"><span>Имя <Info>Строчная латиница, цифры и дефис — заглавные, пробелы и кириллица исправляются сами. Имя можно поменять в любой момент.</Info></span><input className="inp mono" value={d.name} onChange={(e) => setD({ ...d, name: slugName(e.target.value) })} placeholder={`${d.protocol}-${st.security === 'none' ? 'plain' : st.security}`} /></label>
-        <label className="fld"><span>Порт ({info.udp ? 'UDP' : 'TCP'}) <Info>Откроется на серверах сам после проверки: не SSH, не занят, в диапазоне группы.{d.protocol === 'mtproto' ? ' Для MTProto лучше 443 — так соединение больше похоже на обычный HTTPS.' : ''}</Info></span>
-          <input className="inp mono" value={d.port} onChange={(e) => setD({ ...d, port: e.target.value })} inputMode="numeric" />
+        <label className="fld"><span>Порт ({info.udp ? 'UDP' : 'TCP'}) <Info>Новая конфигурация получает случайный свободный порт; «Случайный» — подобрать другой. Откроется на серверах сам после проверки: не SSH, не занят, в диапазоне группы.{d.protocol === 'mtproto' ? ' Для MTProto лучше 443 — так соединение больше похоже на обычный HTTPS.' : ''}</Info></span>
+          <span className="flex" style={{ gap: 6 }}>
+            <input className="inp mono" style={{ flex: 1 }} value={d.port} onChange={(e) => setD({ ...d, port: e.target.value })} inputMode="numeric" aria-label="Порт" />
+            <button type="button" className="btn sm" title="Случайный свободный порт на серверах конфигурации" onClick={async () => setD(await randomPorts('port'))}>Случайный</button>
+          </span>
         </label>
       </div>
 
@@ -385,7 +407,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
                 ) : <span className="small">напрямую <Info>{info.name} не пересылается через вход.</Info></span>}
                 {d.entryId && (
                   <>
-                    <label className="flex small" style={{ gap: 8 }}>порт<input className="inp mono" style={{ width: 90, minHeight: 34 }} inputMode="numeric" value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} aria-label="Порт входа" />{relayState && <Tag kind={relayState.state === 'active' ? 'ok' : relayState.state === 'error' ? 'fail' : 'warn'}>{STATE_LABEL[relayState.state] ?? relayState.state}</Tag>}</label>
+                    <label className="flex small" style={{ gap: 8 }}>порт<input className="inp mono" style={{ width: 90, minHeight: 34 }} inputMode="numeric" value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} aria-label="Порт входа" /><button type="button" className="btn ghost sm" title="Случайный свободный порт на сервере-входе" onClick={async () => setD(await randomPorts('entry'))}>Случайный</button>{relayState && <Tag kind={relayState.state === 'active' ? 'ok' : relayState.state === 'error' ? 'fail' : 'warn'}>{STATE_LABEL[relayState.state] ?? relayState.state}</Tag>}</label>
                     <label className="cb small" style={{ minHeight: 28 }}><input type="checkbox" checked={d.nodeIds.includes(d.entryId)} onChange={() => toggleNode(d.entryId)} />и сам принимает напрямую</label>
                   </>
                 )}

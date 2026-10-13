@@ -190,3 +190,22 @@ test('рендер «по нагрузке»: без своих значений
   const homes = Array.from({ length: 6 }, (_, g) => x.routing.balancers.find((b: any) => b.tag === `sg-t-${g}-0`).selector[0].split('-').pop());
   assert.deepEqual(['es', 'fi', 'lv'].map((e) => homes.filter((h: string) => h === e).length), [1, 2, 3]);
 });
+
+test('новая конфигурация: случайные свободные порты — не SSH, не порты других конфигураций, в диапазоне группы', async () => {
+  const { ctx, db } = fixture();
+  db.prepare(`UPDATE servers SET ssh_ports = '[22]', group_name = 'g'`).run();
+  db.prepare(`INSERT OR REPLACE INTO groups (name, port_range) VALUES ('g', '30000-30009')`).run();
+  db.prepare(`UPDATE templates SET port = 30001, entry_port = 30002 WHERE id = 't'`).run();
+  const { default: Fastify } = await import('fastify');
+  const app = Fastify();
+  const { templateRoutes } = await import('./routes/templates.js');
+  await templateRoutes(app, ctx);
+  const r = await app.inject({ method: 'GET', url: '/api/v1/free-ports?proto=tcp&count=2&servers=es,relay&avoid=30003' });
+  const { ports } = r.json() as { ports: number[] };
+  assert.equal(ports.length, 2);
+  assert.notEqual(ports[0], ports[1]);
+  for (const p of ports) assert.ok(p >= 30000 && p <= 30009 && ![30001, 30002, 30003].includes(p), `порт ${p}`);
+  // в диапазоне не осталось места — понятная ошибка
+  db.prepare(`UPDATE groups SET port_range = '30001' WHERE name = 'g'`).run();
+  assert.equal((await app.inject({ method: 'GET', url: '/api/v1/free-ports?servers=es' })).statusCode, 409);
+});

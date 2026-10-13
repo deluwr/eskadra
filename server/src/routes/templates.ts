@@ -117,6 +117,51 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
 
   app.get('/api/v1/templates', async () => vpn.templates().map((t) => templateView(vpn, t)));
 
+  /**
+   * Случайные свободные порты для новой конфигурации: на каждом из серверов проходят ту же проверку, что при выкате
+   * (не SSH, не резерв, не занят шаблоном или процессом по последнему preflight, в диапазоне группы), и не совпадают
+   * с портами других конфигураций — чтобы их можно было добавить на любой сервер позже. Нет серверов — все подключённые.
+   */
+  app.get<{ Querystring: { proto?: string; servers?: string; count?: string; avoid?: string } }>('/api/v1/free-ports', async (req) => {
+    const proto = req.query.proto === 'udp' ? 'udp' : 'tcp';
+    const count = Math.min(4, Math.max(1, Number(req.query.count) || 1));
+    const ids = (req.query.servers ?? '').split(',').filter(Boolean);
+    const all = ctx.servers().filter((s) => s.sudo_mode === 'restricted');
+    const servers = ids.length ? all.filter((s) => ids.includes(s.id)) : all;
+    const taken = new Set<number>([
+      ...vpn.templates().flatMap((t) => [t.port, t.entry_port ?? 0]),
+      ...(req.query.avoid ?? '').split(',').map(Number).filter(Boolean),
+      10085, 51820, 54321, 2053, 2096, 8443,
+    ]);
+    // кандидаты — из разрешённого диапазона группы первого сервера (остальные проверит lintPort); без группы — 1024–65535
+    const g = servers[0] && (db.prepare('SELECT port_range FROM groups WHERE name = ?').get(servers[0].group_name) as { port_range: string } | undefined);
+    const spans = (g?.port_range ?? '1024-65535').split(',').map((x) => x.trim().split('-').map(Number))
+      .map(([a, b]) => [a!, b ?? a!] as [number, number]).filter(([a, b]) => a >= 1 && b <= 65535 && a <= b);
+    // предпочтительно — высокие порты (реже заняты и реже сканируются), если диапазон их включает
+    const high = spans.map(([a, b]) => [Math.max(a, 20000), Math.min(b, 60000)] as [number, number]).filter(([a, b]) => a <= b);
+    const pick = (list: Array<[number, number]>) => {
+      const total = list.reduce((n, [a, b]) => n + b - a + 1, 0);
+      let k = Math.floor(Math.random() * total);
+      for (const [a, b] of list) { if (k <= b - a) return a + k; k -= b - a + 1; }
+      return list[0]![0];
+    };
+    const ports: number[] = [];
+    const tryPort = (p: number) => {
+      if (ports.length >= count || taken.has(p) || servers.some((s) => ops.lintPort(s, p, proto))) return;
+      ports.push(p);
+      taken.add(p);
+    };
+    for (const list of [high, spans]) if (list.length) for (let i = 0; i < 300 && ports.length < count; i++) tryPort(pick(list));
+    // узкий или почти занятый диапазон — перебором с случайного места
+    if (ports.length < count && spans.length) {
+      const all = spans.flatMap(([a, b]) => (b - a < 70000 ? Array.from({ length: b - a + 1 }, (_, i) => a + i) : []));
+      const start = Math.floor(Math.random() * all.length);
+      for (let i = 0; i < all.length && ports.length < count; i++) tryPort(all[(start + i) % all.length]!);
+    }
+    if (ports.length < count) throw new HttpError(409, 'не нашёл свободный порт — проверьте диапазоны портов групп серверов');
+    return { ports };
+  });
+
   app.post('/api/v1/templates', { preHandler: guard(ctx, 'configs.edit') }, async (req) => {
     const b = body.parse(req.body);
     const role = roleOf(db, req.admin!.role);
