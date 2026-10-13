@@ -30,6 +30,7 @@ export const NOTIFY: Record<string, string> = {
   certs: 'TLS-сертификаты',
   cores: 'Новые версии ядер',
   users: 'Лимиты пользователей',
+  billing: 'Оплата серверов',
 };
 export type NotifyCat = keyof typeof NOTIFY;
 

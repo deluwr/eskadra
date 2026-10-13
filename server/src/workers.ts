@@ -9,6 +9,7 @@ import { effectiveLimits, json, period } from './vpn.js';
 import type { Backups } from './backup.js';
 import type { Bot } from './bot.js';
 import { certLabel, certProblems } from './certs.js';
+import { billingDue, billingText } from './billing.js';
 
 const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60_000 : 0);
 
@@ -34,6 +35,7 @@ export class Workers {
     this.every('backup', 60_000, () => this.backups.tick());
     this.every('cores', 6 * 3600_000, () => this.coreCheck());
     this.every('certs', 3 * 3600_000, () => this.certCheck());
+    this.every('billing', 3600_000, () => this.billingCheck());
   }
 
   /**
@@ -86,6 +88,14 @@ export class Workers {
         this.ctx.updateServer(s.id, { cores: JSON.stringify(cores) });
       } catch { /* узел недоступен — это ловит heartbeat */ }
     }
+  }
+
+  /** Срок оплаты серверов: напоминание админам раз в день, пока срок подходит к концу, и три дня после окончания. */
+  async billingCheck() {
+    const notified = getSetting<Record<string, string>>(this.ctx.db, 'billing.notified', {});
+    const due = billingDue(this.ctx, notified);
+    for (const a of due) void this.bot.notifyAdmins(billingText(a), undefined, 'billing');
+    if (due.length) setSetting(this.ctx.db, 'billing.notified', notified);
   }
 
   stop() { for (const t of this.timers) clearInterval(t); }

@@ -314,6 +314,10 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE users ADD COLUMN excluded_profiles TEXT;
   `,
+  `
+  ALTER TABLE servers ADD COLUMN paid_until TEXT;
+  ALTER TABLE servers ADD COLUMN paid_warn_days INTEGER NOT NULL DEFAULT 5;
+  `,
 ];
 
 export type Db = DatabaseSync;

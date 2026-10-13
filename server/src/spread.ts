@@ -119,7 +119,7 @@ export function parseSpreadStats(out: string): Map<string, number> {
 }
 
 /** Замер канала сервера на самом сервере (nodekit link-test): скачивание и отдача, Мбит/с. */
-export interface LinkTest { down: number; up: number; at: string }
+export interface LinkTest { down: number; up: number; at: string; source?: 'ookla' | 'mirrors'; server?: string; note?: string }
 
 export const linkTestOf = (db: Db, serverId: string) => getSetting<LinkTest | null>(db, `link.${serverId}`, null);
 
@@ -130,7 +130,11 @@ export const measuredCap = (l: LinkTest | null) => (l && l.down > 0 && l.up > 0 
 export function parseLinkTest(out: string): LinkTest | null {
   const down = Number(out.match(/^down_mbps=(\d+)/m)?.[1] ?? NaN);
   const up = Number(out.match(/^up_mbps=(\d+)/m)?.[1] ?? NaN);
-  return Number.isFinite(down) && Number.isFinite(up) && down > 0 && up > 0 ? { down, up, at: new Date().toISOString() } : null;
+  if (!(Number.isFinite(down) && Number.isFinite(up) && down > 0 && up > 0)) return null;
+  const source = out.match(/^source=(ookla|mirrors)$/m)?.[1] as LinkTest['source'];
+  const server = out.match(/^server=(.{1,80})$/m)?.[1]?.trim();
+  const note = out.match(/^note=(.{1,200})$/m)?.[1]?.trim();
+  return { down, up, at: new Date().toISOString(), ...(source ? { source } : {}), ...(server ? { server } : {}), ...(note ? { note } : {}) };
 }
 
 /** Ёмкость каналов выходов: своё значение из конфигурации важнее замера; нет ни того, ни другого — 0 (не контролировать). */

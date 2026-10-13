@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { HostStatsPanel } from '../HostStats';
 import { ViaPicker, viaBody, viaOnly, viaReady, type Via } from '../ViaPicker';
-import { api, ago, fmtTime, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
+import { api, ago, fmtTime, paidLeftText, ruDate, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
 import { CopyBlock, CopyButton, ErrorBox, Info, Level, Modal, Seg, StagePip, StageHelp, Switch, Tag, RoleTag, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
@@ -430,6 +430,7 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
         <div className="row-text"><b>SSH между нодами</b><span className="k">emergency: только проверка связи, allow нового IP панели и временное открытие SSH.</span></div>
         <Seg value={s.peer_ssh as 'off' | 'emergency'} label="SSH между нодами" options={[['off', 'выключен'], ['emergency', 'emergency']]} onChange={(v) => void patch({ peerSsh: v })} />
       </div>
+      <PaidRow s={s} onSave={(body) => void patch(body)} busy={busy} />
       <div className="row">
         <div className="row-text"><b>Роль и группа <Info>Relay (вход) принимает пользователей и может пересылать их на выходы; выход выпускает трафик в интернет. Группа задаёт политику: скрытность портов, связь между нодами, диапазон портов — настраивается в «Портах и связности».</Info></b></div>
         <div className="flex">
@@ -811,5 +812,26 @@ export function JobsCard({ serverId, jobs }: { serverId?: string; jobs: Job[] })
       {jobs.length > LIMIT && <div className="row"><button className="btn ghost sm" onClick={() => setAll(!all)}>{all ? 'Свернуть' : `Показать все (${jobs.length})`}</button></div>}
       {open && <Modal size="lg" title={`Задача #${open.id} · ${open.kind}`} head={tag(open)} onClose={() => setOpen(null)}><pre className="code">{open.log}</pre></Modal>}
     </section>
+  );
+}
+
+/** Срок оплаты сервера: до какого дня оплачен и за сколько дней напоминать (бот и баннер в панели). */
+function PaidRow({ s, onSave, busy }: { s: Server; onSave: (body: { paidUntil: string | null; paidWarnDays?: number }) => void; busy: boolean }) {
+  const [date, setDate] = useState(s.paid_until ?? '');
+  const [warn, setWarn] = useState(String(s.paid_warn_days || 5));
+  useEffect(() => { setDate(s.paid_until ?? ''); setWarn(String(s.paid_warn_days || 5)); }, [s.paid_until, s.paid_warn_days]);
+  const changed = date !== (s.paid_until ?? '') || Number(warn) !== (s.paid_warn_days || 5);
+  const left = s.paidDaysLeft;
+  return (
+    <div className="row">
+      <div className="row-text"><b>Оплачен до <Info>Последний оплаченный день у хостера. За указанное число дней до конца бот раз в день напоминает админам (категория «Оплата серверов»), а в панели появляется баннер; после окончания срока — ещё три дня напоминаний. Продлили — поставьте новую дату.</Info></b>
+        <span className="k">{s.paid_until ? `${ruDate(s.paid_until)}${left !== null ? ` · ${paidLeftText(left)}` : ''}` : 'Не указано — срок оплаты не отслеживается.'}</span></div>
+      <div className="flex">
+        <input className="inp mono" type="date" style={{ width: 'auto' }} value={date} onChange={(e) => setDate(e.target.value)} aria-label="Оплачен до" />
+        <label className="flex small" style={{ gap: 6 }}>напомнить за<input className="inp mono" style={{ width: 60 }} inputMode="numeric" value={warn} onChange={(e) => setWarn(e.target.value.replace(/\D/g, ''))} aria-label="Напомнить за, дней" />дн.</label>
+        <button className="btn" disabled={busy || !changed || (!!date && !/^\d{4}-\d{2}-\d{2}$/.test(date))} onClick={() => onSave({ paidUntil: date || null, paidWarnDays: Math.min(60, Math.max(1, Number(warn) || 5)) })}>Сохранить</button>
+        {s.paid_until && <button className="btn ghost sm" disabled={busy} onClick={() => onSave({ paidUntil: null })}>Не следить</button>}
+      </div>
+    </div>
   );
 }

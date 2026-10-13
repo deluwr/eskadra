@@ -238,13 +238,18 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
   }, [draft.id, d.protocol]);
   const measure = async (ids: string[]) => {
     const names = ids.map((id) => servers.find((s) => s.id === id)?.name ?? id).join(', ');
-    if (!(await ask(`Замерить канал: ${names}? На каждом сервере ~25 секунд канал будет занят целиком (пользователям этого сервера медленнее), трафик — до ${ids.length > 1 ? 'пары ГБ на сервер' : 'пары ГБ'} на гигабитном канале.`))) return;
+    if (!(await ask(`Замерить канал: ${names}? На каждом сервере ~25 секунд канал будет занят целиком (пользователям этого сервера медленнее), трафик — до ${ids.length > 1 ? 'пары ГБ на сервер' : 'пары ГБ'} на гигабитном канале. В первый раз на сервер ставится speedtest от Ookla (в Ubuntu и Debian — из snap) — это может занять несколько минут.`))) return;
     for (const id of ids) {
       setMeasuring(id);
+      const name = servers.find((s) => s.id === id)?.name ?? id;
       try {
-        const r = await api.post<LinkTest>(`/api/v1/servers/${id}/link-test`);
-        toast(`${servers.find((s) => s.id === id)?.name}: ↓${r.down} ↑${r.up} Мбит/с`);
-      } catch (e) { toast((e as Error).message, 'fail'); }
+        // замер — фоновая задача: первый раз на сервере может ставиться speedtest от Ookla (snap), это минуты
+        const { jobId } = await api.post<{ jobId: number }>(`/api/v1/servers/${id}/link-test`);
+        let job: Job;
+        do { await new Promise((r) => setTimeout(r, 3000)); job = await api.get<Job>(`/api/v1/jobs/${jobId}`); } while (job.status === 'running');
+        const last = (job.log ?? '').trim().split('\n').pop()?.replace(/^\[[^\]]+\]\s*/, '') ?? '';
+        toast(`${name}: ${last}`, job.status === 'ok' ? 'ok' : 'fail');
+      } catch (e) { toast(`${name}: ${(e as Error).message}`, 'fail'); }
     }
     setMeasuring(null);
     void reloadLinks();
@@ -437,7 +442,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
             {st.autoMode === 'spread' && (
               <div className="stack" style={{ gap: 10 }}>
                 <div className="flex" style={{ justifyContent: 'space-between' }}>
-                  <span className="k">Каналы выходов <Info>Замер идёт на самом сервере: 8 потоков к Cloudflare по 10 секунд на скачивание и на отдачу; ёмкость — меньшее из двух. На время замера (~25 с) канал занят целиком — пользователям этого сервера будет медленнее. Своё значение в поле важнее замера; пусто — по замеру; ни того, ни другого — загрузка выхода не контролируется, группы делятся поровну. Новая ёмкость меняет раскладку групп при следующем выкате.</Info></span>
+                  <span className="k">Каналы выходов <Info>Замер идёт на самом сервере: если на нём установлен официальный speedtest от Ookla — его результат, иначе 8 потоков к тестовым файлам Hetzner, OVH и Tele2 на скачивание и к Cloudflare и Tele2 на отдачу, 10 секунд после 2 секунд разгона. Ёмкость — меньшее из двух. На время замера (~25 с) канал занят целиком — пользователям этого сервера будет медленнее. Своё значение в поле важнее замера; пусто — по замеру; ни того, ни другого — загрузка выхода не контролируется, группы делятся поровну. Новая ёмкость меняет раскладку групп при следующем выкате.</Info></span>
                   <button type="button" className="btn sm" disabled={!!measuring || !exits.length} onClick={() => void measure(exits.map((x) => x.id))}>{measuring ? `Замеряю ${servers.find((s) => s.id === measuring)?.name ?? ''}…` : 'Замерить все'}</button>
                 </div>
                 <div className="grid g4">
@@ -450,7 +455,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
                           <input className="inp mono" inputMode="numeric" value={st.exitCapMbps[x.id] || ''} placeholder={cap ? `${cap} — по замеру` : 'не замерен'} aria-label={`Канал ${x.name}, Мбит/с`}
                             onChange={(e) => setSt({ exitCapMbps: { ...st.exitCapMbps, [x.id]: Number(e.target.value.replace(/\D/g, '')) } })} /></label>
                         <span className="k flex" style={{ gap: 6, flexWrap: 'wrap' }}>
-                          {l ? <span className="mono">{`↓${l.down} ↑${l.up} · ${ago(l.at)}`}</span> : <span>замера нет</span>}
+                          {l ? <span className="mono" title={l.source === 'ookla' ? `Speedtest by Ookla${l.server ? ` · ${l.server}` : ''}` : `Тестовые файлы Hetzner, OVH, Tele2${l.note ? ` · ${l.note}` : ''}`}>{`↓${l.down} ↑${l.up} · ${l.source === 'ookla' ? 'Ookla' : 'зеркала'} · ${ago(l.at)}`}</span> : <span>замера нет</span>}
                           <button type="button" className="btn ghost sm" disabled={!!measuring} onClick={() => void measure([x.id])}>{measuring === x.id ? 'замеряю…' : 'Замерить'}</button>
                         </span>
                       </div>
@@ -562,7 +567,7 @@ function JobLog({ id, onDone }: { id: number; onDone: () => void }) {
 interface Health { rows: Array<{ exit_id: string; name: string; host: string; exit_ip: string | null; exit_loc: string | null; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null; slow: string[]; speedAt: string | null; decideAt: string | null; median: Record<string, number | null>; spread?: SpreadState | null }
 
 /** Замер канала сервера на нём самом, Мбит/с. */
-interface LinkTest { down: number; up: number; at: string }
+interface LinkTest { down: number; up: number; at: string; source?: 'ookla' | 'mirrors'; server?: string; note?: string }
 /** Ёмкость по замеру — как на сервере (spread.ts measuredCap): меньшее из направлений, шагом 10. */
 const linkCap = (l: LinkTest | undefined) => (l && l.down > 0 && l.up > 0 ? Math.max(10, Math.round(Math.min(l.down, l.up) / 10) * 10) : 0);
 

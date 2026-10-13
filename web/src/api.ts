@@ -43,7 +43,15 @@ export const api = {
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'info';
 export interface Check { id: string; title: string; status: CheckStatus; detail: string }
 
+/** Срок оплаты сервера подходит к концу или истёк (баннер панели). */
+export interface BillingAlert { id: string; name: string; paidUntil: string; daysLeft: number; level: 'warn' | 'fail' }
+
+/** «через 3 дн.» / «сегодня последний день» / «истёк 2 дн. назад» */
+export const paidLeftText = (left: number) => (left > 0 ? `осталось ${left} дн.` : left === 0 ? 'сегодня последний день' : `истёк ${-left} дн. назад`);
+export const ruDate = (iso: string) => iso.split('-').reverse().join('.');
+
 export interface Server {
+  paid_until: string | null; paid_warn_days: number; paidDaysLeft: number | null;
   id: string; name: string; host: string; ssh_port: number; role: string; status: string; group_name: string;
   host_key_fp: string | null; host_key_pending_fp: string | null; sudo_mode: 'bootstrap' | 'restricted';
   ssh_mode: 'loose' | 'strict' | 'shell'; protection_target: 'P1' | 'P2' | 'P3'; protection_current: string;

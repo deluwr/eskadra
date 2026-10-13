@@ -23,6 +23,7 @@ import { botProxyOptions } from '../botproxy.js';
 import { scanSni } from '../sni.js';
 import { pruneServerRefs } from '../prune.js';
 import { linkTestOf } from '../spread.js';
+import { billingAlerts, paidDaysLeft } from '../billing.js';
 import { mgmtVia, viaLabel, viaOutbound } from '../via.js';
 
 const sshUtils = ssh2.utils;
@@ -36,6 +37,7 @@ export function publicView(ctx: Ctx, r: ServerRow) {
     mgmt: { via: viaLabel(ctx, mgmtVia(ctx, r)), mode: r.mgmt_mode, port: r.mgmt_port, sni: r.mgmt_sni, localPort: r.mgmt_local_port, client: r.mgmt_mode === 'tunnel' ? ctx.mgmt?.status() ?? null : null },
     external_cores: json(r.external_cores, []),
     coreModeEffective: coreMode(r),
+    paidDaysLeft: paidDaysLeft(r.paid_until),
     xuiConfigured: !!r.xui_user && !!r.xui_pass_sealed,
     os_info: json(r.os_info, null),
     ssh_ports: json<number[]>(r.ssh_ports, []),
@@ -91,6 +93,9 @@ const patchBody = z.object({
   directAccess: z.boolean().optional(),
   peerSsh: z.enum(['off', 'emergency']).optional(),
   protectionTarget: z.enum(['P1', 'P2', 'P3']).optional(),
+  /** до какого дня оплачен сервер; null — не следить */
+  paidUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), 'неверная дата').nullable().optional(),
+  paidWarnDays: z.number().int().min(1).max(60).optional(),
   mgmtMode: z.enum(['direct', 'tunnel']).optional(),
   /** прокси для туннеля управления; null — напрямую */
   mgmtVia: z.discriminatedUnion('kind', [
@@ -240,6 +245,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       ...(b.directAccess !== undefined ? { direct_access: b.directAccess ? 1 : 0, config_dirty: 1 } : {}),
       ...(b.peerSsh ? { peer_ssh: b.peerSsh } : {}),
       ...(b.protectionTarget ? { protection_target: b.protectionTarget } : {}),
+      ...(b.paidUntil !== undefined ? { paid_until: b.paidUntil } : {}),
+      ...(b.paidWarnDays ? { paid_warn_days: b.paidWarnDays } : {}),
     });
     audit(db, who(req), 'server.update', r.id, { ...b, ...(b.mgmtVia?.kind === 'link' ? { mgmtVia: { kind: 'link' } } : {}) });
     // конфиг узла меняется (прямой доступ) — применяем сразу в фоне, а не ждём ближайшего цикла синхронизации
@@ -300,15 +307,21 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return parseHostStat(r.id, raw);
   });
 
+  // Сроки оплаты, которые подходят к концу или истекли: баннер на всех страницах панели
+  app.get('/api/v1/billing/alerts', async () => billingAlerts(ctx.servers()));
+
   // Замеры каналов серверов (на самих серверах): по ним «Авто по нагрузке» знает ёмкость выходов без своих значений
   app.get('/api/v1/links', async () => Object.fromEntries(ctx.servers().map((s) => [s.id, linkTestOf(ctx.db, s.id)]).filter(([, l]) => l)));
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/link-test', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
     const r = ctx.server(req.params.id);
     requireKit(r);
-    const res = await new Ops(ctx).measureLink(r).catch((e: Error) => { throw new HttpError(502, `${r.name}: ${e.message}`); });
-    audit(ctx.db, req.admin!.username, 'server.link_test', r.id, res);
-    return res;
+    // фоном: первый замер может ставить speedtest (snap) — дольше, чем живёт HTTP-запрос
+    const job = startJob(ctx, r.id, 'link-test');
+    void new Ops(ctx).measureLink(r, job.log)
+      .then((res) => { job.log(`↓${res.down} ↑${res.up} Мбит/с`); job.finish('ok'); audit(ctx.db, req.admin!.username, 'server.link_test', r.id, res); })
+      .catch((e: Error) => { job.log(`ошибка: ${e.message}`); job.finish('failed'); });
+    return { jobId: job.id };
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/servers/:id/restart', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {

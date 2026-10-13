@@ -631,26 +631,84 @@ cmd_cert_set() {  # cert-set <имя> <fullchain> <privkey>: загруженн�
   echo "cert $name: установлен, действует до $(openssl x509 -in "$d/fullchain.pem" -noout -enddate | cut -d= -f2)"
 }
 
-# пропускная способность канала сервера: 8 параллельных потоков к Cloudflare по 10 с на скачивание и на отдачу.
-# Скорость — по счётчикам интерфейса (вместе с текущим трафиком пользователей: канал занят целиком — это и есть его ёмкость)
+# speedtest от Ookla для замера канала. В Ubuntu/Debian — только из snap: версии из apt выбирают далёкие серверы
+# (500 км и больше) и занижают результат. Нет snap — ставим snapd из apt. В остальных системах — snap, если он есть,
+# иначе официальный архив Ookla в $LIB/speedtest. Чужой speedtest в /usr/bin не используем.
+ookla_bin() {
+  local b
+  for b in /snap/bin/speedtest "$LIB/speedtest/speedtest"; do
+    if [ -x "$b" ] && timeout 30 "$b" --version 2>/dev/null | grep -qi ookla; then echo "$b"; return 0; fi
+  done
+  return 1
+}
+ookla_install() {
+  if command -v apt-get >/dev/null; then
+    if ! command -v snap >/dev/null; then
+      export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1
+      timeout 120 apt-get -qq update >/dev/null 2>&1 || true
+      timeout 180 apt-get -y -qq install snapd >/dev/null 2>&1 || return 1
+      systemctl enable --now snapd.socket snapd.service >/dev/null 2>&1 || true
+    fi
+    timeout 120 snap wait system seed.loaded >/dev/null 2>&1 || true
+    timeout 180 snap install speedtest >/dev/null 2>&1 || snap list speedtest >/dev/null 2>&1
+    return
+  fi
+  if command -v snap >/dev/null && timeout 180 snap install speedtest >/dev/null 2>&1; then return 0; fi
+  local a tmp
+  case "$(uname -m)" in x86_64) a=x86_64 ;; aarch64|arm64) a=aarch64 ;; *) return 1 ;; esac
+  tmp="$(mktemp -d)"
+  if curl -fsSL --max-time 120 -o "$tmp/st.tgz" "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-$a.tgz" && tar -xzf "$tmp/st.tgz" -C "$tmp" speedtest; then
+    install -d -m 755 "$LIB/speedtest" && install -m 755 "$tmp/speedtest" "$LIB/speedtest/speedtest"
+  fi
+  rm -rf "$tmp"
+  [ -x "$LIB/speedtest/speedtest" ]
+}
+
+# пропускная способность канала сервера. Есть speedtest от Ookla (или его удалось поставить, см. ookla_install) — его результат; иначе 8 потоков
+# к большим тестовым файлам нескольких хостеров (Hetzner, OVH, Tele2) на скачивание и к Cloudflare/Tele2 на отдачу.
+# Скорость — по счётчикам интерфейса за 10 с после 2 с разгона (вместе с текущим трафиком: канал занят целиком — это и есть его ёмкость)
 cmd_linktest() {
-  local dev secs=10 streams=8 url=https://speed.cloudflare.com
+  local dev secs=10 warm=2
   dev="$(netfair_dev)"; [ -n "$dev" ] && [ -r "/sys/class/net/$dev/statistics/rx_bytes" ] || die "нет маршрута по умолчанию"
-  lt_down() { local end=$((SECONDS + secs)); while [ "$SECONDS" -lt "$end" ]; do curl -s -o /dev/null --max-time "$((end - SECONDS + 1))" "$url/__down?bytes=200000000" || true; done; }
-  lt_up() { local end=$((SECONDS + secs)); while [ "$SECONDS" -lt "$end" ]; do head -c 100000000 /dev/zero | curl -s -o /dev/null --max-time "$((end - SECONDS + 1))" -X POST --data-binary @- "$url/__up" || true; done; }
-  lt_run() {  # lt_run rx|tx <функция> → Мбит/с
-    local col="$1" fn="$2" a b t0 t1 i
+  local dl=(https://fsn1-speed.hetzner.com/1GB.bin https://hel1-speed.hetzner.com/1GB.bin https://nbg1-speed.hetzner.com/1GB.bin
+    https://proof.ovh.net/files/10Gb.dat http://speedtest.tele2.net/10GB.zip https://hel1-speed.hetzner.com/1GB.bin
+    https://fsn1-speed.hetzner.com/1GB.bin https://proof.ovh.net/files/10Gb.dat)
+  local ul=(https://speed.cloudflare.com/__up http://speedtest.tele2.net/upload.php)
+  lt_down() { local end=$((SECONDS + warm + secs + 1)); while [ "$SECONDS" -lt "$end" ]; do curl -s -o /dev/null --max-time "$((end - SECONDS + 1))" "$1" || sleep 1; done; }
+  lt_up() { local end=$((SECONDS + warm + secs + 1)); while [ "$SECONDS" -lt "$end" ]; do head -c 200000000 /dev/zero | curl -s -o /dev/null --max-time "$((end - SECONDS + 1))" -X POST --data-binary @- "$1" || sleep 1; done; }
+  lt_run() {  # lt_run rx|tx <функция> <адреса…> → Мбит/с
+    local col="$1" fn="$2" a b t0 t1 i; shift 2
+    local urls=("$@")
+    for i in 0 1 2 3 4 5 6 7; do "$fn" "${urls[$((i % ${#urls[@]}))]}" & done
+    sleep "$warm"
     a="$(cat "/sys/class/net/$dev/statistics/${col}_bytes")"; t0="$(date +%s.%N)"
-    for i in $(seq 1 "$streams"); do "$fn" & done; wait
+    sleep "$secs"
     b="$(cat "/sys/class/net/$dev/statistics/${col}_bytes")"; t1="$(date +%s.%N)"
+    wait
     awk -v a="$a" -v b="$b" -v t0="$t0" -v t1="$t1" 'BEGIN { printf "%.0f", (b - a) * 8 / (t1 - t0) / 1000000 }'
   }
   # своё ограничение cake (netfair) на время замера снимаем — иначе отдача упрётся в него, а не в канал
   local fair=0
   if tc qdisc show dev "$dev" root 2>/dev/null | grep -q '^qdisc cake'; then fair=1; tc qdisc del dev "$dev" root 2>/dev/null || true; fi
   echo "dev=$dev"
-  echo "down_mbps=$(lt_run rx lt_down)"
-  echo "up_mbps=$(lt_run tx lt_up)"
+  local ok=0 st
+  st="$(ookla_bin)" || { ookla_install && st="$(ookla_bin)"; } || st=""
+  if [ -n "$st" ]; then
+    local js
+    js="$(timeout 120 "$st" --accept-license --accept-gdpr -f json -p no 2>/dev/null || true)"
+    if printf '%s' "$js" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("down_mbps=%d" % round(d["download"]["bandwidth"]*8/1e6)); print("up_mbps=%d" % round(d["upload"]["bandwidth"]*8/1e6)); s=d.get("server",{}); print("server=%s" % " · ".join(x for x in (s.get("name",""), s.get("location","")) if x))' 2>/dev/null; then
+      echo "source=ookla"; echo "bin=$st"; ok=1
+    else
+      echo "note=speedtest не дал результата — замер по тестовым файлам"
+    fi
+  else
+    echo "note=speedtest от Ookla установить не удалось — замер по тестовым файлам"
+  fi
+  if [ "$ok" = 0 ]; then
+    echo "down_mbps=$(lt_run rx lt_down "${dl[@]}")"
+    echo "up_mbps=$(lt_run tx lt_up "${ul[@]}")"
+    echo "source=mirrors"
+  fi
   [ "$fair" = 1 ] && { cmd_netfair boot || true; }
   return 0
 }

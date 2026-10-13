@@ -573,14 +573,16 @@ export class Ops {
   }
 
   /**
-   * Замер канала сервера на нём самом: ~20 с канал занят целиком (скачивание, затем отдача). Результат — по серверу;
-   * в «Авто по нагрузке» он ёмкость выхода, если в конфигурации не задано своё значение.
+   * Замер канала сервера на нём самом: ~25 с канал занят целиком (скачивание, затем отдача). Результат — по серверу;
+   * в «Авто по нагрузке» он ёмкость выхода, если в конфигурации не задано своё значение. Первый замер может
+   * поставить speedtest от Ookla (snap / официальный архив) — до нескольких минут.
    */
   async measureLink(s: ServerRow, log: (l: string) => void = () => undefined): Promise<LinkTest> {
     const out = await this.ctx.onNode(s, async (n) => {
       await this.ensureKit(s, n, log);   // link-test появился вместе с замером каналов
-      return n.must(['link-test'], { timeoutMs: 120_000 });
+      return n.must(['link-test'], { timeoutMs: 900_000 });
     });
+    for (const l of out.trim().split('\n')) log(l);
     const res = parseLinkTest(out);
     if (!res) throw new Error(`замер не удался: ${out.trim().slice(-200) || 'нет ответа от speed.cloudflare.com'}`);
     setSetting(this.ctx.db, `link.${s.id}`, res);

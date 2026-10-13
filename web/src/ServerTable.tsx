@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, ago, type Server } from './api';
+import { api, ago, paidLeftText, type Server } from './api';
 import { Addr, Icon, Info, Level, RoleTag, StageHelp, StagePip, Tag, ask, toast } from './ui';
 import { HostStatsPanel } from './HostStats';
 
@@ -37,7 +37,7 @@ export function ServerTable({ servers, empty, onChanged }: { servers: Server[]; 
             const isOpen = open.has(s.id);
             return [
               <tr key={s.id} className={`clickable ${isOpen ? 'open' : ''}`} onClick={() => (location.hash = `#/server/${s.id}`)}>
-                <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a><div className="k"><Addr value={s.host} /></div></td>
+                <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a>{s.paidDaysLeft !== null && s.paidDaysLeft <= s.paid_warn_days && <> <Tag kind={s.paidDaysLeft <= 1 ? 'fail' : 'warn'}>{`оплата: ${paidLeftText(s.paidDaysLeft)}`}</Tag></>}<div className="k"><Addr value={s.host} /></div></td>
                 <td><RoleTag s={s} /></td>
                 <td><StagePip stage={s.stage} /></td>
                 <td><Level value={s.protection_current} /></td>

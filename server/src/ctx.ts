@@ -26,6 +26,8 @@ export interface ServerRow {
   mgmt_pub: string | null; mgmt_sid: string | null; mgmt_sni: string | null; mgmt_local_port: number | null;
   /** сертификаты узла и результат последнего продления (certs.ts, JSON) */
   tls_state: string | null;
+  /** до какого дня включительно оплачен сервер (YYYY-MM-DD) и за сколько дней напоминать (billing.ts) */
+  paid_until: string | null; paid_warn_days: number;
 }
 
 /** Порты самой панели и подписок — на главном сервере, ставшем узлом, их нельзя закрыть или занять (§7.7). */

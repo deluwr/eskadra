@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { api, ApiError, setOtpProvider, setMe, type Scope } from './api';
-import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync } from './ui';
+import { api, ApiError, paidLeftText, ruDate, setOtpProvider, setMe, type BillingAlert, type Scope } from './api';
+import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync, usePoll } from './ui';
 import { OverviewPage } from './pages/Overview';
 import { ServersPage } from './pages/Servers';
 import { ServerDetailPage } from './pages/ServerDetail';
@@ -99,6 +99,7 @@ export function App() {
           <button className="btn ghost" onClick={logout}>Выйти</button>
         </header>
         <main className="content">
+          <BillingBanner />
           {route.page === 'overview' && <OverviewPage />}
           {route.page === 'servers' && <ServersPage />}
           {route.page === 'server' && route.id && <ServerDetailPage id={route.id} />}
@@ -245,6 +246,21 @@ function LoginPage({ setup, onDone }: { setup: boolean; onDone: () => void }) {
         <ErrorBox error={error} />
         <button className="btn pri" disabled={busy}>{setup ? 'Создать и войти' : 'Войти'}</button>
       </form>
+    </div>
+  );
+}
+
+/** Срок оплаты серверов подходит к концу или истёк — на всех страницах, пока дату не обновят. */
+function BillingBanner() {
+  const { data } = usePoll(() => api.get<BillingAlert[]>('/api/v1/billing/alerts').catch(() => []), 10 * 60_000);
+  if (!data?.length) return null;
+  return (
+    <div className="stack" style={{ gap: 8, marginBottom: 16 }}>
+      {data.map((a) => (
+        <div key={a.id} className={`alert ${a.level}`}>
+          <b>{`${a.name}: оплата — ${paidLeftText(a.daysLeft)}`}</b>{` (оплачен до ${ruDate(a.paidUntil)}). Продлите у хостера и обновите дату в `}<a href={`#/server/${a.id}`}>карточке сервера</a>.
+        </div>
+      ))}
     </div>
   );
 }
