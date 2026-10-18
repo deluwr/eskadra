@@ -402,3 +402,11 @@ span.rm-pick { cursor: default; }
 .th-sort:hover, .th-sort.on { color: var(--text); }
 .th-arrow { font-size: 10px; opacity: .5; }
 .th-sort.on .th-arrow { opacity: 1; color: var(--accent); }
+
+/* аналитика: линии за 48 ч — 2px, акцентный цвет, базовая линия и перекрестие приглушённые */
+.spark { display: flex; flex-direction: column; gap: 2px; min-width: 180px; }
+.spark svg { display: block; overflow: visible; cursor: crosshair; }
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.spark-base { stroke: var(--line); stroke-width: 1; }
+.spark-cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 2; }
+.spark-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }

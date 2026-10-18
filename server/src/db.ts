@@ -318,6 +318,15 @@ const MIGRATIONS: string[] = [
   ALTER TABLE servers ADD COLUMN paid_until TEXT;
   ALTER TABLE servers ADD COLUMN paid_warn_days INTEGER NOT NULL DEFAULT 5;
   `,
+  `
+  CREATE TABLE host_metrics (
+    server_id TEXT NOT NULL,
+    at TEXT NOT NULL,
+    cpu REAL, load1 REAL, mem_pct REAL, disk_pct REAL, rx_mbps REAL, tx_mbps REAL,
+    PRIMARY KEY (server_id, at)
+  );
+  CREATE INDEX host_metrics_at ON host_metrics (at);
+  `,
 ];
 
 export type Db = DatabaseSync;

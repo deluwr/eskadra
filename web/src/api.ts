@@ -38,6 +38,22 @@ export const api = {
   put: <T>(url: string, body: unknown) => call<T>('PUT', url, body),
   patch: <T>(url: string, body: unknown) => call<T>('PATCH', url, body),
   del: <T>(url: string) => call<T>('DELETE', url),
+  /** Скачать файл (ответ с content-disposition) и сохранить у пользователя; возвращает имя файла. */
+  download: async (url: string): Promise<string> => {
+    const res = await fetch(url.replace(/^\//, ''), { credentials: 'same-origin', headers: { 'X-Fleet': '1' } });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      throw new ApiError(String(data.error ?? `HTTP ${res.status}`), res.status, data);
+    }
+    // имя из content-disposition: filename=… (кавычки снимаются по коду символа — без кавычек в регулярке)
+    const cd = res.headers.get('content-disposition') ?? '';
+    const name = cd.includes('filename=') ? cd.split('filename=')[1]!.split(String.fromCharCode(34)).join('').trim() : 'eskadra-diag.md';
+    const href = URL.createObjectURL(await res.blob());
+    const a = Object.assign(document.createElement('a'), { href, download: name });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 10_000);
+    return name;
+  },
 };
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'info';

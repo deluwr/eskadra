@@ -10,6 +10,7 @@ import { PortsPage } from './pages/Ports';
 import { AccessPage } from './pages/Access';
 import { SettingsPage } from './pages/Settings';
 import { BackupsPage } from './pages/Backups';
+import { AnalyticsPage } from './pages/Analytics';
 import { AuditPage } from './pages/Audit';
 import { HelpPage } from './pages/Help';
 import { CoresPage } from './pages/Cores';
@@ -68,7 +69,7 @@ export function App() {
   const logout = async () => { await api.post('/api/v1/auth/logout'); void refreshAuth(); };
   const nav: Array<[string, string, ReactNode]> = [
     ['overview', 'Обзор', Icon.overview], ['servers', 'Серверы', Icon.servers], ['configs', 'Конфигурации', Icon.configs], ['cores', 'Ядра', Icon.cores],
-    ['users', 'Пользователи', Icon.users], ['ports', 'Порты и связность', Icon.ports], ['access', 'Права и роли', Icon.access],
+    ['users', 'Пользователи', Icon.users], ['ports', 'Порты и связность', Icon.ports], ['analytics', 'Аналитика', Icon.analytics], ['access', 'Права и роли', Icon.access],
   ];
   const nav2: Array<[string, string, ReactNode]> = [['backups', 'Бэкапы', Icon.backups], ['audit', 'Аудит', Icon.audit], ['settings', 'Настройки', Icon.settings], ['help', 'Справка', Icon.help]];
   const active = route.page === 'server' ? 'servers' : route.page;
@@ -112,6 +113,7 @@ export function App() {
           {route.page === 'audit' && <AuditPage />}
           {route.page === 'help' && <HelpPage />}
           {route.page === 'cores' && <CoresPage />}
+          {route.page === 'analytics' && <AnalyticsPage />}
         </main>
       </div>
       <Toasts />

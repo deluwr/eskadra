@@ -10,6 +10,7 @@ import type { Backups } from './backup.js';
 import type { Bot } from './bot.js';
 import { certLabel, certProblems } from './certs.js';
 import { billingDue, billingText } from './billing.js';
+import { collectMetrics, METRICS_EVERY_MS } from './analytics.js';
 
 const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60_000 : 0);
 
@@ -36,6 +37,8 @@ export class Workers {
     this.every('cores', 6 * 3600_000, () => this.coreCheck());
     this.every('certs', 3 * 3600_000, () => this.certCheck());
     this.every('billing', 3600_000, () => this.billingCheck());
+    // аналитика: короткий срез нагрузки с каждого сервера раз в 5 минут, хранится 48 часов
+    this.every('metrics', METRICS_EVERY_MS, async () => { await collectMetrics(this.ctx); });
   }
 
   /**

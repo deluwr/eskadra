@@ -5,6 +5,8 @@ import { REPO_ROOT } from './config.js';
 import { cmpVersion } from './releases.js';
 
 const read = (f: string) => { try { return fs.readFileSync(path.join(REPO_ROOT, f), 'utf8').trim(); } catch { return ''; } };
+/** Версия панели из релизного архива (dev — из репозитория). */
+export const panelVersion = () => read('VERSION') || 'dev';
 let cache: { at: number; latest: string | null; error: string | null } | null = null;
 
 export async function versionInfo() {

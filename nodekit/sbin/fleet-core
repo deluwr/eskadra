@@ -717,6 +717,73 @@ cmd_linktest() {
   return 0
 }
 
+# сводка для диагностики (аналитика панели): состояние хоста и журналы служб Эскадры за последние N часов.
+# Повторяющиеся строки схлопываются (счётчик, первый и последний раз), адреса клиентов и UUID маскируются,
+# журнал подключений («accepted») пропускается — компактный текст для разбора человеком или нейросетью.
+cmd_diag() {
+  local hours="${1:-48}"
+  [[ "$hours" =~ ^[0-9]{1,2}$ ]] && [ "$hours" -ge 1 ] && [ "$hours" -le 72 ] || die "usage: diag <1..72 hours>"
+  echo "@host"
+  echo "uptime: $(uptime)"; echo "kernel: $(uname -r)"; grep -E '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"'
+  free -m | head -2; df -h / | tail -1; ss -s 2>/dev/null | head -2
+  echo "boots:"; journalctl --list-boots --no-pager 2>/dev/null | tail -3
+  echo "failed units:"; systemctl --failed --no-legend --no-pager 2>/dev/null | head -10
+  echo "@services"
+  for u in eskadra-xray eskadra-sing-box eskadra-telemt fleet-mgmt eskadra-netfair eskadra ssh; do
+    systemctl cat "$u" >/dev/null 2>&1 || continue
+    echo "$u: $(systemctl is-active "$u" 2>/dev/null) since $(systemctl show "$u" -p ActiveEnterTimestamp --value 2>/dev/null) restarts=$(systemctl show "$u" -p NRestarts --value 2>/dev/null)"
+  done
+  HOURS="$hours" python3 -c "$(cat <<'PY'
+import os, re, subprocess
+H = os.environ["HOURS"]
+IP4 = re.compile(r"\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b")
+IP6 = re.compile(r"\b([0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}):[0-9a-fA-F:]{2,}\b")
+UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+NUM = re.compile(r"\d+")
+def mask(s):
+    s = UUID.sub("<uuid>", s)
+    s = IP4.sub(lambda m: f"{m.group(1)}.{m.group(2)}.x.x", s)
+    return IP6.sub(lambda m: f"{m.group(1)}:…", s)
+def section(title, args, limit=60):
+    try:
+        out = subprocess.run(["journalctl", "--no-pager", "-o", "short-iso", "--since", f"-{H}h", *args], capture_output=True, text=True, timeout=120).stdout
+    except Exception as e:
+        print(f"@log {title}\n(журнал не прочитан: {e})"); return
+    groups, total, skipped = {}, 0, 0
+    for line in out.splitlines():
+        if " accepted " in line or line.startswith("-- "):
+            skipped += 1; continue
+        parts = line.split(" ", 3)
+        if len(parts) < 4: continue
+        ts, msg = parts[0], parts[3]
+        msg = re.sub(r"^\S+?(\[\d+\])?: ", "", msg)                 # процесс[pid]:
+        msg = re.sub(r"^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d(\.\d+)? ", "", msg)   # своя метка времени Xray
+        if msg.startswith('{"level"'):   # служба панели (pino): уровень и сообщение вместо сырого JSON
+            try:
+                import json
+                d = json.loads(msg); lv = {40: "warn", 50: "error", 60: "fatal"}.get(d.get("level"), d.get("level"))
+                msg = f"[{lv}] {d.get('msg') or (d.get('err') or {}).get('message') or ''}"
+            except Exception:
+                pass
+        msg = mask(msg)[:400]
+        key = NUM.sub("#", msg)[:200]
+        g = groups.get(key)
+        if g: g[0] += 1; g[2] = ts
+        else: groups[key] = [1, ts, ts, msg]
+        total += 1
+    print(f"@log {title}\nстрок: {total}, разных: {len(groups)}, пропущено строк подключений: {skipped}")
+    for n, first, last, msg in sorted(groups.values(), key=lambda g: (-g[0], g[1]))[:limit]:
+        print(f"{n}× {first[5:16]}…{last[5:16]} | {msg}")
+for unit in ("eskadra-xray", "eskadra-sing-box", "eskadra-telemt", "fleet-mgmt", "eskadra"):
+    if subprocess.run(["systemctl", "cat", unit], capture_output=True).returncode == 0:
+        # служба панели пишет JSON (pino) — оставляем предупреждения и ошибки
+        section(f"служба {unit}", ["-u", unit] + (["--grep", '"level":(4|5|6)0'] if unit == "eskadra" else []))
+section("ядро: предупреждения и ошибки", ["-k", "-p", "warning"], 40)
+section("система: ошибки (все службы)", ["-p", "err"], 40)
+PY
+)"
+}
+
 # справедливое деление исходящего канала (§«Авто по нагрузке»): cake с ограничением чуть ниже ёмкости канала —
 # очередь копится здесь, а не у хостера, и каждое соединение получает свою долю; плюс BBR. Переживает перезагрузку.
 #   netfair on <Мбит/с> · netfair off · netfair status · netfair boot (из юнита при загрузке)
@@ -790,6 +857,7 @@ case "${1:-}" in
   ostats)  cmd_ostats ;;
   ustats)  cmd_ustats ;;
   linktest) cmd_linktest ;;
+  diag)    cmd_diag "${2:-48}" ;;
   netfair) cmd_netfair "${2:?}" "${3:-}" ;;
   online)  cmd_online ;;
   rules)   cmd_rules ;;
