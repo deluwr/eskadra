@@ -91,5 +91,5 @@ export function exitView(h: { rtt_ms: number | null; mbps: number | null; ok: nu
   // по нагрузке трафик идёт через все отвечающие выходы — у каждого свои группы пользователей
   if (opts.lead || (opts.mode === 'spread' && h?.ok)) return { state: 'lead', note: opts.mode === 'spread' ? 'в работе' : 'ведёт трафик', metric };
   if (opts.lead) return { state: 'lead', note: 'ведёт трафик', metric };
-  return { state: 'ok', note: opts.mode === 'random' ? 'в пуле' : 'в резерве', metric };
+  return { state: 'ok', note: opts.mode === 'random' ? 'в пуле' : opts.mode === 'off' ? 'доступен' : 'в резерве', metric };
 }

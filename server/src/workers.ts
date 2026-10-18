@@ -251,7 +251,7 @@ export class Workers {
   async exitChecks() {
     for (const t of this.ops.vpn.templates()) {
       const sp = this.ops.vpn.spec(t);
-      if (sp.autoMode === 'random' || !t.entry_id) continue;
+      if (!sp.autoEnabled || sp.autoMode === 'random' || !t.entry_id) continue;
       const last = getSetting<string>(this.ctx.db, `auto.checked.${t.id}`, '');
       try {
         // между полными проверками — раз в минуту только задержка закреплённого выхода; не отвечает — проверяем всё сразу

@@ -465,6 +465,10 @@ cmd_stats() {  # счётчики пользователей с обнулени
   "$BIN/eskadra-xray" api statsquery --server=127.0.0.1:10085 -pattern 'user>>>' -reset 2>/dev/null || echo '{}'
 }
 
+cmd_ustats() {  # счётчики пользователей БЕЗ обнуления — нагрузка групп «Авто по нагрузке» (обнуляет только учёт трафика, stats)
+  "$BIN/eskadra-xray" api statsquery --server=127.0.0.1:10085 -pattern 'user>>>' 2>/dev/null || echo '{}'
+}
+
 cmd_ostats() {  # счётчики outbound'ов групп «Авто по нагрузке» (sp-…) с обнулением; пользовательские не трогает
   "$BIN/eskadra-xray" api statsquery --server=127.0.0.1:10085 -pattern 'outbound>>>sp-' -reset 2>/dev/null || echo '{}'
 }
@@ -784,6 +788,7 @@ case "${1:-}" in
   bi)      cmd_bi "${2:?}" ;;
   stats)   cmd_stats ;;
   ostats)  cmd_ostats ;;
+  ustats)  cmd_ustats ;;
   linktest) cmd_linktest ;;
   netfair) cmd_netfair "${2:?}" "${3:-}" ;;
   online)  cmd_online ;;

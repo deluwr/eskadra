@@ -74,7 +74,7 @@ function fixture() {
   return { db, ctx };
 }
 
-test('рендер входа «по нагрузке»: у каждой группы своя цепочка с домашнего выхода, свои outbound’ы и счётчики', async () => {
+test('рендер входа «по нагрузке»: у каждой группы своя цепочка с домашнего выхода на общих outbound’ах выходов', async () => {
   const { ctx } = fixture();
   const { Vpn } = await import('./vpn.js');
   const x = new Vpn(ctx).renderXray(ctx.server('relay')) as any;
@@ -83,9 +83,9 @@ test('рендер входа «по нагрузке»: у каждой гру�
   const homes = spreadHomes(['es', 'fi', 'lv'], { es: 250, fi: 350, lv: 500 }, 6);
   for (let g = 0; g < 6; g++) {
     const chain = [homes[g]!, ...['es', 'fi', 'lv'].filter((e) => e !== homes[g])];
-    assert.deepEqual(bal(`sg-t-${g}-0`).selector, [`sp-t-${g}-${chain[0]}`]);
+    assert.deepEqual(bal(`sg-t-${g}-0`).selector, [`to-t-${chain[0]}`]);
     assert.equal(bal(`sg-t-${g}-0`).fallbackTag, `sgl-t-${g}-1`);
-    assert.deepEqual([bal(`sg-t-${g}-2`).selector, bal(`sg-t-${g}-2`).fallbackTag], [[`sp-t-${g}-${chain[2]}`], `sp-t-${g}-${chain[0]}`], 'все лежат — через домашний');
+    assert.deepEqual([bal(`sg-t-${g}-2`).selector, bal(`sg-t-${g}-2`).fallbackTag], [[`to-t-${chain[2]}`], `to-t-${chain[0]}`], 'все лежат — через домашний');
   }
   // каждый пользователь «Авто» — ровно в одной группе
   const groupRules = x.routing.rules.filter((r: any) => r.inboundTag?.[0] === 'in-ib-r' && String(r.balancerTag ?? '').startsWith('sg-t-'));
@@ -94,9 +94,13 @@ test('рендер входа «по нагрузке»: у каждой гру�
   assert.equal(new Set(emails).size, 12);
   for (const r of groupRules) for (const e of r.user) assert.equal(r.balancerTag, `sg-t-${spreadGroupOf(e.split('.')[0], 6)}-0`);
   assert.ok(!x.routing.rules.some((r: any) => r.balancerTag === 'bal-t'), 'общего балансировщика «Авто» нет');
-  assert.equal(x.outbounds.filter((o: any) => String(o.tag).startsWith('sp-t-')).length, 18);
-  assert.deepEqual(x.burstObservatory.subjectSelector, ['sp-t-']);
-  assert.equal(x.policy.system.statsOutboundDownlink, true);
+  // вход проверяет каждый выход один раз, а не по разу на группу
+  assert.ok(!x.outbounds.some((o: any) => String(o.tag).startsWith('sp-')));
+  assert.equal(x.outbounds.filter((o: any) => String(o.tag).startsWith('to-t-')).length, 3);
+  assert.deepEqual(x.burstObservatory.subjectSelector, ['to-t-']);
+  assert.equal(x.burstObservatory.pingConfig.timeout, '5s', 'под нагрузкой медленный ответ — не смерть выхода');
+  assert.deepEqual(x.log, { loglevel: 'warning', access: 'none' }, 'журнал каждого соединения выключен');
+  assert.deepEqual(x.policy.system, { statsInboundUplink: false });
 });
 
 test('«по порядку» и прочие режимы: счётчики outbound’ов не включаются — их конфиги не меняются', async () => {
@@ -112,14 +116,19 @@ test('проверка «по нагрузке»: нагрузка групп п
   const { ctx, db } = fixture();
   const homes = spreadHomes(['es', 'fi', 'lv'], { es: 250, fi: 350, lv: 500 }, 6);
   setSetting(db, 'spread.layout.t', { ids: ['es', 'fi', 'lv'], homes });
-  setSetting(db, 'spread.statsAt.t', new Date(Date.now() - 60_000).toISOString());
   const esGroup = homes.indexOf('es');
-  // группа es качает 200 Мбит/с, канал es — 240 из 250
+  // пользователь группы es качает 200 Мбит/с (счётчики «Авто» растут), канал es — 240 из 250
+  let heavy = Array.from({ length: 12 }, (_, i) => `u-${i}`).find((u) => spreadGroupOf(u, 6) === esGroup);
+  if (!heavy) { heavy = 'u-heavy'; for (let i = 0; spreadGroupOf(heavy, 6) !== esGroup; i++) heavy = `u-h${i}`; }
   const bytes = (mbps: number) => Math.round((mbps * 1e6 * 60) / 8);
-  const ostats = JSON.stringify({ stat: [
-    { name: `outbound>>>sp-t-${esGroup}-es>>>traffic>>>downlink`, value: bytes(195) },
-    { name: `outbound>>>sp-t-${esGroup}-es>>>traffic>>>uplink`, value: bytes(5) },
+  let counter = bytes(50);
+  const ustats = () => JSON.stringify({ stat: [
+    { name: `user>>>${heavy}.a-t>>>traffic>>>downlink`, value: counter - bytes(5) },
+    { name: `user>>>${heavy}.a-t>>>traffic>>>uplink`, value: bytes(5) },
+    { name: `user>>>${heavy}.v-es>>>traffic>>>downlink`, value: bytes(900) },   // явный профиль — не «Авто», не считается
   ] });
+  // минута «назад»: прошлое чтение счётчиков — с текущим значением; дальше счётчик вырастет на 200 Мбит/с · 60 с
+  const tickAgo = () => { setSetting(db, 'spread.ustats.t', { at: Date.now() - 60_000, v: { [heavy!]: counter } }); counter += bytes(200); };
   const links: Record<string, number> = { es: 240, fi: 100, lv: 100 };   // Мбит/с
   const rx: Record<string, number> = { es: 0, fi: 0, lv: 0 };
   const at: Record<string, number> = {};
@@ -129,7 +138,7 @@ test('проверка «по нагрузке»: нагрузка групп п
       const ok = (stdout: string) => ({ code: 0, stdout, stderr: '' });
       if (a[0] === 'version') return ok(kitVersion());
       if (a[0] === 'exit-probe') return ok('rtt_ms=40\n');
-      if (a[0] === 'xray-ostats') return ok(ostats);
+      if (a[0] === 'xray-ustats') return ok(ustats());
       if (a[0] === 'xray-bo') { bo.push([String(a[1]), String(a[2])]); return ok('ok'); }
       if (a[0] === 'xray-bi') { const last = bo.filter(([b]) => b === a[1]).pop(); return ok(`  - Selecting Override:\n    1   ${last && last[1] !== 'clear' ? last[1] : ''}\n  - Selects:\n`); }
       // счётчики интерфейса растут со скоростью канала по реальному времени между замерами
@@ -147,10 +156,11 @@ test('проверка «по нагрузке»: нагрузка групп п
   const ops = new Ops(ctx);
   const tpl = () => db.prepare(`SELECT * FROM templates WHERE id = 't'`).get() as never;
   // первая проверка: скорости каналов ещё не с чем сравнить — нагрузка es по счётчикам входа (200 из 250 — 80%, не выше)
+  tickAgo();
   let r = await ops.checkExits(tpl(), () => undefined);
   assert.equal(r?.switched, null);
   // вторая минуту спустя: канал es 240 из 250 (96%) — группа es уходит на lv (запас 500·0.8 − 100 = 300)
-  setSetting(db, 'spread.statsAt.t', new Date(Date.now() - 60_000).toISOString());
+  tickAgo();
   await new Promise((res) => setTimeout(res, 300));   // каналы — по разнице с прошлым замером
   r = await ops.checkExits(tpl(), () => undefined);
   assert.equal(r?.switched?.spread?.reason, 'overload');
@@ -163,7 +173,7 @@ test('проверка «по нагрузке»: нагрузка групп п
   assert.ok(Math.abs(st.groups[esGroup].mbps - 200) <= 2, `нагрузка группы ≈ 200 Мбит/с (${st.groups[esGroup].mbps})`);
   assert.equal(st.exits.find((e: any) => e.id === 'es').measured, true);
   // сразу следующая — пауза, ничего не трогаем
-  setSetting(db, 'spread.statsAt.t', new Date(Date.now() - 60_000).toISOString());
+  tickAgo();
   r = await ops.checkExits(tpl(), () => undefined);
   assert.equal(r?.switched, null);
   void probePort;
@@ -208,4 +218,47 @@ test('новая конфигурация: случайные свободные
   // в диапазоне не осталось места — понятная ошибка
   db.prepare(`UPDATE groups SET port_range = '30001' WHERE name = 'g'`).run();
   assert.equal((await app.inject({ method: 'GET', url: '/api/v1/free-ports?servers=es' })).statusCode, 409);
+});
+
+test('вход → выход: соединения следят за живостью TCP — пропавший выход не держит приложения 5 минут', async () => {
+  const { ctx } = fixture();
+  const { Vpn } = await import('./vpn.js');
+  const x = new Vpn(ctx).renderXray(ctx.server('relay')) as any;
+  const outs = x.outbounds.filter((o: any) => /^to-t-/.test(o.tag));
+  assert.equal(outs.length, 3);
+  for (const o of outs) assert.deepEqual(o.streamSettings.sockopt, { tcpKeepAliveIdle: 15, tcpKeepAliveInterval: 5, tcpUserTimeout: 20000 }, o.tag);
+  assert.equal(outs[0].streamSettings.security, 'reality', 'прочие настройки потока не теряются');
+});
+
+test('нагрузка группы: прирост счётчиков пользователей, обнуление учётом трафика — не минус', async () => {
+  const { parseAutoUserStats, counterDeltas } = await import('./spread.js');
+  const cur = parseAutoUserStats(JSON.stringify({ stat: [
+    { name: 'user>>>u-1.a-t>>>traffic>>>downlink', value: 1000 }, { name: 'user>>>u-1.a-t>>>traffic>>>uplink', value: 100 },
+    { name: 'user>>>u-2.a-t>>>traffic>>>downlink', value: 50 }, { name: 'user>>>u-1.a-other>>>traffic>>>downlink', value: 9 },
+    { name: 'user>>>u-3.v-es>>>traffic>>>downlink', value: 7 },
+  ] }), 't');
+  assert.deepEqual(Object.fromEntries(cur), { 'u-1': 1100, 'u-2': 50 });
+  assert.deepEqual(Object.fromEntries(counterDeltas(cur, { 'u-1': 600, 'u-2': 400 })), { 'u-1': 500, 'u-2': 50 }, 'u-2: счётчик обнулился — прирост с нуля');
+});
+
+test('авто-выбор выхода выключен: только явные «вход → выход» — без профиля «авто», балансировщиков, проб и проверок', async () => {
+  const { ctx, db } = fixture();
+  db.prepare(`UPDATE templates SET settings = ? WHERE id = 't'`).run(JSON.stringify({ security: 'reality', autoEnabled: false, autoMode: 'spread', exitOrder: ['es', 'fi', 'lv'] }));
+  const { Vpn } = await import('./vpn.js');
+  const vpn = new Vpn(ctx);
+  const x = vpn.renderXray(ctx.server('relay')) as any;
+  assert.deepEqual(x.routing.balancers, []);
+  assert.equal(x.burstObservatory, undefined);
+  assert.ok(!x.inbounds.some((i: any) => String(i.tag).startsWith('probe-')));
+  const clients = x.inbounds.find((i: any) => i.tag === 'in-ib-r').settings.clients;
+  assert.ok(clients.length > 0 && clients.every((c: any) => !String(c.email).includes('.a-')), 'клиентов «авто» нет');
+  assert.equal(x.outbounds.filter((o: any) => String(o.tag).startsWith('to-t-')).length, 3, 'явные выходы остаются');
+  const u = ctx.db.prepare(`SELECT * FROM users WHERE id = 'u-0'`).get() as never;
+  const names = vpn.profiles(u).map((p) => p.key);
+  assert.ok(!names.includes('v:t:auto') && names.includes('v:t:es'));
+  const ops = new Ops(ctx);
+  assert.equal(await ops.checkExits(db.prepare(`SELECT * FROM templates WHERE id = 't'`).get() as never, () => undefined), null);
+  // уже настроенные конфигурации (без поля) — авто включён, как раньше
+  db.prepare(`UPDATE templates SET settings = '{"security":"reality","autoMode":"order"}' WHERE id = 't'`).run();
+  assert.ok(new Vpn(ctx).profiles(u).some((p) => p.key === 'v:t:auto'));
 });

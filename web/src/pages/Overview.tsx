@@ -41,12 +41,12 @@ export function OverviewPage() {
                 const entry = byId.get(r.entryId);
                 return (
                   <div key={r.id}>
-                    <div className="route-title"><b>{r.name}</b><span>«Авто» выбирает выход {MODE[r.autoMode] ?? r.autoMode}</span><a href="#/configs" style={{ marginLeft: 'auto' }}>Настроить</a></div>
+                    <div className="route-title"><b>{r.name}</b><span>{r.autoMode === 'off' ? '«Авто» выключен — только явные выходы' : `«Авто» выбирает выход ${MODE[r.autoMode] ?? r.autoMode}`}</span><a href="#/configs" style={{ marginLeft: 'auto' }}>Настроить</a></div>
                     <RouteMap
                       entry={<><b>{entry?.name ?? '?'}</b>{entry?.fail_since ? <span className="k" style={{ color: 'var(--fail)' }}>Relay · нет связи</span> : <span className="k">{`Relay · ${ago(entry?.last_seen_at ?? null)}`}</span>}</>}
                       exits={r.exits.map((x) => {
                         const s = byId.get(x.id);
-                        const lead = r.autoMode !== 'random' && (r.selected ? r.selected === x.id : r.exits.find((e) => e.health?.ok)?.id === x.id);
+                        const lead = r.autoMode !== 'random' && r.autoMode !== 'off' && (r.selected ? r.selected === x.id : r.exits.find((e) => e.health?.ok)?.id === x.id);
                         return { id: x.id, name: s?.name ?? x.id, href: `#/server/${x.id}`, ...exitView(x.health, { lead, failSince: s?.fail_since, mode: r.autoMode, ago }) };
                       })}
                       ordered={r.autoMode === 'order' || r.autoMode === 'spread'}

@@ -4,7 +4,7 @@ import { getSetting } from './db.js';
 import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
 import { blockedDevices, limitRules } from './devices.js';
 import { blocksOf, needsSniff, singboxBlockRules, xrayBlockRules } from './blocks.js';
-import { spreadBal, spreadCaps, spreadChain, spreadGroupOf, spreadHomes, spreadLoop, spreadLoopIn, spreadOut } from './spread.js';
+import { spreadBal, spreadCaps, spreadChain, spreadGroupOf, spreadHomes, spreadLoop, spreadLoopIn } from './spread.js';
 import { certName, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
@@ -109,7 +109,8 @@ export class Vpn {
         if (ib.kind === 'relay' && modes.includes('via')) {
           const targets = this.relayTargets(t).filter((x) => this.userAllows(u, x.id, t.id));
           if (!targets.length) continue;
-          out.push({ key: `v:${t.id}:auto`, name: `${s.name} → ${L.auto}${suffix}`, mode: 'auto', template: t,
+          // «вход → авто» — только если авто-выбор выхода у конфигурации включён
+          if (this.spec(t).autoEnabled) out.push({ key: `v:${t.id}:auto`, name: `${s.name} → ${L.auto}${suffix}`, mode: 'auto', template: t,
             host: s.host, port: ib.port, credKey: `v:${t.id}:auto`, inbound: ib, targetName: 'auto' });
           for (const x of targets)
             out.push({ key: `v:${t.id}:${x.id}`, name: `${s.name} → ${x.name}${suffix}`, mode: 'via', template: t,
@@ -164,7 +165,6 @@ export class Vpn {
     const observed: string[] = [];   // префиксы outbound'ов выходов, за которыми следит Xray (умный «Авто»)
     let observeRtt = 0;
     let fastObserve = false;   // есть «по порядку» — вход проверяет выходы часто (≈ 8 с на переключение)
-    let spreadStats = false;   // есть «по нагрузке» — счётчики outbound'ов групп (только тогда: прочим конфигам они не нужны)
 
     for (const ib of ibs) {
       const t = this.template(ib.template_id)!;
@@ -178,8 +178,8 @@ export class Vpn {
           const xi = this.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct'`, t.id, x.id)[0];
           if (!xi || (sp.security === 'reality' && !xi.public_key)) continue;
           ready.push(x);
-          outbounds.push(xrayOutbound(sp, xi, outTag, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id));
-          if (sp.autoMode !== 'random') {
+          outbounds.push(relayLive(xrayOutbound(sp, xi, outTag, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id)));
+          if (sp.autoEnabled && sp.autoMode !== 'random') {
             // локальный SOCKS для проб: панель меряет задержку и скорость именно этого выхода
             inbounds.push({ tag: `probe-${t.id}-${x.id}`, listen: '127.0.0.1', port: probePort(t.id, x.id), protocol: 'socks', settings: { udp: false } });
             rules.push({ type: 'field', inboundTag: [`probe-${t.id}-${x.id}`], outboundTag: outTag });
@@ -193,7 +193,8 @@ export class Vpn {
             }
           if (emails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: emails, outboundTag: outTag });
         }
-        if (ready.length) {
+        // авто-выбор выхода выключен — ни клиентов «авто», ни балансировщиков, ни проверок выходов
+        if (ready.length && sp.autoEnabled) {
           const autoEmails: string[] = [];
           const autoUsers: string[] = [];
           for (const u of users)
@@ -205,23 +206,20 @@ export class Vpn {
               autoUsers.push(u.id);
             }
           if (sp.autoMode === 'spread') {
-            // по нагрузке (spread.ts): у каждой группы пользователей своя цепочка уровней — домашний выход, затем остальные;
-            // свои outbound'ы к выходам — по их счётчикам панель видит нагрузку группы и переводит группы между выходами
-            observed.push(`sp-${t.id}-`);
+            // по нагрузке (spread.ts): у каждой группы пользователей своя цепочка уровней — домашний выход, затем остальные.
+            // Уровни всех групп ведут на общие outbound'ы выходов (to-…): вход проверяет каждый выход один раз, а не
+            // по разу на группу — при 6 группах это в 6 раз меньше проверок и ложных «выход не отвечает» под нагрузкой.
+            // Нагрузку группы панель считает по счётчикам её пользователей.
+            observed.push(`to-${t.id}-`);
             fastObserve = true;
-            spreadStats = true;
             const ids = ready.map((x) => x.id);
             const homes = spreadHomes(ids, spreadCaps(this.db, sp.exitCapMbps, ids), sp.spreadGroups);
             homes.forEach((home, g) => {
-              for (const x of ready) {
-                const xi = this.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct'`, t.id, x.id)[0]!;
-                outbounds.push(xrayOutbound(sp, xi, spreadOut(t.id, g, x.id), x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id));
-              }
               const chain = spreadChain(home, ids);
               chain.forEach((x, i) => {
                 balancers.push({
-                  tag: spreadBal(t.id, g, i), selector: [spreadOut(t.id, g, x)],
-                  fallbackTag: i === chain.length - 1 ? spreadOut(t.id, g, chain[0]!) : spreadLoop(t.id, g, i + 1),
+                  tag: spreadBal(t.id, g, i), selector: [`to-${t.id}-${x}`],
+                  fallbackTag: i === chain.length - 1 ? `to-${t.id}-${chain[0]!}` : spreadLoop(t.id, g, i + 1),
                   strategy: { type: 'leastLoad', settings: { expected: 1, tolerance: 0.5 } },
                 });
                 if (i) {
@@ -276,20 +274,23 @@ export class Vpn {
       }));
     }
     return {
-      log: { loglevel: 'warning' },
+      // журнал каждого соединения Xray по умолчанию пишет в stdout (journald): тысячи строк в час на узел — диск, процессор и
+      // адреса сайтов пользователей. Выключен; предупреждения и ошибки остаются
+      log: { loglevel: 'warning', access: 'none' },
       api: { tag: 'api', services: ['StatsService', 'RoutingService'] },
       ...(observed.length ? {
         burstObservatory: {
           subjectSelector: observed,
-          // «по порядку»: проверка каждые 5 с (≈ 8 с до переключения, ~5 КБ на выход за проверку); иначе раз в минуту
+          // «по порядку» и «по нагрузке»: проверка каждые 5 с (≈ 10 с до переключения, ~5 КБ на выход за проверку); таймаут 5 с —
+          // при 3 с выход под нагрузкой (или нагруженный вход) ложно считался мёртвым и группы метались; иначе раз в минуту
           pingConfig: fastObserve
-            ? { destination: 'https://www.gstatic.com/generate_204', interval: '5s', sampling: 2, timeout: '3s' }
+            ? { destination: 'https://www.gstatic.com/generate_204', interval: '5s', sampling: 2, timeout: '5s' }
             : { destination: 'https://www.gstatic.com/generate_204', interval: '1m', sampling: 3, timeout: `${Math.max(5, Math.ceil(observeRtt * 5 / 1000))}s` },
         },
       } : {}),
       stats: {},
       // statsUserOnline — IP с открытыми соединениями по каждому пользователю: по ним считается лимит устройств (devices.ts)
-      policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true, statsUserOnline: true } }, system: { statsInboundUplink: false, ...(spreadStats ? { statsOutboundUplink: true, statsOutboundDownlink: true } : {}) } },
+      policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true, statsUserOnline: true } }, system: { statsInboundUplink: false } },
       inbounds,
       outbounds,
       routing: { domainStrategy: 'IPOnDemand', rules: [...head, ...tagRules([...(opts.limits === false ? [] : limitRules(blockedDevices(this.ctx))), ...rules], 'r0')], balancers },
@@ -317,7 +318,7 @@ export class Vpn {
       clients.push(xrayClient(sp, this.svcCred(`relay:${t.id}:${t.entry_id}:${server.id}`), `svc.relay-${t.entry_id}-${t.id}`));
     // Telegram-бот панели ходит через эту конфигурацию (прокси бота, botproxy.ts)
     const bot = activeBotProxy(this.ctx);
-    if (bot && bot.template.id === t.id && bot.server.id === server.id)
+    if (bot && !bot.fallback && bot.template.id === t.id && bot.server.id === server.id)
       clients.push(xrayClient(sp, this.svcCred(botCredKey(t.id, server.id)), 'svc.bot'));
     // через эту конфигурацию панель может зайти на SSH нового сервера при первичном доступе (onboard.ts, «через прокси»)
     if (server.mgmt_mode !== 'local') clients.push(xrayClient(sp, this.svcCred(mgmtCredKey(t.id, server.id)), 'svc.mgmt'));
@@ -421,6 +422,16 @@ export class Vpn {
 }
 
 /** Балансировщик уровня i цепочки «по порядку»: первый — bal-<t> (его назначение и состояние смотрит панель), дальше bal-<t>-<i+1>. */
+/**
+ * Соединения вход → выход следят за живостью TCP: keepalive после 15 с тишины (каждые 5 с) и обрыв, если отправленное
+ * не подтверждено 20 с. Выход пропал по сети (а не остановился с RST) — зависшие соединения закрываются за ~20–60 с,
+ * а не через 5 минут простоя; приложение переподключается и попадает на выход, который выбрал балансировщик.
+ */
+export function relayLive<T extends Record<string, unknown>>(o: T): T {
+  const stream = (o.streamSettings as Record<string, unknown> | undefined) ?? {};
+  return { ...o, streamSettings: { ...stream, sockopt: { ...(stream.sockopt as object | undefined), tcpKeepAliveIdle: 15, tcpKeepAliveInterval: 5, tcpUserTimeout: 20000 } } };
+}
+
 export const orderBalancer = (templateId: string, i: number) => (i ? `bal-${templateId}-${i + 1}` : `bal-${templateId}`);
 
 /** Теги правил поколения gen: по ним fleet-core rules убирает прежний набор после того, как добавлен новый. */

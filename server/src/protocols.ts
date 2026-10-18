@@ -56,6 +56,11 @@ export interface Spec {
    * выше maxRttMs (leastLoad + наблюдение), а панель раз в checkMin минут меряет скорость скачивания через каждый
    * выход (testMB) и переключает вход на другой выход, если текущий медленнее minMbps или с задержкой выше порога.
    */
+  /**
+   * Авто-выбор выхода на стороне сервера (профиль «вход → авто»): выключен — у входа только явные «вход → выход»,
+   * без балансировщиков, проверок выходов и переключений панелью.
+   */
+  autoEnabled: boolean;
   autoMode: 'random' | 'smart' | 'order' | 'spread';
   /** Порядок выходов для order: трафик идёт через первый выход, проходящий пороги; вернулся вышестоящий — трафик возвращается к нему. */
   exitOrder: string[];
@@ -103,6 +108,7 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     hy2Obfs: raw.hy2Obfs ?? '',
     mtDomain: raw.mtDomain || sni[0] || 'www.apple.com',
     sniffing: raw.sniffing ?? true,
+    autoEnabled: raw.autoEnabled ?? true,
     autoMode: raw.autoMode ?? 'smart',
     exitOrder: raw.exitOrder ?? [],
     maxRttMs: raw.maxRttMs ?? 100,

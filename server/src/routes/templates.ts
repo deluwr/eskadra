@@ -25,6 +25,7 @@ const settingsBody = z.object({
   hy2Obfs: z.string().max(128).optional(),
   mtDomain: z.string().max(253).regex(/^[A-Za-z0-9.-]*$/).optional(),
   sniffing: z.boolean().optional(),
+  autoEnabled: z.boolean().optional(),
   autoMode: z.enum(['random', 'smart', 'order', 'spread']).optional(),
   exitOrder: z.array(z.string().max(64)).max(64).optional(),
   maxRttMs: z.number().int().min(20).max(2000).optional(),
@@ -223,7 +224,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!t) throw new HttpError(404, 'шаблон не найден');
     const lines: string[] = [];
     const r = await ops.checkExits(t, (l) => lines.push(l), { force: true });   // по кнопке — и замер скорости
-    if (!r) throw new HttpError(409, 'проверка выходов работает для конфигурации со входом и режимом «по качеству»');
+    if (!r) throw new HttpError(409, 'проверка выходов работает для конфигурации со входом и включённым авто-выбором выхода (кроме режима «случайно»)');
     audit(db, req.admin!.username, 'template.exits_check', t.id, { switched: r.switched });
     return { ...r, log: lines };
   });

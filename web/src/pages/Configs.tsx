@@ -41,7 +41,7 @@ const AUTO_HINT: Record<AutoMode, string> = {
 interface Settings {
   security: Security; transport: Transport; flow: string; path: string; host: string; serviceName: string; xhttpMode: string;
   alpn: string[]; certMode: CertMode; domain: string; domains: Record<string, string>; ssMethod: string; hy2Obfs: string; mtDomain: string; sniffing: boolean;
-  autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
+  autoEnabled: boolean; autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
   spreadGroups: number; exitCapMbps: Record<string, number>; spreadHighPct: number; spreadFair: boolean;
 }
 
@@ -55,7 +55,7 @@ const defaults = (p: Protocol): Settings => ({
   security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
-  autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
+  autoEnabled: true, autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
   spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false,
 });
 
@@ -111,7 +111,7 @@ export function ConfigsPage() {
         {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current} onServers={() => void reloadServers()}
           onSaved={(t) => { void reload(); setDraft(toDraft(t)); }} onRollout={(id) => setJobId(id)} onDeleted={() => { setDraft(null); void reload(); }} />}
         {jobId && <JobLog id={jobId} onDone={() => void reload()} />}
-        {current?.entry_id && current.spec.autoMode !== 'random' && <ExitHealth t={current} />}
+        {current?.entry_id && current.spec.autoEnabled !== false && current.spec.autoMode !== 'random' && <ExitHealth t={current} />}
         {current && <Preview t={current} servers={servers ?? []} />}
       </div>
     </>
@@ -132,8 +132,14 @@ export function CoresPanel() {
   const [version, setVersion] = useState('latest');
   const [pre, setPre] = useState(false);
   const [jobId, setJobId] = useState<number | null>(null);
+  // серверы, на которых обновлять: по умолчанию ни одного — обновление касается только отмеченных
+  const [picked, setPicked] = useState<string[]>([]);
   const { busy, error, run } = useAsync();
   if (!data) return null;
+  // Xray серверов с 3x-ui обновляется в самом 3x-ui — их не отмечаем
+  const eligible = data.servers.filter((s) => !(core === 'xray' && s.mode === 'xui'));
+  const sel = eligible.filter((s) => picked.includes(s.id));
+  const toggle = (id: string) => setPicked(picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]);
   const rels = (data.releases[core] ?? []).filter((r) => pre || !r.prerelease);
   const ver = (c: { version: string; previous?: string } | null, k: string, s: CoresInfo['servers'][number]) => {
     if (!c) return (
@@ -162,22 +168,23 @@ export function CoresPanel() {
       {data.errors.map((e) => <div key={e} className="alert warn" style={{ margin: '0 20px' }}>GitHub недоступен: {e}</div>)}
       <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
         <table>
-          <thead><tr><th>Узел</th><th>Режим</th><th>Xray</th><th>sing-box</th></tr></thead>
+          <thead><tr><th style={{ width: 36 }}><input type="checkbox" aria-label="Отметить все серверы" checked={!!eligible.length && sel.length === eligible.length} onChange={(e) => setPicked(e.target.checked ? eligible.map((s) => s.id) : [])} /></th><th>Узел</th><th>Режим</th><th>Xray</th><th>sing-box</th></tr></thead>
           <tbody>
             {data.servers.map((s) => (
               <tr key={s.id}>
+                <td><input type="checkbox" aria-label={`Обновлять ${s.name}`} disabled={!eligible.some((x) => x.id === s.id)} checked={picked.includes(s.id) && eligible.some((x) => x.id === s.id)} onChange={() => toggle(s.id)} /></td>
                 <td><a href={`#/server/${s.id}`} style={{ color: 'var(--text)', fontWeight: 600 }}>{s.name}</a></td>
                 <td>{s.mode === 'xui' ? <Tag kind="info">через 3x-ui</Tag> : <Tag>своё ядро</Tag>}</td>
                 <td>{s.mode === 'xui' ? <span className="stack" style={{ gap: 2 }}><span className="mono small">{s.xui?.version ?? '?'}</span><span className="k">3x-ui {s.xui?.panel ?? ''}</span></span> : ver(s.xray, 'xray', s)}</td>
                 <td>{ver(s.singbox, 'sing-box', s)}</td>
               </tr>
             ))}
-            {!data.servers.length && <tr><td colSpan={4} className="k">Узлов с nodekit нет.</td></tr>}
+            {!data.servers.length && <tr><td colSpan={5} className="k">Узлов с nodekit нет.</td></tr>}
           </tbody>
         </table>
       </div>
       <div className="row stack" style={{ alignItems: 'stretch' }}>
-        <h3>По всему флоту</h3>
+        <h3>Обновление <Info>Отметьте серверы в таблице — ядро ставится или обновляется только на них, по одному: первая ошибка останавливает, сервер с ошибкой сам возвращает прежнюю версию. Так новую версию можно сначала проверить на одном сервере, а потом раскатить на остальные.</Info></h3>
         <div className="flex">
           <Seg value={core} label="Ядро" onChange={(c) => { setCore(c); setVersion('latest'); }} options={[['xray', 'Xray'], ['sing-box', 'sing-box']]} />
           <select className="inp" style={{ width: 'auto' }} value={version} onChange={(e) => setVersion(e.target.value)} aria-label="Версия">
@@ -187,7 +194,7 @@ export function CoresPanel() {
           <label className="cb small"><input type="checkbox" checked={pre} onChange={(e) => setPre(e.target.checked)} />показывать предрелизы</label>
         </div>
         <div className="flex">
-          <button className="btn pri" disabled={busy} onClick={async () => { if (await ask(`Установить или обновить ${core} (${version}) на всех узлах? По одному узлу, первая ошибка останавливает.`)) void run(async () => { const r = await api.post<{ jobId: number }>(`/api/v1/cores/${core}/rollout`, { version }); setJobId(r.jobId); }); }}>Установить или обновить на всех узлах</button>
+          <button className="btn pri" disabled={busy || !sel.length} onClick={async () => { if (await ask(`Установить или обновить ${core} (${version}) на: ${sel.map((s) => s.name).join(', ')}? По одному серверу, первая ошибка останавливает.`)) void run(async () => { const r = await api.post<{ jobId: number }>(`/api/v1/cores/${core}/rollout`, { version, serverIds: sel.map((s) => s.id) }); setJobId(r.jobId); }); }}>{sel.length ? `Установить или обновить на выбранных: ${sel.length}` : 'Отметьте серверы в таблице'}</button>
           <button className="btn" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/cores/pin', { core, version }); void reload(); })}>Закрепить для новых узлов</button>
           <span className="k">Сейчас новые узлы получают: {core} {data.pins[core] ?? 'latest'}</span>
         </div>
@@ -269,7 +276,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
-      autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0, speedEveryMin: Number(st.speedEveryMin) || 1, decideMin: Number(st.decideMin) || 1,
+      autoEnabled: st.autoEnabled, autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0, speedEveryMin: Number(st.speedEveryMin) || 1, decideMin: Number(st.decideMin) || 1,
       spreadGroups: Math.min(16, Math.max(2, Number(st.spreadGroups) || 6)), spreadHighPct: Math.min(95, Math.max(30, Number(st.spreadHighPct) || 80)), spreadFair: st.spreadFair,
       exitCapMbps: Object.fromEntries(exits.map((s) => [s.id, Number(st.exitCapMbps[s.id]) || 0])),
     },
@@ -292,7 +299,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
   const stateOf = (sid: string, kind: string) => current?.inbounds.find((i) => i.server_id === sid && i.kind === kind);
   const relayState = d.entryId ? stateOf(d.entryId, 'relay') : undefined;
   // схема: выбранные серверы (в порядке «Авто»), затем остальные — их можно включить кликом
-  const lead = health?.actual ?? health?.selected ?? (st.autoMode !== 'random' ? health?.rows.find((r) => r.ok)?.exit_id : undefined);
+  const lead = !st.autoEnabled ? undefined : health?.actual ?? health?.selected ?? (st.autoMode !== 'random' ? health?.rows.find((r) => r.ok)?.exit_id : undefined);
   const mapExits: MapExit[] = [
     ...exits.map((x): MapExit => {
       const ib = stateOf(x.id, 'direct');
@@ -300,7 +307,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       if (ib?.state === 'error') return { id: x.id, name: x.name, state: 'fail', note: 'ошибка выката' };
       if (!ib || ib.state !== 'active') return { id: x.id, name: x.name, state: 'idle', note: ib ? 'выкатывается' : 'после выката' };
       if (!d.entryId || x.fail_since) return { id: x.id, name: x.name, state: x.fail_since ? 'fail' : 'ok', note: x.fail_since ? 'нет связи' : 'работает' };
-      return { id: x.id, name: x.name, ...exitView(h, { lead: lead === x.id, mode: st.autoMode }) };
+      return { id: x.id, name: x.name, ...exitView(h, { lead: lead === x.id, mode: st.autoEnabled ? st.autoMode : 'off' }) };
     }),
     ...managed.filter((s) => s.id !== d.entryId && !d.nodeIds.includes(s.id)).map((s): MapExit => ({ id: s.id, name: s.name, state: 'off', note: 'не используется' })),
   ].map((x) => {
@@ -420,7 +427,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
             }
             entryOff={!d.entryId}
             exits={mapExits}
-            ordered={!!d.entryId && (st.autoMode === 'order' || st.autoMode === 'spread')}
+            ordered={!!d.entryId && st.autoEnabled && (st.autoMode === 'order' || st.autoMode === 'spread')}
             onToggle={toggleNode}
             onMove={(id, dir) => move(exits.findIndex((x) => x.id === id), dir)}
           />
@@ -428,6 +435,11 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
         {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}: {i.error}</div>)}
         {d.entryId && info.relay && (
           <div className="stack" style={{ gap: 8 }}>
+            <div className="flex" style={{ justifyContent: 'space-between', maxWidth: '68ch' }}>
+              <span className="small"><b>Авто-выбор выхода на сервере</b> <Info>Включён — у пользователей есть профиль «вход → авто»: вход сам выбирает выход и переключает его, если тот перестал отвечать (режимы ниже). Выключен — только явные профили «вход → выход»: пользователь сам выбирает страну, вход не проверяет выходы и ничего не переключает. Выключение убирает «вход → авто» из подписок при следующем обновлении.</Info></span>
+              <Switch label="Авто-выбор выхода на сервере" on={st.autoEnabled} onChange={(v) => setSt({ autoEnabled: v })} />
+            </div>
+            {st.autoEnabled && (<>
             <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
             <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ['spread', 'по нагрузке'], ['random', 'случайно']]} />
             <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}{st.autoMode === 'order' ? ' Порядок — стрелками на схеме.' : st.autoMode === 'spread' ? ' Порядок запасных выходов — стрелками на схеме.' : ''}</span>
@@ -486,6 +498,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
                 </>}
               </div>
             )}
+            </>)}
           </div>
         )}
       </div>

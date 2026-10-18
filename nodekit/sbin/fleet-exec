@@ -58,6 +58,7 @@ case "${1:-}" in
   xray-x25519)   exec /usr/local/sbin/fleet-core x25519 ;;
   xray-stats)    exec /usr/local/sbin/fleet-core stats ;;
   xray-ostats)   exec /usr/local/sbin/fleet-core ostats ;;
+  xray-ustats)   exec /usr/local/sbin/fleet-core ustats ;;
   link-test)     exec /usr/local/sbin/fleet-core linktest ;;
   net-fair)      case "${2:?on|off|status}" in on) [[ "${3:?mbit}" =~ ^[0-9]{2,6}$ ]] || deny mbit; exec /usr/local/sbin/fleet-core netfair on "$3" ;;
                    off|status) exec /usr/local/sbin/fleet-core netfair "$2" ;; *) deny mode ;; esac ;;

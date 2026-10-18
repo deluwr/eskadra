@@ -171,6 +171,22 @@ test('bot proxy: service client on the chosen inbound, HTTP proxy in the main se
   assert.deepEqual(cfg.routing.rules[0], { type: 'field', inboundTag: ['bot-in'], outboundTag: 'bot-out' });
 });
 
+test('bot proxy: выбранную конфигурацию удалили — бот идёт через другую под svc.mgmt, а не напрямую', async () => {
+  const { ctx, db } = fixture();
+  const { saveBotProxy, botProxyClientPart, activeBotProxy } = await import('./botproxy.js');
+  db.prepare(`UPDATE servers SET mgmt_mode = 'direct' WHERE id = 'n1'`).run();
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids, settings) VALUES ('t2', 'other', 'xray', 'trojan', 8444, '["www.apple.com"]', '["n1"]', '{"security":"reality"}')`).run();
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, private_key_sealed, public_key, short_id) VALUES ('ib2', 't2', 'n1', 'direct', 8444, 'tcp', 'active', ?, 'PUB', 'aa22')`).run(ctx.seal('PRIV'));
+  saveBotProxy(ctx, { enabled: true, serverId: 'n1', templateId: 't-deleted' });
+  const a = activeBotProxy(ctx);
+  assert.deepEqual([a?.template.id, a?.server.id, a?.fallback], ['t2', 'n1', true]);
+  const part = botProxyClientPart(ctx) as any;
+  const x = new Vpn(ctx).renderXray(ctx.server('n1')) as any;
+  const clients = x.inbounds.find((i: any) => i.tag === 'in-ib2').settings.clients;
+  assert.ok(!clients.some((c: any) => c.email === 'svc.bot'), 'svc.bot на запасной не добавляется — конфиг узла не меняется');
+  assert.equal(clients.find((c: any) => c.email === 'svc.mgmt').password, part.outbound.settings.servers[0].password, 'запасная ходит под svc.mgmt, который уже есть на узле');
+});
+
 test('ядро, остановленное вручную, выкат не запускает', async () => {
   const { ctx, db } = fixture();
   db.prepare(`UPDATE servers SET cores = '{"xray":{"version":"26.3.27"}}' WHERE id = 'n1'`).run();

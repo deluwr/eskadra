@@ -358,7 +358,7 @@ export class Bot {
   private exitsScreen(): Screen {
     const vpn = new Vpn(this.ctx);
     const db = this.ctx.db;
-    const ts = vpn.templates().filter((t) => t.entry_id && vpn.spec(t).autoMode !== 'random');
+    const ts = vpn.templates().filter((t) => t.entry_id && vpn.spec(t).autoEnabled && vpn.spec(t).autoMode !== 'random');
     if (!ts.length) return { text: 'Нет конфигураций со входом, где «Авто» выбирает выход по качеству или по порядку.', kb: [[cb('‹ Меню', 'm')]] };
     const blocks = ts.map((t) => {
       const rows = db.prepare(`SELECT h.exit_id, s.name, h.rtt_ms, h.mbps, h.ok, h.exit_ip, h.exit_loc FROM exit_health h JOIN servers s ON s.id = h.exit_id WHERE h.template_id = ?`).all(t.id) as Array<{ exit_id: string; name: string; rtt_ms: number | null; mbps: number | null; ok: number; exit_ip: string | null; exit_loc: string | null }>;

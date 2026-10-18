@@ -4,8 +4,8 @@
  * Пользователи «Авто» делятся на группы (по хешу id — группа пользователя не меняется). У каждой группы свой
  * «домашний» выход: группы раскладываются по выходам пропорционально ёмкости их каналов. Внутри группы — та же
  * цепочка уровней, что «по порядку» (vpn.ts): домашний выход, затем остальные; выход не отвечает — Xray входа сам
- * ведёт группу на следующий за секунды. У группы — свои outbound'ы к выходам (sp-<шаблон>-<группа>-<выход>):
- * по их счётчикам панель видит, сколько качает каждая группа.
+ * ведёт группу на следующий за секунды. Уровни всех групп ведут на общие outbound'ы выходов (to-…), так что вход
+ * проверяет каждый выход один раз; сколько качает группа, панель считает по счётчикам её пользователей.
  *
  * Раз в минуту панель сравнивает загрузку канала каждого выхода (счётчики интерфейсов сервера) с его ёмкостью.
  * Выход загружен выше порога — самая тяжёлая группа, которая помещается в запас другого выхода, переводится туда
@@ -26,7 +26,6 @@ export const SPREAD_HOME_MARGIN = 0.2;
 /** Группа, качающая меньше, не переводится: перевод ничего не даст, а IP у пользователей сменится. */
 export const SPREAD_MIN_GROUP_MBPS = 1;
 
-export const spreadOut = (t: string, g: number, x: string) => `sp-${t}-${g}-${x}`;
 export const spreadBal = (t: string, g: number, level: number) => `sg-${t}-${g}-${level}`;
 export const spreadLoop = (t: string, g: number, level: number) => `sgl-${t}-${g}-${level}`;
 export const spreadLoopIn = (t: string, g: number, level: number) => `sgv-${t}-${g}-${level}`;
@@ -106,16 +105,32 @@ export function planSpread(exits: SpreadExit[], groups: SpreadGroup[], high: num
   return null;
 }
 
-/** Счётчики outbound'ов групп из `xray api statsquery`: байты по тегу sp-… (вверх + вниз). */
-export function parseSpreadStats(out: string): Map<string, number> {
+/**
+ * Счётчики «Авто» конфигурации из `xray api statsquery -pattern user>>>` (без обнуления): байты по пользователю
+ * (вверх + вниз) для e-mail вида `<user>.a-<шаблон>`.
+ */
+export function parseAutoUserStats(out: string, templateId: string): Map<string, number> {
   const bytes = new Map<string, number>();
   let data: { stat?: Array<{ name: string; value?: string | number }> } = {};
   try { data = JSON.parse(out || '{}'); } catch { return bytes; }
+  const suffix = `.a-${templateId}`;
   for (const st of data.stat ?? []) {
-    const m = st.name.match(/^outbound>>>(sp-[A-Za-z0-9._-]+)>>>traffic>>>(uplink|downlink)$/);
-    if (m) bytes.set(m[1]!, (bytes.get(m[1]!) ?? 0) + Number(st.value ?? 0));
+    const m = st.name.match(/^user>>>([A-Za-z0-9._-]+)>>>traffic>>>(uplink|downlink)$/);
+    if (!m || !m[1]!.endsWith(suffix)) continue;
+    const u = m[1]!.slice(0, -suffix.length);
+    bytes.set(u, (bytes.get(u) ?? 0) + Number(st.value ?? 0));
   }
   return bytes;
+}
+
+/**
+ * Прирост счётчиков с прошлого чтения. Учёт трафика (workers.stats) раз в 5 минут обнуляет счётчики — значение
+ * меньше прошлого значит обнуление, тогда прирост — само значение (часть до обнуления теряется, для оценки нагрузки не важно).
+ */
+export function counterDeltas(cur: Map<string, number>, prev: Record<string, number>): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [k, v] of cur) out.set(k, v >= (prev[k] ?? 0) ? v - (prev[k] ?? 0) : v);
+  return out;
 }
 
 /** Замер канала сервера на самом сервере (nodekit link-test): скачивание и отдача, Мбит/с. */

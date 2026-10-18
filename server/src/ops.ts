@@ -7,7 +7,7 @@ import { releaseFor, type Core } from './releases.js';
 import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
 import { blockedDevices, limitRules, updateDevices, userOfEmail } from './devices.js';
 import { parseHostStat } from './hoststats.js';
-import { parseSpreadStats, planSpread, SPREAD_COOLDOWN_MIN, spreadBal, spreadChain, spreadCaps, spreadGroupOf, spreadLayout, spreadLoop, parseLinkTest, type LinkTest, type SpreadExit, type SpreadGroup, type SpreadMove } from './spread.js';
+import { parseAutoUserStats, counterDeltas, planSpread, SPREAD_COOLDOWN_MIN, spreadBal, spreadChain, spreadCaps, spreadGroupOf, spreadLayout, spreadLoop, parseLinkTest, type LinkTest, type SpreadExit, type SpreadGroup, type SpreadMove } from './spread.js';
 
 /** Ядра узла, остановленные вручную на вкладке «Хост». */
 export const coresOff = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx.db, `core.off.${serverId}`, []);
@@ -351,6 +351,7 @@ export class Ops {
     // (с повтором: сразу после перезапуска API Xray может ещё не отвечать) и сверяем с тем, что реально выбрано
     if (!xuiMode) for (const t of this.vpn.templates().filter((x) => x.entry_id === s.id)) {
       const sp = this.vpn.spec(t);
+      if (!sp.autoEnabled) continue;
       if (sp.autoMode === 'spread') {
         // «по нагрузке»: запоминаем раскладку, которую получил вход (по ней панель переводит группы, а не по черновику);
         // раскладка та же — переведённые группы снова на их выходы (дома балансировщику назначать нечего), другая — переводы сброшены
@@ -367,7 +368,7 @@ export class Ops {
         continue;
       }
       const ov = getSetting<string | null>(this.ctx.db, `auto.override.${t.id}`, null);
-      if (ov && this.vpn.spec(t).autoMode !== 'random') {
+      if (ov && this.vpn.spec(t).autoEnabled && this.vpn.spec(t).autoMode !== 'random') {
         const st = await this.setOverride(n, t.id, ov).catch(() => null);
         if (st) setSetting(this.ctx.db, `auto.actual.${t.id}`, st.override || st.selected);
         else log(`«${t.name}»: вход не принял выбор выхода — повторю при следующей проверке`);
@@ -432,7 +433,7 @@ export class Ops {
     const off = coresOff(this.ctx, s.id).filter((c) => c !== core);
     setSetting(this.ctx.db, `core.off.${s.id}`, on ? off : [...off, core]);
     // вход сразу перепроверяет выходы «Авто»: выключили выход — трафик уходит на следующий без ожидания
-    for (const t of this.vpn.templates().filter((x) => x.entry_id && this.vpn.spec(x).autoMode !== 'random' && (x.entry_id === s.id || this.vpn.relayTargets(x).some((r) => r.id === s.id))))
+    for (const t of this.vpn.templates().filter((x) => x.entry_id && this.vpn.spec(x).autoEnabled && this.vpn.spec(x).autoMode !== 'random' && (x.entry_id === s.id || this.vpn.relayTargets(x).some((r) => r.id === s.id))))
       void this.checkExits(t, () => undefined).catch(() => undefined);
     return out.trim();
   }
@@ -469,7 +470,7 @@ export class Ops {
 
   async checkExits(t: TemplateRow, log: (l: string) => void, opts: { force?: boolean } = {}): Promise<{ results: ExitHealth[]; switched: { from: string | null; to: string | null; slow?: boolean; spread?: { group: number; reason: SpreadMove['reason'] } } | null } | null> {
     const sp = this.vpn.spec(t);
-    if (sp.autoMode === 'random' || !t.entry_id) return null;
+    if (!sp.autoEnabled || sp.autoMode === 'random' || !t.entry_id) return null;
     const entry = this.ctx.server(t.entry_id);
     if (entry.sudo_mode !== 'restricted' || coreMode(entry) === 'xui') return null;
     const targets = this.vpn.relayTargets(t);
@@ -655,25 +656,31 @@ export class Ops {
         const exitIp = r.stdout.match(/^exit_ip=([0-9a-fA-F.:]+)$/m)?.[1] ?? null;
         const exitLoc = r.stdout.match(/^exit_loc=([A-Z]{2})$/m)?.[1] ?? null;
         results.push({ exitId: x.id, name: x.name, rttMs: Number.isNaN(rtt) ? null : rtt, mbps: null, ok: !err, error: err, exitIp, exitLoc });
-        db.prepare(`INSERT INTO exit_health (template_id, exit_id, rtt_ms, mbps, ok, error, exit_ip, exit_loc, checked_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, datetime('now'))
-          ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, ok = excluded.ok, error = excluded.error,
-            exit_ip = COALESCE(excluded.exit_ip, exit_ip), exit_loc = COALESCE(excluded.exit_loc, exit_loc), checked_at = excluded.checked_at`)
-          .run(t.id, x.id, Number.isNaN(rtt) ? null : rtt, err ? 0 : 1, err, exitIp, exitLoc);
+        // сервер или конфигурацию могли удалить, пока шла проверка (FOREIGN KEY) — замер просто не сохраняем
+        try {
+          db.prepare(`INSERT INTO exit_health (template_id, exit_id, rtt_ms, mbps, ok, error, exit_ip, exit_loc, checked_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(template_id, exit_id) DO UPDATE SET rtt_ms = excluded.rtt_ms, ok = excluded.ok, error = excluded.error,
+              exit_ip = COALESCE(excluded.exit_ip, exit_ip), exit_loc = COALESCE(excluded.exit_loc, exit_loc), checked_at = excluded.checked_at`)
+            .run(t.id, x.id, Number.isNaN(rtt) ? null : rtt, err ? 0 : 1, err, exitIp, exitLoc);
+        } catch { /* удалён во время проверки */ }
       }
-      // нагрузка групп: счётчики их outbound'ов с прошлой проверки (счётчики обнуляются при чтении)
-      const prevAt = getSetting<string>(db, `spread.statsAt.${t.id}`, '');
-      const st = await n.op(['xray-ostats'], { timeoutMs: 20_000 });
+      // нагрузка групп: счётчики их пользователей с прошлой проверки (читаются без обнуления; учёт трафика обнуляет сам)
+      const prev = getSetting<{ at: number; v: Record<string, number> } | null>(db, `spread.ustats.${t.id}`, null);
+      const st = await n.op(['xray-ustats'], { timeoutMs: 20_000 });
       const now = Date.now();
-      setSetting(db, `spread.statsAt.${t.id}`, new Date(now).toISOString());
-      const dt = prevAt ? (now - Date.parse(prevAt)) / 1000 : 0;
-      if (st.code === 0 && dt >= 10 && dt <= 1800)
-        for (const [tag, bytes] of parseSpreadStats(st.stdout)) {
-          const m = tag.startsWith(`sp-${t.id}-`) ? tag.slice(`sp-${t.id}-`.length).match(/^(\d+)-(.+)$/) : null;
-          if (!m || Number(m[1]) >= homes.length) continue;
-          const mbps = (bytes * 8) / dt / 1e6;
-          groupMbps[Number(m[1])]! += mbps;
-          viaEntry.set(m[2]!, (viaEntry.get(m[2]!) ?? 0) + mbps);
-        }
+      if (st.code === 0) {
+        const cur = parseAutoUserStats(st.stdout, t.id);
+        const dt = prev ? (now - prev.at) / 1000 : 0;
+        if (prev && dt >= 10 && dt <= 1800)
+          for (const [u, bytes] of counterDeltas(cur, prev.v)) {
+            const g = spreadGroupOf(u, homes.length);
+            if (!homes.length) break;
+            const mbps = (bytes * 8) / dt / 1e6;
+            groupMbps[g]! += mbps;
+            viaEntry.set(curOf(g), (viaEntry.get(curOf(g)) ?? 0) + mbps);
+          }
+        setSetting(db, `spread.ustats.${t.id}`, { at: now, v: Object.fromEntries(cur) });
+      }
       const exits: SpreadExit[] = targets.map((x) => ({
         id: x.id, cap: cap(x.id), alive: !!results.find((r) => r.exitId === x.id)?.ok,
         // канал целиком (все конфигурации и прямые пользователи); нет счётчиков сервера — хотя бы эта конфигурация

@@ -42,14 +42,24 @@ export function botProxyOptions(ctx: Ctx) {
   return out;
 }
 
-/** Выбранная пара «сервер + конфигурация», если прокси включён и она ещё существует. */
-export function activeBotProxy(ctx: Ctx): { setting: BotProxySetting; server: ServerRow; template: TemplateRow } | null {
+/**
+ * Пара «сервер + конфигурация», через которую ходит бот. Выбранную удалили (или её inbound снят) — берётся другая
+ * доступная, сначала на том же сервере (fallback): без этого бот молча шёл напрямую, а с главного сервера в РФ
+ * Telegram недоступен — уведомления переставали приходить. Запасная пара ходит под служебным клиентом svc.mgmt,
+ * который уже есть во всех inbound'ах узлов, — работает сразу, без перевыката.
+ */
+export function activeBotProxy(ctx: Ctx): { setting: BotProxySetting; server: ServerRow; template: TemplateRow; fallback: boolean } | null {
   const st = botProxySetting(ctx);
   if (!st.enabled || !st.port) return null;
+  const vpn = new Vpn(ctx);
   const server = ctx.servers().find((s) => s.id === st.serverId);
-  const template = new Vpn(ctx).template(st.templateId);
-  if (!server || !template) return null;
-  return { setting: st, server, template };
+  const template = vpn.template(st.templateId);
+  const live = server && template && vpn.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct' AND state = 'active'`, template.id, server.id).length > 0;
+  if (live) return { setting: st, server: server!, template: template!, fallback: false };
+  const opts = botProxyOptions(ctx);
+  const pick = opts.find((o) => o.serverId === st.serverId) ?? opts[0];
+  if (!pick) return null;
+  return { setting: st, server: ctx.server(pick.serverId), template: vpn.template(pick.templateId)!, fallback: true };
 }
 
 /** Служебный секрет первичного доступа через прокси (onboard.ts): клиент svc.mgmt есть в каждом inbound Xray узлов. */
@@ -66,7 +76,7 @@ export function botProxyClientPart(ctx: Ctx): { inbound: object; outbound: objec
   const ib = vpn.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct' AND state = 'active'`, a.template.id, a.server.id)[0];
   if (!ib) return null;
   const sp = specOf(a.template);
-  const secret = vpn.svcCred(botCredKey(a.template.id, a.server.id));
+  const secret = vpn.svcCred(a.fallback ? mgmtCredKey(a.template.id, a.server.id) : botCredKey(a.template.id, a.server.id));
   return {
     inbound: { tag: 'bot-in', listen: '127.0.0.1', port: a.setting.port, protocol: 'http', settings: {} },
     outbound: xrayOutbound(sp, ib, 'bot-out', a.server.host, secret, a.server.id),
