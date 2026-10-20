@@ -486,6 +486,49 @@ cmd_tls() {  # самоподписанный сертификат для Hyster
   echo "cert=$d/$sni.crt"; echo "key=$d/$sni.key"
 }
 
+cmd_singbox_net() {  # Hysteria2: постоянные буферы UDP и смена портов — UDP с диапазона перенаправляется на порт inbound'а
+  local spec="$1" conf="$ETC/hy2-hop" unit="$UNITS/eskadra-hy2hop.service" rules="" h port a b
+  local re='[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}'
+  if [ "$spec" = boot ]; then [ -s "$conf" ] || exit 0; spec="$(cat "$conf")"; fi
+  [[ "$spec" =~ ^(-|$re(,$re)*)$ ]] || die "bad hop spec"
+  if [ "$spec" = - ]; then
+    nft delete table inet eskadra_hop 2>/dev/null || true
+    systemctl disable eskadra-hy2hop.service >/dev/null 2>&1 || true
+    rm -f "$unit" "$conf" /etc/sysctl.d/90-eskadra-udp.conf; systemctl daemon-reload
+    echo "port hopping off"; return 0
+  fi
+  # QUIC на высоких скоростях упирается в буферы сокета (по умолчанию ~200 КБ): 16 МБ — постоянно, через sysctl.d
+  printf 'net.core.rmem_max = 16777216\nnet.core.wmem_max = 16777216\n' > /etc/sysctl.d/90-eskadra-udp.conf
+  sysctl -q -w net.core.rmem_max=16777216 net.core.wmem_max=16777216 >/dev/null || true
+  IFS=, read -ra hs <<< "$spec"
+  for h in "${hs[@]}"; do
+    port="${h%%:*}"; a="${h#*:}"; b="${a#*-}"; a="${a%-*}"
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] && [ "$a" -ge 1024 ] && [ "$b" -le 65535 ] && [ "$a" -lt "$b" ] || die "bad hop range $h"
+    rules="$rules    udp dport $a-$b redirect to :$port"$'\n'
+  done
+  printf 'table inet eskadra_hop {}\ndelete table inet eskadra_hop\ntable inet eskadra_hop {\n  chain pre {\n    type nat hook prerouting priority dstnat; policy accept;\n%s  }\n}\n' "$rules" | nft -f - \
+    || die "nft не принял перенаправление портов"
+  [ "${2:-}" = boot ] && exit 0
+  install -d -m 755 "$ETC"
+  printf '%s\n' "$spec" > "$conf"
+  cat > "$unit" <<UNIT
+[Unit]
+Description=Eskadra Hysteria2 port hopping (UDP range redirect)
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fleet-core singbox-net boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload; systemctl enable eskadra-hy2hop.service >/dev/null 2>&1 || true
+  echo "udp buffers 16M; port hopping $spec"
+}
+
 # ───── сертификаты TLS для inbounds: /etc/eskadra/tls/<имя>/{fullchain,privkey}.pem ─────
 CB="$LIB/certbot/bin/certbot"
 LEDIR="$ETC/letsencrypt"
@@ -862,6 +905,7 @@ case "${1:-}" in
   online)  cmd_online ;;
   rules)   cmd_rules ;;
   tls)     cmd_tls "${2:?}" ;;
+  singbox-net) if [ "${2:?}" = boot ]; then cmd_singbox_net boot boot; else cmd_singbox_net "$2"; fi ;;
   cert-issue)  cmd_cert_issue "${2:?}" "${3:?}" "${4:?}" ;;
   cert-set)    cmd_cert_set "${2:?}" "${3:?}" "${4:?}" ;;
   cert-deploy) cmd_cert_deploy "${2:?}" ;;

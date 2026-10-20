@@ -22,7 +22,7 @@ export const limitsSig = (ctx: Ctx) => JSON.stringify(limitRules(blockedDevices(
 
 export function renderHash(vpn: Vpn, s: ServerRow): string {
   const part = (f: () => unknown) => { try { return JSON.stringify(f()); } catch (e) { return `error:${(e as Error).message}`; } };
-  return createHash('sha256').update([part(() => vpn.renderXray(s, { limits: false })), part(() => vpn.renderSingbox(s)), part(() => vpn.renderTelemt(s))].join('\n')).digest('hex');
+  return createHash('sha256').update([part(() => vpn.renderXray(s, { limits: false })), part(() => vpn.renderSingbox(s)), part(() => vpn.renderTelemt(s)), part(() => vpn.hy2Hops(s))].join('\n')).digest('hex');
 }
 
 /** Метка в xui_user: для 3x-ui сохранён API-токен, а не логин и пароль. */
@@ -333,6 +333,7 @@ export class Ops {
       const cfg = core === 'xray' ? this.vpn.renderXray(s) : core === 'sing-box' ? this.vpn.renderSingbox(s) : this.vpn.renderTelemt(s);
       if (!cfg) {
         if (cores[core]) { await n.op(['core-stop', core]); log(`${core}: inbounds нет, ядро остановлено`); }
+        if (core === 'sing-box' && cores[core]) await n.op(['singbox-net', '-']);
         continue;
       }
       await this.ensureCore(s, n, core, log);
@@ -340,6 +341,8 @@ export class Ops {
       await n.stage(name, typeof cfg === 'string' ? cfg : JSON.stringify(cfg, null, 2));
       const out = await n.must(['core-apply', core, name], { timeoutMs: 60_000 });
       log(`${core}: ${out.trim()}`);
+      // Hysteria2: буферы UDP ядра ОС (постоянно) и перенаправление диапазона портов на inbound (port hopping)
+      if (core === 'sing-box') log(`hysteria2: ${(await n.must(['singbox-net', this.vpn.hy2Hops(s)])).trim()}`);
       // остановлено вручную (проверка отказоустойчивости) — конфиг обновлён, но ядро остаётся выключенным
       if (coresOff(this.ctx, s.id).includes(core)) { await n.op(['core-stop', core]); log(`${core}: остановлен вручную — не запускаю`); }
     }

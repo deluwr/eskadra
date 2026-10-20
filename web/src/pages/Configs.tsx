@@ -41,6 +41,7 @@ const AUTO_HINT: Record<AutoMode, string> = {
 interface Settings {
   security: Security; transport: Transport; flow: string; path: string; host: string; serviceName: string; xhttpMode: string;
   alpn: string[]; certMode: CertMode; domain: string; domains: Record<string, string>; ssMethod: string; hy2Obfs: string; mtDomain: string; sniffing: boolean;
+  hy2UpMbps: number; hy2DownMbps: number; hy2ServerUpMbps: number; hy2ServerDownMbps: number; hy2IgnoreClientBw: boolean; hy2Masquerade: string; hy2Hop: string; hy2HopInterval: number;
   autoEnabled: boolean; autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
   spreadGroups: number; exitCapMbps: Record<string, number>; spreadHighPct: number; spreadFair: boolean;
 }
@@ -51,10 +52,14 @@ interface Draft {
   certPem: string; keyPem: string;
 }
 
+/** Случайная hex-строка из n байт (пароль obfs). */
+const randomHex = (n: number) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => b.toString(16).padStart(2, '0')).join('');
+
 const defaults = (p: Protocol): Settings => ({
   security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
+  hy2UpMbps: 0, hy2DownMbps: 0, hy2ServerUpMbps: 0, hy2ServerDownMbps: 0, hy2IgnoreClientBw: false, hy2Masquerade: '', hy2Hop: '', hy2HopInterval: 30,
   autoEnabled: true, autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
   spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false,
 });
@@ -276,6 +281,8 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
+      hy2UpMbps: Number(st.hy2UpMbps) || 0, hy2DownMbps: Number(st.hy2DownMbps) || 0, hy2ServerUpMbps: Number(st.hy2ServerUpMbps) || 0, hy2ServerDownMbps: Number(st.hy2ServerDownMbps) || 0,
+      hy2IgnoreClientBw: st.hy2IgnoreClientBw, hy2Masquerade: st.hy2Masquerade.trim(), hy2Hop: st.hy2Hop.replace(/\s/g, ''), hy2HopInterval: Math.min(3600, Math.max(5, Number(st.hy2HopInterval) || 30)),
       autoEnabled: st.autoEnabled, autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0, speedEveryMin: Number(st.speedEveryMin) || 1, decideMin: Number(st.decideMin) || 1,
       spreadGroups: Math.min(16, Math.max(2, Number(st.spreadGroups) || 6)), spreadHighPct: Math.min(95, Math.max(30, Number(st.spreadHighPct) || 80)), spreadFair: st.spreadFair,
       exitCapMbps: Object.fromEntries(exits.map((s) => [s.id, Number(st.exitCapMbps[s.id]) || 0])),
@@ -503,6 +510,18 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
         )}
       </div>
 
+      {d.protocol === 'hysteria2' && (
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="k">Скорость клиента <Info>Вшивается в подписку sing-box и в ссылку. С указанной полосой клиент включает Brutal: скорость держится и при потерях на плече между странами. Без неё Hysteria2 сбрасывает скорость от потерь — бывает в 10–15 раз медленнее. Ставьте чуть ниже реального канала пользователя; 0 — клиент решает сам. Полосу из ссылки понимают не все клиенты — в остальных укажите её в настройках вручную.</Info></span>
+          <div className="grid g3">
+            <label className="fld">Отдача, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2UpMbps} onChange={(e) => setSt({ hy2UpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+            <label className="fld">Загрузка, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2DownMbps} onChange={(e) => setSt({ hy2DownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+          </div>
+          {!st.hy2UpMbps && !st.hy2DownMbps && <span><button type="button" className="btn sm" title="Отдача 50, загрузка 200 Мбит/с" onClick={() => setSt({ hy2UpMbps: 50, hy2DownMbps: 200 })}>Типичные 50 / 200</button></span>}
+          {!st.hy2UpMbps !== !st.hy2DownMbps && <span className="k" style={{ color: 'var(--warn)' }}>Укажите обе величины — иначе Brutal не включится.</span>}
+        </div>
+      )}
+
       {(info.tr.length > 0 || d.protocol === 'hysteria2') && (
         <details className="stack">
           <summary className="k" style={{ cursor: 'pointer' }}>Дополнительно</summary>
@@ -534,8 +553,29 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
                   <span className="flex">{['h2', 'http/1.1'].map((a) => <label key={a} className="cb small"><input type="checkbox" checked={st.alpn.includes(a)} onChange={() => setSt({ alpn: st.alpn.includes(a) ? st.alpn.filter((x) => x !== a) : [...st.alpn, a] })} />{a}</label>)}</span>
                 </span>
               )}
-              {d.protocol === 'hysteria2' && <label className="fld"><span>Пароль obfs (salamander) <Info>Дополнительно маскирует QUIC. Пусто — без obfs. Клиенты должны поддерживать obfs.</Info></span><input className="inp mono" value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} /></label>}
+              {d.protocol === 'hysteria2' && <label className="fld"><span>Пароль obfs (salamander) <Info>Дополнительно маскирует QUIC. Пусто — без obfs. Клиенты должны поддерживать obfs.</Info></span><span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ flex: 1 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" title="Случайный пароль obfs" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>Случайный</button></span></label>}
             </div>
+            {d.protocol === 'hysteria2' && <>
+              <div className="grid g3">
+                <label className="fld"><span>Сайт маскировки <Info>Кто подключится без пароля (например, сканер), увидит этот сайт — сервер проксирует его, как обычный HTTP/3-сайт. Пусто — ответ 404. Лучше брать сайт под то же имя, что в SNI.</Info></span><input className="inp mono" value={st.hy2Masquerade} onChange={(e) => setSt({ hy2Masquerade: e.target.value })} placeholder="https://www.bing.com/" /></label>
+                <label className="fld"><span>Смена портов (port hopping) <Info>Диапазон UDP-портов, например 20000-30000: сервер принимает на любом из них, клиент периодически меняет порт. Мешает резать или душить одно UDP-соединение. На сервере диапазон перенаправляется на порт конфигурации; у хостера с внешним файрволом откройте диапазон и там. Клиенты получают его из подписки sing-box и из ссылки (параметр mport). Пусто — один порт.</Info></span><input className="inp mono" value={st.hy2Hop} onChange={(e) => setSt({ hy2Hop: e.target.value })} placeholder="20000-30000" /></label>
+                {st.hy2Hop.trim() && <label className="fld">Менять порт каждые, с<input className="inp mono" inputMode="numeric" value={st.hy2HopInterval} onChange={(e) => setSt({ hy2HopInterval: Number(e.target.value.replace(/\D/g, '')) })} /></label>}
+              </div>
+              <div className="flex" style={{ justifyContent: 'space-between' }}>
+                <span className="small">BBR вместо Brutal <Info>Сервер велит клиентам не учитывать заявленную полосу и работать по BBR. Бережнее к чужим каналам, но на плече с потерями заметно медленнее. Обычно выключено.</Info></span>
+                <Switch label="BBR вместо Brutal" on={st.hy2IgnoreClientBw} onChange={(v) => setSt({ hy2IgnoreClientBw: v, ...(v ? { hy2ServerUpMbps: 0, hy2ServerDownMbps: 0 } : {}) })} />
+              </div>
+              {!st.hy2IgnoreClientBw && (
+                <div className="stack" style={{ gap: 8 }}>
+                  <span className="k">Потолок на одного клиента <Info>Сервер не даст клиенту больше этой полосы, даже если тот заявит больше. Защищает канал сервера от одного жадного клиента. 0 — без потолка.</Info></span>
+                  <div className="grid g3">
+                    <label className="fld">К клиенту, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2ServerUpMbps} onChange={(e) => setSt({ hy2ServerUpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+                    <label className="fld">От клиента, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2ServerDownMbps} onChange={(e) => setSt({ hy2ServerDownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+                  </div>
+                </div>
+              )}
+              <span className="k">Буферы UDP на серверах с Hysteria2 увеличиваются до 16 МБ сами — без этого QUIC упирается в них на высоких скоростях.</span>
+            </>}
             {d.protocol !== 'hysteria2' && (
               <div className="flex" style={{ justifyContent: 'space-between' }}>
                 <span className="small">Sniffing <Info>Ядро определяет домен назначения по трафику — нужно для маршрутизации по доменам. Обычно включено.</Info></span>

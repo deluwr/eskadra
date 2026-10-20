@@ -5,7 +5,7 @@ import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
 import { blockedDevices, limitRules } from './devices.js';
 import { blocksOf, needsSniff, singboxBlockRules, xrayBlockRules } from './blocks.js';
 import { spreadBal, spreadCaps, spreadChain, spreadGroupOf, spreadHomes, spreadLoop, spreadLoopIn } from './spread.js';
-import { certName, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
+import { certName, hopRange, hy2InboundExtra, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
   if (!s) return fallback;
@@ -376,7 +376,7 @@ export class Vpn {
           users: users
             .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id) && !this.profileOff(u, `d:${t.id}:${server.id}`))
             .map((u) => ({ name: `${u.id}.d-${t.id}`, password: this.cred(u.id, `t:${t.id}`) })),
-          ...(sp.hy2Obfs ? { obfs: { type: 'salamander', password: sp.hy2Obfs } } : {}),
+          ...hy2InboundExtra(sp),
           tls: {
             enabled: true, server_name: tlsServerName(sp, server.id) || self, alpn: ['h3'],
             ...(cert
@@ -394,6 +394,17 @@ export class Vpn {
         ...singboxBlockRules(blocks),
       ] },
     };
+  }
+
+  /** Смена портов Hysteria2 на узле: «порт:начало-конец» через запятую (UDP с диапазона перенаправляется на порт inbound'а); '-' — нет. */
+  hy2Hops(server: ServerRow): string {
+    const hops = this.inbounds(`server_id = ? AND state IN ('active','deploying') AND kind = 'direct'`, server.id)
+      .flatMap((ib) => {
+        const t = this.template(ib.template_id);
+        const r = t?.core === 'sing-box' ? hopRange(this.spec(t).hy2Hop) : null;
+        return r ? [`${ib.port}:${r[0]}-${r[1]}`] : [];
+      });
+    return hops.join(',') || '-';
   }
 
   /** config.toml telemt (MTProto) для узла: на узле — одна MTProto-конфигурация (у неё свой домен маскировки). */

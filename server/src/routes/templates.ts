@@ -7,7 +7,7 @@ import { audit } from '../lib/audit.js';
 import { medianSpeed, Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
 import { checkTemplateServers, roleOf, ScopeError } from '../roles.js';
-import { PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
+import { hopRange, PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
 
 const settingsBody = z.object({
   security: z.enum(['reality', 'tls', 'none']).optional(),
@@ -23,6 +23,14 @@ const settingsBody = z.object({
   domains: z.record(z.string(), z.string().max(253).regex(/^[A-Za-z0-9.-]+$/)).optional(),
   ssMethod: z.enum(SS_METHODS).optional(),
   hy2Obfs: z.string().max(128).optional(),
+  hy2UpMbps: z.number().int().min(0).max(100000).optional(),
+  hy2DownMbps: z.number().int().min(0).max(100000).optional(),
+  hy2ServerUpMbps: z.number().int().min(0).max(100000).optional(),
+  hy2ServerDownMbps: z.number().int().min(0).max(100000).optional(),
+  hy2IgnoreClientBw: z.boolean().optional(),
+  hy2Masquerade: z.union([z.literal(''), z.string().max(512).regex(/^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[!-~]*)?$/, 'сайт маскировки: адрес вида https://www.bing.com/')]).optional(),
+  hy2Hop: z.string().max(16).regex(/^(\d{1,5}-\d{1,5})?$/, 'диапазон портов: вида 20000-30000').optional(),
+  hy2HopInterval: z.number().int().min(5).max(3600).optional(),
   mtDomain: z.string().max(253).regex(/^[A-Za-z0-9.-]*$/).optional(),
   sniffing: z.boolean().optional(),
   autoEnabled: z.boolean().optional(),
@@ -95,7 +103,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     setSetting(db, `cert.${id}`, { fullchain: c.fullchain, privkey: ctx.seal(c.privkey) });
   };
 
-  const validate = (b: z.infer<typeof body>) => {
+  const validate = (b: z.infer<typeof body>, selfId?: string) => {
     const missing = [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])].filter((id) => !ctx.servers().some((s) => s.id === id));
     if (missing.length) throw new HttpError(400, `в конфигурации серверы, которых уже нет в панели (${missing.join(', ')}) — обновите страницу`);
     const info = PROTOCOLS[b.protocol as Protocol];
@@ -112,6 +120,27 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     if ((sp.security === 'tls' || sp.protocol === 'hysteria2') && sp.certMode === 'ip')
       for (const id of [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])])
         if (!/^[0-9.]+$|:/.test(ctx.server(id).host)) throw new HttpError(400, `сертификат на IP: у сервера ${ctx.server(id).name} адрес — домен; выберите «свой домен»`);
+    if (sp.protocol === 'hysteria2') {
+      if (!sp.hy2UpMbps !== !sp.hy2DownMbps) throw new HttpError(400, 'полоса клиента: укажите и отдачу, и загрузку (или обе 0)');
+      if (sp.hy2IgnoreClientBw && (sp.hy2ServerUpMbps || sp.hy2ServerDownMbps)) throw new HttpError(400, 'BBR на сервере несовместим с потолком полосы — уберите одно из двух');
+      if (sp.hy2Hop) {
+        const r = hopRange(sp.hy2Hop);
+        if (!r) throw new HttpError(400, 'диапазон портов: от 1024 до 65535, начало меньше конца');
+        if (r[1] - r[0] > 20000) throw new HttpError(400, 'диапазон портов: не больше 20000 портов');
+        // UDP с диапазона уходит в этот inbound — порты других конфигураций и SSH внутри диапазона перестанут работать
+        for (const id of b.nodeIds) {
+          const s = ctx.server(id);
+          const ssh = json<number[]>(s.ssh_ports, []).find((p) => p >= r[0] && p <= r[1]);
+          if (ssh) throw new HttpError(400, `диапазон портов задевает SSH ${ssh} на сервере ${s.name}`);
+          const clash = vpn.inbounds(`server_id = ? AND proto = 'udp' AND state IN ('active','deploying') AND template_id != ?`, id, selfId ?? '')
+            .find((i) => i.port >= r[0] && i.port <= r[1]);
+          if (clash) throw new HttpError(400, `диапазон портов задевает UDP-порт ${clash.port} другой конфигурации на сервере ${s.name}`);
+          const other = vpn.templates().filter((t) => t.id !== selfId && json<string[]>(t.node_ids, []).includes(id)).map((t) => [t, hopRange(vpn.spec(t).hy2Hop)] as const)
+            .find(([, o]) => o && o[0] <= r[1] && r[0] <= o[1]);
+          if (other) throw new HttpError(400, `диапазон портов пересекается с диапазоном «${other[0].name}» на сервере ${s.name}`);
+        }
+      }
+    }
   };
 
   const scoped = (f: () => void) => { try { f(); } catch (e) { if (e instanceof ScopeError) throw new HttpError(403, e.message); throw e; } };
@@ -185,7 +214,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     const t = vpn.template(req.params.id);
     if (!t) throw new HttpError(404, 'шаблон не найден');
     const b = body.parse(req.body);
-    validate(b);
+    validate(b, t.id);
     if (b.protocol !== specOf(t).protocol) throw new HttpError(400, 'протокол шаблона менять нельзя — создайте новый');
     scoped(() => checkTemplateServers(roleOf(db, req.admin!.role), [...json<string[]>(t.node_ids, []), ...(t.entry_id ? [t.entry_id] : [])], [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]));
     db.prepare(

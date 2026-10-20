@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { certName, link, mtSecret, singboxOutbound, specOf, ssKey, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound } from './protocols.js';
+import { certName, hopRange, hy2InboundExtra, link, mtSecret, singboxOutbound, specOf, ssKey, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound } from './protocols.js';
 import type { InboundRow } from './ctx.js';
 
 const ib = (over: Partial<InboundRow> = {}): InboundRow => ({
@@ -97,6 +97,35 @@ test('Hysteria2 links: self-signed with pin, LE certificate without insecure, ob
   const sb = singboxOutbound(le, U, to()) as any;
   assert.equal(sb.type, 'hysteria2');
   assert.deepEqual(sb.obfs, { type: 'salamander', password: 'secret' });
+});
+
+test('Hysteria2: client bandwidth (Brutal), port hopping, server side', () => {
+  const sp = tpl('hysteria2', { certMode: 'ip', hy2UpMbps: 50, hy2DownMbps: 200, hy2Hop: '20000-30000', hy2HopInterval: 45 });
+  const q = new URL(link(sp, U, to()).replace('hysteria2://', 'https://')).searchParams;
+  assert.equal(q.get('upmbps'), '50');
+  assert.equal(q.get('downmbps'), '200');
+  assert.equal(q.get('mport'), '20000-30000');
+  const sb = singboxOutbound(sp, U, to()) as any;
+  assert.equal(sb.up_mbps, 50);
+  assert.equal(sb.down_mbps, 200);
+  assert.deepEqual(sb.server_ports, ['20000:30000']);
+  assert.equal(sb.hop_interval, '45s');
+  assert.equal(sb.server_port, 8443, 'основной порт остаётся');
+  // без полосы и диапазона — ничего лишнего
+  const plain = singboxOutbound(tpl('hysteria2', {}), U, to()) as any;
+  assert.equal(plain.up_mbps, undefined);
+  assert.equal(plain.server_ports, undefined);
+  assert.doesNotMatch(link(tpl('hysteria2', {}), U, to()), /upmbps|mport/);
+
+  assert.deepEqual(hy2InboundExtra(tpl('hysteria2', { hy2ServerUpMbps: 300, hy2Masquerade: 'https://www.bing.com/' })),
+    { up_mbps: 300, masquerade: 'https://www.bing.com/' });
+  assert.deepEqual(hy2InboundExtra(tpl('hysteria2', { hy2IgnoreClientBw: true, hy2ServerUpMbps: 300, hy2Obfs: 'o' })),
+    { obfs: { type: 'salamander', password: 'o' }, ignore_client_bandwidth: true }, 'BBR — без потолка полосы');
+
+  assert.deepEqual(hopRange('20000-30000'), [20000, 30000]);
+  assert.equal(hopRange('30000-20000'), null);
+  assert.equal(hopRange('80-1000'), null, 'системные порты не трогаем');
+  assert.equal(hopRange(''), null);
 });
 
 test('MTProto: fake-TLS link and telemt config', () => {

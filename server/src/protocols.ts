@@ -49,6 +49,24 @@ export interface Spec {
   domains: Record<string, string>; // домен на узел (certMode domain): serverId → домен
   ssMethod: typeof SS_METHODS[number];
   hy2Obfs: string;           // пароль obfs salamander, пусто — без obfs
+  /**
+   * Hysteria2: полоса клиента, Мбит/с — вшивается в подписку sing-box и ссылку. Ненулевые up/down включают у клиента
+   * Brutal (скорость не падает от потерь на плече); 0 — клиент решает сам (без полосы — loss-based CC, на плече с
+   * потерями в разы медленнее).
+   */
+  hy2UpMbps: number;
+  hy2DownMbps: number;
+  /** Hysteria2: потолок полосы на одного клиента на сервере, Мбит/с; 0 — без потолка */
+  hy2ServerUpMbps: number;
+  hy2ServerDownMbps: number;
+  /** Hysteria2: сервер велит клиентам BBR вместо Brutal (заявленную клиентом полосу не учитывает) */
+  hy2IgnoreClientBw: boolean;
+  /** Hysteria2: сайт маскировки — запрос без пароля получает этот сайт (обратный прокси); пусто — 404 */
+  hy2Masquerade: string;
+  /** Hysteria2: диапазон портов UDP «20000-30000» для смены портов (port hopping); пусто — один порт */
+  hy2Hop: string;
+  /** Hysteria2: клиент меняет порт из диапазона раз в столько секунд */
+  hy2HopInterval: number;
   mtDomain: string;          // MTProto fake-TLS: домен маскировки
   sniffing: boolean;
   /**
@@ -106,6 +124,14 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     domains: raw.domains ?? {},
     ssMethod: raw.ssMethod ?? '2022-blake3-aes-128-gcm',
     hy2Obfs: raw.hy2Obfs ?? '',
+    hy2UpMbps: raw.hy2UpMbps ?? 0,
+    hy2DownMbps: raw.hy2DownMbps ?? 0,
+    hy2ServerUpMbps: raw.hy2ServerUpMbps ?? 0,
+    hy2ServerDownMbps: raw.hy2ServerDownMbps ?? 0,
+    hy2IgnoreClientBw: raw.hy2IgnoreClientBw ?? false,
+    hy2Masquerade: raw.hy2Masquerade ?? '',
+    hy2Hop: raw.hy2Hop ?? '',
+    hy2HopInterval: raw.hy2HopInterval ?? 30,
     mtDomain: raw.mtDomain || sni[0] || 'www.apple.com',
     sniffing: raw.sniffing ?? true,
     autoEnabled: raw.autoEnabled ?? true,
@@ -128,6 +154,14 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
 /** Локальный SOCKS-порт пробы выхода на входном узле (127.0.0.1): через него панель меряет задержку и скорость конкретного выхода. */
 export function probePort(templateId: string, exitId: string): number {
   return 62000 + (createHash('sha256').update(`${templateId}:${exitId}`).digest().readUInt16BE(0) % 3000);
+}
+
+/** Диапазон смены портов Hysteria2 «20000-30000» → [20000, 30000]; null — не задан или с ошибкой. */
+export function hopRange(v: string): [number, number] | null {
+  const m = /^\s*(\d{1,5})\s*-\s*(\d{1,5})\s*$/.exec(v);
+  if (!m) return null;
+  const a = Number(m[1]), b = Number(m[2]);
+  return a >= 1024 && b <= 65535 && a < b ? [a, b] : null;
 }
 
 /** Порт inbound'а — TCP или UDP. */
@@ -248,6 +282,9 @@ export function link(sp: Spec, secret: string, to: LinkTarget): string {
       ...(sni ? { sni } : {}),
       ...(sp.certMode === 'self' ? { insecure: '1', ...(ib.tls_pin ? { pinSHA256: ib.tls_pin } : {}) } : {}),
       ...(sp.hy2Obfs ? { obfs: 'salamander', 'obfs-password': sp.hy2Obfs } : {}),
+      // не из официального формата ссылки, но их понимают v2rayN, NekoBox, Hiddify и др.; остальные пропускают
+      ...(hopRange(sp.hy2Hop) ? { mport: hopRange(sp.hy2Hop)!.join('-') } : {}),
+      ...(sp.hy2UpMbps && sp.hy2DownMbps ? { upmbps: String(sp.hy2UpMbps), downmbps: String(sp.hy2DownMbps) } : {}),
     });
     return `hysteria2://${encodeURIComponent(secret)}@${at}/?${q}#${tag}`;
   }
@@ -291,6 +328,8 @@ export function singboxOutbound(sp: Spec, secret: string, to: LinkTarget): Recor
       type: 'hysteria2', ...base, password: secret,
       tls: { enabled: true, ...(sni ? { server_name: sni } : {}), ...(sp.certMode === 'self' ? { insecure: true } : {}) },
       ...(sp.hy2Obfs ? { obfs: { type: 'salamander', password: sp.hy2Obfs } } : {}),
+      ...(sp.hy2UpMbps && sp.hy2DownMbps ? { up_mbps: sp.hy2UpMbps, down_mbps: sp.hy2DownMbps } : {}),
+      ...(hopRange(sp.hy2Hop) ? { server_ports: [hopRange(sp.hy2Hop)!.join(':')], hop_interval: `${sp.hy2HopInterval}s` } : {}),
     };
   }
   if (sp.protocol === 'shadowsocks') return { type: 'shadowsocks', ...base, method: sp.ssMethod, password: `${to.inbound.public_key ?? ''}:${ssKey(secret, sp.ssMethod)}` };
@@ -308,6 +347,18 @@ export function singboxOutbound(sp: Spec, secret: string, to: LinkTarget): Recor
     ...(sp.protocol === 'vless' && sp.flow ? { flow: sp.flow } : {}),
     ...(sp.protocol === 'vmess' ? { security: 'auto', alter_id: 0 } : {}),
     ...(tls ? { tls } : {}), ...(transport ? { transport } : {}),
+  };
+}
+
+// ───── sing-box: inbound Hysteria2 (настройки сервера) ─────
+
+/** Поля inbound'а Hysteria2 из настроек шаблона: obfs, потолок полосы или BBR, сайт маскировки. */
+export function hy2InboundExtra(sp: Spec): Record<string, unknown> {
+  return {
+    ...(sp.hy2Obfs ? { obfs: { type: 'salamander', password: sp.hy2Obfs } } : {}),
+    ...(sp.hy2IgnoreClientBw ? { ignore_client_bandwidth: true }
+      : { ...(sp.hy2ServerUpMbps ? { up_mbps: sp.hy2ServerUpMbps } : {}), ...(sp.hy2ServerDownMbps ? { down_mbps: sp.hy2ServerDownMbps } : {}) }),
+    ...(sp.hy2Masquerade ? { masquerade: sp.hy2Masquerade } : {}),
   };
 }
 

@@ -67,6 +67,8 @@ case "${1:-}" in
   xray-online)   exec /usr/local/sbin/fleet-core online ;;
   xray-rules)    exec /usr/local/sbin/fleet-core rules ;;
   singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;
+  singbox-net)   [[ "${2:?hops}" =~ ^(-|[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}(,[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}){0,15})$ ]] || deny hops
+                 exec /usr/local/sbin/fleet-core singbox-net "$2" ;;
   host-stat)     exec /usr/local/sbin/fleet-core hoststat ;;
   exit-probe)    exec /usr/local/sbin/fleet-core probe "${2:?port}" "${3:?bytes}" ;;
   # подбор сайтов маскировки REALITY с узла (stdin — JSON со списком имён; имена проверяет сам сканер)
