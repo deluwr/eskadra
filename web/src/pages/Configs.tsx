@@ -15,12 +15,12 @@ type Transport = 'tcp' | 'ws' | 'grpc' | 'xhttp' | 'httpupgrade';
 type CertMode = 'ip' | 'domain' | 'custom' | 'self';
 
 /** Что поддерживает протокол (как в protocols.ts на сервере). */
-const PROTO: Record<Protocol, { name: string; hint: string; core: string; sec: Security[]; tr: Transport[]; udp?: boolean; relay: boolean; cert: CertMode[]; port: string }> = {
+const PROTO: Record<Protocol, { name: string; hint: string; core: string; sec: Security[]; tr: Transport[]; udp?: boolean; relay: boolean; natRelay?: boolean; cert: CertMode[]; port: string }> = {
   vless: { name: 'VLESS', hint: 'основной вариант: REALITY без своего сертификата, или TLS', core: 'Xray', sec: ['reality', 'tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   vmess: { name: 'VMess', hint: 'для старых клиентов; обычно поверх WebSocket + TLS', core: 'Xray', sec: ['tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   trojan: { name: 'Trojan', hint: 'похож на обычный HTTPS; TLS или REALITY', core: 'Xray', sec: ['tls', 'reality'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   shadowsocks: { name: 'Shadowsocks-2022', hint: 'простой и быстрый, без TLS', core: 'Xray', sec: ['none'], tr: ['tcp'], relay: true, cert: [], port: '8388' },
-  hysteria2: { name: 'Hysteria2', hint: 'QUIC (UDP), быстрый на плохих сетях', core: 'sing-box', sec: ['tls'], tr: [], udp: true, relay: false, cert: ['self', 'ip', 'domain', 'custom'], port: '8444' },
+  hysteria2: { name: 'Hysteria2', hint: 'QUIC (UDP), быстрый на плохих сетях', core: 'sing-box', sec: ['tls'], tr: [], udp: true, relay: true, natRelay: true, cert: ['self', 'ip', 'domain', 'custom'], port: '8444' },
   mtproto: { name: 'MTProto (Telegram)', hint: 'прокси только для Telegram, маскировка под HTTPS (fake-TLS)', core: 'telemt', sec: ['none'], tr: [], relay: false, cert: [], port: '443' },
 };
 const STATE_LABEL: Record<string, string> = { active: 'работает', error: 'ошибка', pending: 'выкатывается', deploying: 'выкатывается' };
@@ -60,7 +60,7 @@ const defaults = (p: Protocol): Settings => ({
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
   hy2UpMbps: 0, hy2DownMbps: 0, hy2ServerUpMbps: 0, hy2ServerDownMbps: 0, hy2IgnoreClientBw: false, hy2Masquerade: '', hy2Hop: '', hy2HopInterval: 30,
-  autoEnabled: true, autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
+  autoEnabled: !PROTO[p].natRelay, autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
   spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false,
 });
 
@@ -302,7 +302,9 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
     toast('Сохранено, выкат начался', 'info');
   });
   const pending = !!current && current.applied_revision < current.revision;
-  const toggleNode = (id: string) => setD({ ...d, nodeIds: d.nodeIds.includes(id) ? d.nodeIds.filter((x) => x !== id) : [...d.nodeIds, id] });
+  // Hysteria2 через вход: вход пересылает UDP ядром ОС на один выход — выбор одного
+  const oneExit = !!d.entryId && !!info.natRelay;
+  const toggleNode = (id: string) => setD({ ...d, nodeIds: d.nodeIds.includes(id) ? d.nodeIds.filter((x) => x !== id) : oneExit && id !== d.entryId ? [id] : [...d.nodeIds, id] });
   const stateOf = (sid: string, kind: string) => current?.inbounds.find((i) => i.server_id === sid && i.kind === kind);
   const relayState = d.entryId ? stateOf(d.entryId, 'relay') : undefined;
   // схема: выбранные серверы (в порядке «Авто»), затем остальные — их можно включить кликом
@@ -313,7 +315,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       const h = health?.rows.find((r) => r.exit_id === x.id);
       if (ib?.state === 'error') return { id: x.id, name: x.name, state: 'fail', note: 'ошибка выката' };
       if (!ib || ib.state !== 'active') return { id: x.id, name: x.name, state: 'idle', note: ib ? 'выкатывается' : 'после выката' };
-      if (!d.entryId || x.fail_since) return { id: x.id, name: x.name, state: x.fail_since ? 'fail' : 'ok', note: x.fail_since ? 'нет связи' : 'работает' };
+      if (!d.entryId || oneExit || x.fail_since) return { id: x.id, name: x.name, state: x.fail_since ? 'fail' : 'ok', note: x.fail_since ? 'нет связи' : 'работает' };
       return { id: x.id, name: x.name, ...exitView(h, { lead: lead === x.id, mode: st.autoEnabled ? st.autoMode : 'off' }) };
     }),
     ...managed.filter((s) => s.id !== d.entryId && !d.nodeIds.includes(s.id)).map((s): MapExit => ({ id: s.id, name: s.name, state: 'off', note: 'не используется' })),
@@ -419,7 +421,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
               <>
                 <span className="k">{d.entryId ? 'Relay (вход)' : 'Пользователи'}</span>
                 {info.relay ? (
-                  <select className="inp" value={d.entryId} onChange={(e) => setD({ ...d, entryId: e.target.value })} aria-label="Сервер-вход">
+                  <select className="inp" value={d.entryId} onChange={(e) => { const v = e.target.value; setD({ ...d, entryId: v, nodeIds: v && info.natRelay ? d.nodeIds.filter((x) => x !== v).slice(0, 1) : d.nodeIds }); }} aria-label="Сервер-вход">
                     <option value="">напрямую</option>
                     {managed.map((s) => <option key={s.id} value={s.id}>через {s.name}</option>)}
                   </select>
@@ -427,20 +429,22 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
                 {d.entryId && (
                   <>
                     <label className="flex small" style={{ gap: 8 }}>порт<input className="inp mono" style={{ width: 90, minHeight: 34 }} inputMode="numeric" value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} aria-label="Порт входа" /><button type="button" className="btn ghost sm" title="Случайный свободный порт на сервере-входе" onClick={async () => setD(await randomPorts('entry'))}>Случайный</button>{relayState && <Tag kind={relayState.state === 'active' ? 'ok' : relayState.state === 'error' ? 'fail' : 'warn'}>{STATE_LABEL[relayState.state] ?? relayState.state}</Tag>}</label>
-                    <label className="cb small" style={{ minHeight: 28 }}><input type="checkbox" checked={d.nodeIds.includes(d.entryId)} onChange={() => toggleNode(d.entryId)} />и сам принимает напрямую</label>
+                    {info.natRelay
+                      ? <span className="small muted">один выход <Info>Вход пересылает UDP на выход ядром системы (nft), без своего ядра VPN: клиент подключается к адресу входа, а договаривается с выходом — его сертификат, obfs и пароли. Поэтому выход один, без авто-выбора; диапазон смены портов тоже пересылается на выход. У выхода нужен IPv4-адрес.</Info></span>
+                      : <label className="cb small" style={{ minHeight: 28 }}><input type="checkbox" checked={d.nodeIds.includes(d.entryId)} onChange={() => toggleNode(d.entryId)} />и сам принимает напрямую</label>}
                   </>
                 )}
               </>
             }
             entryOff={!d.entryId}
             exits={mapExits}
-            ordered={!!d.entryId && st.autoEnabled && (st.autoMode === 'order' || st.autoMode === 'spread')}
+            ordered={!!d.entryId && !oneExit && st.autoEnabled && (st.autoMode === 'order' || st.autoMode === 'spread')}
             onToggle={toggleNode}
             onMove={(id, dir) => move(exits.findIndex((x) => x.id === id), dir)}
           />
         )}
         {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}: {i.error}</div>)}
-        {d.entryId && info.relay && (
+        {d.entryId && info.relay && !info.natRelay && (
           <div className="stack" style={{ gap: 8 }}>
             <div className="flex" style={{ justifyContent: 'space-between', maxWidth: '68ch' }}>
               <span className="small"><b>Авто-выбор выхода на сервере</b> <Info>Включён — у пользователей есть профиль «вход → авто»: вход сам выбирает выход и переключает его, если тот перестал отвечать (режимы ниже). Выключен — только явные профили «вход → выход»: пользователь сам выбирает страну, вход не проверяет выходы и ничего не переключает. Выключение убирает «вход → авто» из подписок при следующем обновлении.</Info></span>

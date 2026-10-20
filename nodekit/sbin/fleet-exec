@@ -69,6 +69,10 @@ case "${1:-}" in
   singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;
   singbox-net)   [[ "${2:?hops}" =~ ^(-|[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}(,[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}){0,15})$ ]] || deny hops
                  exec /usr/local/sbin/fleet-core singbox-net "$2" ;;
+  # Hysteria2 через вход: «порт[-конец]=IPv4:порт» через запятую (до 32), '-' — снять, status — что стоит
+  hy2-relay)     r='[0-9]{1,5}(-[0-9]{1,5})?=[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]{1,5}'
+                 [[ "${2:?relays}" =~ ^(-|status|$r(,$r){0,31})$ ]] || deny relays
+                 exec /usr/local/sbin/fleet-core hy2-relay "$2" ;;
   host-stat)     exec /usr/local/sbin/fleet-core hoststat ;;
   exit-probe)    exec /usr/local/sbin/fleet-core probe "${2:?port}" "${3:?bytes}" ;;
   # подбор сайтов маскировки REALITY с узла (stdin — JSON со списком имён; имена проверяет сам сканер)

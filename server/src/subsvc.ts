@@ -24,7 +24,7 @@ export function ensureSubPort(ctx: Ctx): number {
 function singboxConfig(vpn: Vpn, u: UserRow, profiles: Profile[]) {
   // протоколы и транспорты, которых нет в sing-box (MTProto, XHTTP), в JSON не попадают — они есть в ссылках
   const outs = profiles
-    .map((p) => singboxOutbound(vpn.spec(p.template), vpn.cred(u.id, p.credKey), { host: p.host, port: p.port, name: p.name, serverId: p.inbound.server_id, inbound: p.inbound }))
+    .map((p) => singboxOutbound(vpn.spec(p.template), vpn.cred(u.id, p.credKey), vpn.target(p)))
     .filter((o): o is Record<string, unknown> & { tag: string } => !!o);
   const tags = outs.map((o) => o.tag);
   return {

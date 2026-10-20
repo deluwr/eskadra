@@ -22,7 +22,7 @@ export const limitsSig = (ctx: Ctx) => JSON.stringify(limitRules(blockedDevices(
 
 export function renderHash(vpn: Vpn, s: ServerRow): string {
   const part = (f: () => unknown) => { try { return JSON.stringify(f()); } catch (e) { return `error:${(e as Error).message}`; } };
-  return createHash('sha256').update([part(() => vpn.renderXray(s, { limits: false })), part(() => vpn.renderSingbox(s)), part(() => vpn.renderTelemt(s)), part(() => vpn.hy2Hops(s))].join('\n')).digest('hex');
+  return createHash('sha256').update([part(() => vpn.renderXray(s, { limits: false })), part(() => vpn.renderSingbox(s)), part(() => vpn.renderTelemt(s)), part(() => vpn.hy2Hops(s)), part(() => vpn.hy2Relays(s))].join('\n')).digest('hex');
 }
 
 /** Метка в xui_user: для 3x-ui сохранён API-токен, а не логин и пароль. */
@@ -271,6 +271,8 @@ export class Ops {
       this.ctx.db.prepare('UPDATE inbounds SET port = ? WHERE id = ?').run(port, ib.id);
       ib.port = port;
     }
+    // пересылка ядром ОС: на входе ни ядра, ни ключей, ни сертификата — всё у inbound'а выхода
+    if (kind === 'relay' && PROTOCOLS[sp.protocol].natRelay) return ib;
     if (sp.security === 'reality' && !ib.private_key_sealed) {
       const out = coreMode(s) === 'xui' ? String(await this.xui(s, n, 'x25519')) : await n.must(['xray-x25519']);
       const priv = out.match(/^private=(\S+)/m)?.[1];
@@ -345,6 +347,13 @@ export class Ops {
       if (core === 'sing-box') log(`hysteria2: ${(await n.must(['singbox-net', this.vpn.hy2Hops(s)])).trim()}`);
       // остановлено вручную (проверка отказоустойчивости) — конфиг обновлён, но ядро остаётся выключенным
       if (coresOff(this.ctx, s.id).includes(core)) { await n.op(['core-stop', core]); log(`${core}: остановлен вручную — не запускаю`); }
+    }
+    // Hysteria2 через вход: UDP пересылается на выход ядром ОС (nft DNAT); вызываем, только если пересылки есть или были —
+    // узлам без них не нужна новая команда nodekit
+    const relays = this.vpn.hy2Relays(s);
+    if (relays !== '-' || getSetting<string>(this.ctx.db, `hy2relay.${s.id}`, '-') !== '-') {
+      log(`hysteria2 через вход: ${(await n.must(['hy2-relay', relays])).trim()}`);
+      setSetting(this.ctx.db, `hy2relay.${s.id}`, relays);
     }
     this.ctx.updateServer(s.id, { config_dirty: 0 });
     if (!xuiMode) setSetting(this.ctx.db, `applied.${s.id}`, renderHash(this.vpn, s));
@@ -791,22 +800,29 @@ export class Ops {
       const sp = this.vpn.spec(t);
       const core = PROTOCOLS[sp.protocol].core;
       const proto = protoOf(sp.protocol);
+      // Hysteria2 через вход: вход только пересылает UDP ядром ОС — ядро VPN на нём не нужно, 3x-ui не мешает
+      const nat = kind === 'relay' && !!PROTOCOLS[sp.protocol].natRelay;
       const bad = this.lintPort(s, port, proto, t.id);
       if (bad) throw new Error(`${s.name}: ${bad}`);
-      if (kind === 'relay' && coreMode(s) === 'xui')
+      if (kind === 'relay' && !nat && coreMode(s) === 'xui')
         throw new Error(`${s.name}: на узле с 3x-ui «вход» недоступен — нужны собственные маршруты Xray. Выберите вход без 3x-ui.`);
       log(`${i === 0 ? 'canary' : 'волна'}: ${s.name}`);
       let ib: InboundRow | undefined;
       try {
         await this.ctx.onNode(s, async (n) => {
           await this.ensureKit(s, n, log);
-          await this.ensureCore(s, n, core, log);
+          if (!nat) await this.ensureCore(s, n, core, log);
           this.lastLog = log;
           ib = await this.ensureInbound(t, s, kind, n);
           this.ctx.db.prepare(`UPDATE inbounds SET state = 'deploying', error = NULL WHERE id = ?`).run(ib.id);
           await n.must(['port-open', proto, port]);
           await this.applyServer(this.ctx.server(s.id), n, log);
-          if (coreMode(s) === 'xui' && t.core === 'xray') {
+          if (nat) {
+            // слушать на входе некому: проверяем, что пересылка порта на выход стоит в ядре ОС
+            const st = (await n.must(['hy2-relay', 'status'])).trim();
+            if (!st.split(/\s+/).includes(`${port}=${this.vpn.natExit(t)?.server.host}:${this.vpn.natExit(t)?.inbound.port}`))
+              throw new Error(`после применения пересылка порта ${port} на выход не стоит (${st || 'пусто'})`);
+          } else if (coreMode(s) === 'xui' && t.core === 'xray') {
             // 3x-ui применяет inbound сам (иногда с перезапуском Xray) — ждём до 30 с
             let up = false;
             for (let i = 0; i < 10 && !up; i++) {

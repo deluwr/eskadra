@@ -110,15 +110,24 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     if (b.entryId) {
       if (!info.relay) throw new HttpError(400, `режим «через вход» не поддерживается для ${info.name}`);
       if (!b.entryPort) throw new HttpError(400, 'укажите порт входа');
+      if (info.natRelay) {
+        // вход пересылает UDP ядром ОС на один адрес — выход ровно один, и это не сам вход
+        if (b.nodeIds.includes(b.entryId)) throw new HttpError(400, `${info.name} через вход: вход только пересылает трафик на выход — уберите «и сам принимает напрямую»`);
+        if (b.nodeIds.length !== 1) throw new HttpError(400, `${info.name} через вход: выберите один выход`);
+        const x = ctx.server(b.nodeIds[0]!);
+        if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(x.host)) throw new HttpError(400, `${info.name} через вход: у выхода ${x.name} адрес должен быть IPv4 (сейчас «${x.host}»)`);
+      }
     }
     const sp = specOf({ protocol: b.protocol, sni: JSON.stringify(b.sni), fingerprint: b.fingerprint, settings: JSON.stringify(b.settings) });
     if (sp.security === 'reality' && !b.sni.length) throw new HttpError(400, 'для REALITY укажите сайт маскировки (SNI)');
     if (sp.transport === 'xhttp' && sp.protocol !== 'vless') throw new HttpError(400, 'XHTTP — только для VLESS');
+    // у пересылки ядром ОС сертификат только на выходе
+    const certIds = [...b.nodeIds, ...(b.entryId && !info.natRelay ? [b.entryId] : [])];
     if ((sp.security === 'tls' || sp.protocol === 'hysteria2') && sp.certMode === 'domain')
-      for (const id of [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])])
+      for (const id of certIds)
         if (!sp.domains[id]) throw new HttpError(400, `укажите домен для сервера ${ctx.server(id).name}`);
     if ((sp.security === 'tls' || sp.protocol === 'hysteria2') && sp.certMode === 'ip')
-      for (const id of [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])])
+      for (const id of certIds)
         if (!/^[0-9.]+$|:/.test(ctx.server(id).host)) throw new HttpError(400, `сертификат на IP: у сервера ${ctx.server(id).name} адрес — домен; выберите «свой домен»`);
     if (sp.protocol === 'hysteria2') {
       if (!sp.hy2UpMbps !== !sp.hy2DownMbps) throw new HttpError(400, 'полоса клиента: укажите и отдачу, и загрузку (или обе 0)');
@@ -127,15 +136,15 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
         const r = hopRange(sp.hy2Hop);
         if (!r) throw new HttpError(400, 'диапазон портов: от 1024 до 65535, начало меньше конца');
         if (r[1] - r[0] > 20000) throw new HttpError(400, 'диапазон портов: не больше 20000 портов');
-        // UDP с диапазона уходит в этот inbound — порты других конфигураций и SSH внутри диапазона перестанут работать
-        for (const id of b.nodeIds) {
+        // UDP с диапазона уходит в этот inbound (через вход — и с входа на выход): порты других конфигураций и SSH внутри диапазона перестанут работать
+        for (const id of [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]) {
           const s = ctx.server(id);
           const ssh = json<number[]>(s.ssh_ports, []).find((p) => p >= r[0] && p <= r[1]);
           if (ssh) throw new HttpError(400, `диапазон портов задевает SSH ${ssh} на сервере ${s.name}`);
           const clash = vpn.inbounds(`server_id = ? AND proto = 'udp' AND state IN ('active','deploying') AND template_id != ?`, id, selfId ?? '')
             .find((i) => i.port >= r[0] && i.port <= r[1]);
           if (clash) throw new HttpError(400, `диапазон портов задевает UDP-порт ${clash.port} другой конфигурации на сервере ${s.name}`);
-          const other = vpn.templates().filter((t) => t.id !== selfId && json<string[]>(t.node_ids, []).includes(id)).map((t) => [t, hopRange(vpn.spec(t).hy2Hop)] as const)
+          const other = vpn.templates().filter((t) => t.id !== selfId && (json<string[]>(t.node_ids, []).includes(id) || t.entry_id === id)).map((t) => [t, hopRange(vpn.spec(t).hy2Hop)] as const)
             .find(([, o]) => o && o[0] <= r[1] && r[0] <= o[1]);
           if (other) throw new HttpError(400, `диапазон портов пересекается с диапазоном «${other[0].name}» на сервере ${s.name}`);
         }

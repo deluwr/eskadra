@@ -1320,4 +1320,6 @@ export const EN: Record<string, string> = {
   "Смена портов (port hopping)": "Port hopping",
   "Типичные 50 / 200": "Typical 50 / 200",
   "Укажите обе величины — иначе Brutal не включится.": "Set both values — otherwise Brutal won't turn on.",
+  "Вход пересылает UDP на выход ядром системы (nft), без своего ядра VPN: клиент подключается к адресу входа, а договаривается с выходом — его сертификат, obfs и пароли. Поэтому выход один, без авто-выбора; диапазон смены портов тоже пересылается на выход. У выхода нужен IPv4-адрес.": "The entry forwards UDP to the exit in the system kernel (nft), with no VPN core of its own: the client connects to the entry's address but negotiates with the exit — its certificate, obfs and passwords. Hence a single exit, no auto-selection; the port-hopping range is forwarded to the exit too. The exit needs an IPv4 address.",
+  "один выход": "one exit",
 };

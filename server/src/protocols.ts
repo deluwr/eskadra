@@ -17,6 +17,11 @@ export type CertMode = 'ip' | 'domain' | 'custom' | 'self';
 
 export interface ProtocolInfo {
   core: Core; name: string; securities: Security[]; transports: Transport[]; udp?: boolean; relay: boolean; certModes: CertMode[];
+  /**
+   * «Через вход» без ядра на входе: вход пересылает UDP ядром ОС (nft DNAT, fleet-core hy2-relay) на один выход,
+   * клиент договаривается с inbound'ом выхода напрямую. Авто-выбора и балансировщиков нет.
+   */
+  natRelay?: boolean;
 }
 
 export const PROTOCOLS: Record<Protocol, ProtocolInfo> = {
@@ -24,7 +29,7 @@ export const PROTOCOLS: Record<Protocol, ProtocolInfo> = {
   vmess: { core: 'xray', name: 'VMess', securities: ['tls', 'none'], transports: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, certModes: ['ip', 'domain', 'custom'] },
   trojan: { core: 'xray', name: 'Trojan', securities: ['tls', 'reality'], transports: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, certModes: ['ip', 'domain', 'custom'] },
   shadowsocks: { core: 'xray', name: 'Shadowsocks-2022', securities: ['none'], transports: ['tcp'], relay: true, certModes: [] },
-  hysteria2: { core: 'sing-box', name: 'Hysteria2', securities: ['tls'], transports: [], udp: true, relay: false, certModes: ['self', 'ip', 'domain', 'custom'] },
+  hysteria2: { core: 'sing-box', name: 'Hysteria2', securities: ['tls'], transports: [], udp: true, relay: true, natRelay: true, certModes: ['self', 'ip', 'domain', 'custom'] },
   mtproto: { core: 'telemt', name: 'MTProto (Telegram)', securities: ['none'], transports: [], relay: false, certModes: [] },
 };
 
@@ -134,7 +139,8 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     hy2HopInterval: raw.hy2HopInterval ?? 30,
     mtDomain: raw.mtDomain || sni[0] || 'www.apple.com',
     sniffing: raw.sniffing ?? true,
-    autoEnabled: raw.autoEnabled ?? true,
+    // пересылка ядром ОС ведёт на один выход — выбирать нечего
+    autoEnabled: info.natRelay ? false : raw.autoEnabled ?? true,
     autoMode: raw.autoMode ?? 'smart',
     exitOrder: raw.exitOrder ?? [],
     maxRttMs: raw.maxRttMs ?? 100,
@@ -268,16 +274,23 @@ export function xrayOutbound(sp: Spec, ib: InboundRow, tag: string, address: str
 
 // ───── ссылки для клиентов ─────
 
+/** Имя в сертификате Hysteria2; через вход с сертификатом на IP — IP выхода (клиент подключается к адресу входа). */
+const hy2Sni = (sp: Spec, to: LinkTarget) => tlsServerName(sp, to.serverId) || (to.tlsHost && to.tlsHost !== to.host ? to.tlsHost : '');
+
 const hostForUri = (h: string) => (h.includes(':') && !h.startsWith('[') ? `[${h}]` : h);
 
-export interface LinkTarget { host: string; port: number; name: string; serverId: string; inbound: InboundRow }
+/**
+ * Куда подключается клиент. serverId и inbound — чей сертификат, ключи и пароли (у пересылки ядром — выхода);
+ * tlsHost — адрес этого сервера, если клиент подключается к другому (вход): по нему проверяется сертификат на IP.
+ */
+export interface LinkTarget { host: string; port: number; name: string; serverId: string; inbound: InboundRow; tlsHost?: string }
 
 export function link(sp: Spec, secret: string, to: LinkTarget): string {
   const tag = encodeURIComponent(to.name);
   const at = `${hostForUri(to.host)}:${to.port}`;
   const ib = to.inbound;
   if (sp.protocol === 'hysteria2') {
-    const sni = tlsServerName(sp, to.serverId);
+    const sni = hy2Sni(sp, to);
     const q = new URLSearchParams({
       ...(sni ? { sni } : {}),
       ...(sp.certMode === 'self' ? { insecure: '1', ...(ib.tls_pin ? { pinSHA256: ib.tls_pin } : {}) } : {}),
@@ -323,7 +336,7 @@ export function singboxOutbound(sp: Spec, secret: string, to: LinkTarget): Recor
   const base = { tag: to.name, server: to.host, server_port: to.port };
   if (sp.protocol === 'mtproto' || sp.transport === 'xhttp') return null;
   if (sp.protocol === 'hysteria2') {
-    const sni = tlsServerName(sp, to.serverId);
+    const sni = hy2Sni(sp, to);
     return {
       type: 'hysteria2', ...base, password: secret,
       tls: { enabled: true, ...(sni ? { server_name: sni } : {}), ...(sp.certMode === 'self' ? { insecure: true } : {}) },

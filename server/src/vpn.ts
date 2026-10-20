@@ -5,7 +5,7 @@ import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
 import { blockedDevices, limitRules } from './devices.js';
 import { blocksOf, needsSniff, singboxBlockRules, xrayBlockRules } from './blocks.js';
 import { spreadBal, spreadCaps, spreadChain, spreadGroupOf, spreadHomes, spreadLoop, spreadLoopIn } from './spread.js';
-import { certName, hopRange, hy2InboundExtra, link as protoLink, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
+import { certName, hopRange, hy2InboundExtra, link as protoLink, PROTOCOLS, type LinkTarget, probePort, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
   if (!s) return fallback;
@@ -22,6 +22,8 @@ export interface Profile {
   credKey: string;        // ключ учётных данных пользователя
   inbound: InboundRow;    // inbound, к которому подключается клиент
   targetName: string;
+  /** пересылка ядром ОС (Hysteria2 через вход): сертификат, ключи и пароли — у inbound'а выхода */
+  exit?: { server: ServerRow; inbound: InboundRow };
 }
 
 /**
@@ -106,6 +108,14 @@ export class Vpn {
           out.push({ key: `d:${t.id}:${s.id}`, name: `${s.name} · ${L.direct}${suffix}`, mode: 'direct', template: t,
             host: s.host, port: ib.port, credKey: `t:${t.id}`, inbound: ib, targetName: s.name });
         }
+        if (ib.kind === 'relay' && modes.includes('via') && PROTOCOLS[this.spec(t).protocol].natRelay) {
+          // пересылка ядром ОС: один выход, клиент договаривается с его inbound'ом (пароль «вход → выход» знает выход)
+          const x = this.natExit(t);
+          if (x && this.userAllows(u, x.server.id, t.id))
+            out.push({ key: `v:${t.id}:${x.server.id}`, name: `${s.name} → ${x.server.name}${suffix}`, mode: 'via', template: t,
+              host: s.host, port: ib.port, credKey: `v:${t.id}:${x.server.id}`, inbound: ib, targetName: x.server.name, exit: x });
+          continue;
+        }
         if (ib.kind === 'relay' && modes.includes('via')) {
           const targets = this.relayTargets(t).filter((x) => this.userAllows(u, x.id, t.id));
           if (!targets.length) continue;
@@ -130,11 +140,22 @@ export class Vpn {
     return this.ctx.servers().filter((s) => s.id !== t.entry_id && active.has(s.id)).sort((a, b) => rank(a.id) - rank(b.id));
   }
 
+  /** Выход пересылки ядром ОС (Hysteria2 через вход): единственный direct-узел шаблона, кроме входа, с активным inbound'ом. */
+  natExit(t: TemplateRow): { server: ServerRow; inbound: InboundRow } | null {
+    const x = this.relayTargets(t)[0];
+    const xi = x && this.inbounds(`template_id = ? AND server_id = ? AND kind = 'direct' AND state = 'active'`, t.id, x.id)[0];
+    return x && xi ? { server: x, inbound: xi } : null;
+  }
+
   spec = (t: TemplateRow): Spec => specOf(t);
 
+  /** Адрес подключения профиля и чей inbound проверяет клиент (у пересылки ядром — выхода). */
+  target(p: Profile): LinkTarget {
+    return { host: p.host, port: p.port, name: p.name, serverId: (p.exit?.inbound ?? p.inbound).server_id, inbound: p.exit?.inbound ?? p.inbound, tlsHost: p.exit?.server.host };
+  }
+
   link(u: UserRow, p: Profile): string {
-    const sp = this.spec(p.template);
-    return protoLink(sp, this.cred(u.id, p.credKey), { host: p.host, port: p.port, name: p.name, serverId: p.inbound.server_id, inbound: p.inbound });
+    return protoLink(this.spec(p.template), this.cred(u.id, p.credKey), this.target(p));
   }
 
   // ───── рендер конфигов узла ─────
@@ -373,9 +394,15 @@ export class Vpn {
         const self = sp.sni[0] ?? 'localhost';
         return {
           type: 'hysteria2', tag: `in-${ib.id}`, listen: '::', listen_port: ib.port,
-          users: users
-            .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id) && !this.profileOff(u, `d:${t.id}:${server.id}`))
-            .map((u) => ({ name: `${u.id}.d-${t.id}`, password: this.cred(u.id, `t:${t.id}`) })),
+          users: [
+            ...users
+              .filter((u) => json<string[]>(u.modes, []).includes('direct') && server.direct_access && this.userAllows(u, server.id, t.id) && !this.profileOff(u, `d:${t.id}:${server.id}`))
+              .map((u) => ({ name: `${u.id}.d-${t.id}`, password: this.cred(u.id, `t:${t.id}`) })),
+            // «вход → этот выход»: вход пересылает UDP ядром ОС, пароль профиля проверяет сам выход
+            ...(t.entry_id && json<string[]>(t.node_ids, []).filter((id) => id !== t.entry_id)[0] === server.id ? users
+              .filter((u) => json<string[]>(u.modes, []).includes('via') && this.userAllows(u, server.id, t.id) && !this.profileOff(u, `v:${t.id}:${server.id}`))
+              .map((u) => ({ name: `${u.id}.v-${server.id}`, password: this.cred(u.id, `v:${t.id}:${server.id}`) })) : []),
+          ],
           ...hy2InboundExtra(sp),
           tls: {
             enabled: true, server_name: tlsServerName(sp, server.id) || self, alpn: ['h3'],
@@ -405,6 +432,26 @@ export class Vpn {
         return r ? [`${ib.port}:${r[0]}-${r[1]}`] : [];
       });
     return hops.join(',') || '-';
+  }
+
+  /**
+   * Пересылка ядром ОС на входе (Hysteria2 через вход): «порт[-конец]=IP выхода:порт inbound'а» через запятую;
+   * диапазон смены портов шаблона тоже ведёт на выход. '-' — пересылок нет.
+   */
+  hy2Relays(server: ServerRow): string {
+    const out: string[] = [];
+    for (const ib of this.inbounds(`server_id = ? AND state IN ('active','deploying') AND kind = 'relay'`, server.id)) {
+      const t = this.template(ib.template_id);
+      if (!t || !PROTOCOLS[this.spec(t).protocol].natRelay) continue;
+      const x = this.natExit(t);
+      if (!x) continue;
+      if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(x.server.host)) throw new Error(`${x.server.name}: для пересылки через вход нужен IPv4-адрес выхода, а не «${x.server.host}»`);
+      const to = `${x.server.host}:${x.inbound.port}`;
+      out.push(`${ib.port}=${to}`);
+      const r = hopRange(this.spec(t).hy2Hop);
+      if (r) out.push(`${r[0]}-${r[1]}=${to}`);
+    }
+    return out.join(',') || '-';
   }
 
   /** config.toml telemt (MTProto) для узла: на узле — одна MTProto-конфигурация (у неё свой домен маскировки). */
