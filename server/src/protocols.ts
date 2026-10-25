@@ -84,6 +84,16 @@ export interface Spec {
    * клиент по-прежнему подключается ко входу протоколом конфигурации. Пусто — без резерва.
    */
   hy2Leg: string;
+  /**
+   * «Эскадра» (VLESS): одна конфигурация — VLESS-вход, на выходах VLESS и Hysteria2, авто-выбор выхода и резерв по
+   * Hysteria2. Hysteria2 на выходах — служебная конфигурация-спутник (companionOf), её создаёт и выкатывает панель,
+   * hy2Leg указывает на неё. Настройки Hysteria2 (hy2Obfs, hy2Hop, полоса) задаются здесь и переносятся в спутник.
+   */
+  bundle: boolean;
+  /** «Эскадра»: UDP-порт Hysteria2 на выходах; 0 — тот же номер, что у VLESS (TCP и UDP не мешают друг другу) */
+  hy2Port: number;
+  /** Служебная Hysteria2 «Эскадры»: id конфигурации-владельца. Профилей и пользователей нет — только плечи входа. */
+  companionOf: string;
   mtDomain: string;          // MTProto fake-TLS: домен маскировки
   sniffing: boolean;
   /**
@@ -151,12 +161,16 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     hy2HopInterval: raw.hy2HopInterval ?? 30,
     hy2Relay: raw.hy2Relay === 'core' ? 'core' : 'nat',
     hy2Leg: info.core === 'xray' && info.relay ? raw.hy2Leg ?? '' : '',
+    bundle: protocol === 'vless' && !!raw.bundle,
+    hy2Port: raw.hy2Port ?? 0,
+    companionOf: protocol === 'hysteria2' ? raw.companionOf ?? '' : '',
     mtDomain: raw.mtDomain || sni[0] || 'www.apple.com',
     sniffing: raw.sniffing ?? true,
     // пересылка ядром ОС ведёт на один выход — выбирать нечего
     autoEnabled: info.natRelay && raw.hy2Relay !== 'core' ? false : raw.autoEnabled ?? true,
     // «по нагрузке» считает группы по счётчикам пользователей Xray — у Hysteria2 через вход пользователей различает sing-box
-    autoMode: protocol === 'hysteria2' && raw.autoMode === 'spread' ? 'order' : raw.autoMode ?? 'smart',
+    // «Эскадра» по умолчанию — по порядку: первый отвечающий выход, недоступен — следующий
+    autoMode: protocol === 'hysteria2' && raw.autoMode === 'spread' ? 'order' : raw.autoMode ?? (protocol === 'vless' && raw.bundle ? 'order' : 'smart'),
     exitOrder: raw.exitOrder ?? [],
     maxRttMs: raw.maxRttMs ?? 100,
     minMbps: raw.minMbps ?? 10,

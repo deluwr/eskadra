@@ -78,7 +78,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     // все варианты, какие дала бы конфигурация (без учёта выбора конфигураций и выключенных вариантов); on — включён ли
     const all = vpn.profiles({ ...u, template_ids: null, excluded_profiles: null });
     const off = json<string[]>(u.excluded_profiles, []);
-    return vpn.templates().map((t) => ({ id: t.id, name: t.name, allowed: !allowed || allowed.includes(t.id),
+    return vpn.userTemplates().map((t) => ({ id: t.id, name: t.name, allowed: !allowed || allowed.includes(t.id),
       profiles: all.filter((p) => p.template.id === t.id).map((p) => ({ key: p.key, name: p.name, on: !off.includes(p.key) })) }));
   };
   const getUser = (id: string) => {

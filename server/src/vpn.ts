@@ -45,6 +45,11 @@ export class Vpn {
     return this.db.prepare('SELECT * FROM templates ORDER BY created_at').all() as unknown as TemplateRow[];
   }
 
+  /** Конфигурации, которые выдаются пользователям: без служебной Hysteria2 «Эскадры» (она — часть своей конфигурации). */
+  userTemplates(): TemplateRow[] {
+    return this.templates().filter((t) => !this.spec(t).companionOf);
+  }
+
   inbounds(where = '1=1', ...args: string[]): InboundRow[] {
     return this.db.prepare(`SELECT * FROM inbounds WHERE ${where}`).all(...args) as unknown as InboundRow[];
   }
@@ -96,7 +101,8 @@ export class Vpn {
     const modes = json<string[]>(u.modes, ['direct', 'via']);
     const servers = new Map(this.ctx.servers().map((s) => [s.id, s]));
     const out: Profile[] = [];
-    const templates = this.templates();
+    // служебная Hysteria2 «Эскадры» — только плечи входа, своих профилей у неё нет
+    const templates = this.userTemplates();
     // имена профилей — на языке панели и с маршрутом: «de-1 · напрямую», «relay → de-1», «relay → авто»
     const L = getSetting<string>(this.db, 'ui.lang', 'ru') === 'en' ? { direct: 'direct', auto: 'auto' } : { direct: 'напрямую', auto: 'авто' };
     for (const t of templates) {
@@ -487,6 +493,9 @@ export class Vpn {
         }
         relayRules.push({ inbound: [`in-${ib.id}`], action: 'reject' });
         list.push({ name: 'svc.panel', password: this.svcCred(`hy:${t.id}:${server.id}`) });
+      } else if (sp.companionOf) {
+        // служебная Hysteria2 «Эскадры»: пользователи сюда не подключаются, только плечи входа
+        list = this.hy2SvcUsers(t, server);
       } else {
         list = [
           ...users

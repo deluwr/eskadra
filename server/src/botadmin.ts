@@ -170,7 +170,7 @@ export class AdminFlows {
         const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
         if (act === 'utpl' && args[1]) {
           if (!this.may(a, 'users.edit', { template: args[1] })) return toast('Эта конфигурация вне вашей роли').then(() => true);
-          const all = this.vpn().templates().map((t) => t.id);
+          const all = this.vpn().userTemplates().map((t) => t.id);
           const cur = json<string[] | null>(u.template_ids, null) ?? all;
           const next = cur.includes(args[1]) ? cur.filter((x) => x !== args[1]) : [...cur, args[1]];
           const val = all.every((n) => next.includes(n)) ? null : next;
@@ -306,7 +306,7 @@ export class AdminFlows {
     const tpls = json<string[] | null>(u.template_ids, null);
     const vpn = this.vpn();
     const all = vpn.profiles({ ...u, template_ids: null });
-    const list = vpn.templates();
+    const list = vpn.userTemplates();
     const lines = list.map((t) => {
       const ps = all.filter((p) => p.template.id === t.id).map((p) => p.name);
       return `<b>${esc(t.name)}</b>: ${ps.length ? esc(ps.slice(0, 6).join(', ')) + (ps.length > 6 ? ` и ещё ${ps.length - 6}` : '') : 'профилей нет'}`;

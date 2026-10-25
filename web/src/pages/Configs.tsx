@@ -9,13 +9,15 @@ const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', �
 export const slugName = (v: string) => v.toLowerCase().split('').map((c) => TRANSLIT[c] ?? c).join('')
   .replace(/[\s_.]+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-/, '').slice(0, 48);
 
-type Protocol = 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'mtproto';
+/** eskadra — только в интерфейсе: VLESS-конфигурация с bundle (вход, VLESS и Hysteria2 на выходах, авто-выбор и резерв) */
+type Protocol = 'eskadra' | 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'mtproto';
 type Security = 'reality' | 'tls' | 'none';
 type Transport = 'tcp' | 'ws' | 'grpc' | 'xhttp' | 'httpupgrade';
 type CertMode = 'ip' | 'domain' | 'custom' | 'self';
 
 /** Что поддерживает протокол (как в protocols.ts на сервере). */
 const PROTO: Record<Protocol, { name: string; hint: string; core: string; sec: Security[]; tr: Transport[]; udp?: boolean; relay: boolean; natRelay?: boolean; cert: CertMode[]; port: string }> = {
+  eskadra: { name: 'Эскадра', hint: 'всё в одной конфигурации: пользователи подключаются ко входу по VLESS, на выходах VLESS и Hysteria2, вход сам выбирает выход по порядку и переходит на Hysteria2, если VLESS до выхода не отвечает', core: 'Xray + sing-box', sec: ['reality', 'tls'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   vless: { name: 'VLESS', hint: 'основной вариант: REALITY без своего сертификата, или TLS', core: 'Xray', sec: ['reality', 'tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   vmess: { name: 'VMess', hint: 'для старых клиентов; обычно поверх WebSocket + TLS', core: 'Xray', sec: ['tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   trojan: { name: 'Trojan', hint: 'похож на обычный HTTPS; TLS или REALITY', core: 'Xray', sec: ['tls', 'reality'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
@@ -44,7 +46,7 @@ interface Settings {
   hy2UpMbps: number; hy2DownMbps: number; hy2ServerUpMbps: number; hy2ServerDownMbps: number; hy2IgnoreClientBw: boolean; hy2Masquerade: string; hy2Hop: string; hy2HopInterval: number;
   autoEnabled: boolean; autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
   spreadGroups: number; exitCapMbps: Record<string, number>; spreadHighPct: number; spreadFair: boolean;
-  hy2Relay: 'nat' | 'core'; hy2Leg: string;
+  hy2Relay: 'nat' | 'core'; hy2Leg: string; hy2Port: number;
 }
 
 interface Draft {
@@ -57,12 +59,12 @@ interface Draft {
 const randomHex = (n: number) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 const defaults = (p: Protocol): Settings => ({
-  security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
+  security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' || p === 'eskadra' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
   hy2UpMbps: 0, hy2DownMbps: 0, hy2ServerUpMbps: 0, hy2ServerDownMbps: 0, hy2IgnoreClientBw: false, hy2Masquerade: '', hy2Hop: '', hy2HopInterval: 30,
-  autoEnabled: !PROTO[p].natRelay, autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
-  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '',
+  autoEnabled: !PROTO[p].natRelay, autoMode: p === 'eskadra' ? 'order' : 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
+  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '', hy2Port: 0,
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -70,18 +72,21 @@ const empty = (p: Protocol = 'vless'): Draft => ({
   st: defaults(p), certPem: '', keyPem: '',
 });
 
+const protoOf = (t: Template): Protocol => (t.spec.bundle ? 'eskadra' : t.spec.protocol);
+
 const toDraft = (t: Template): Draft => ({
-  id: t.id, name: t.name, protocol: t.spec.protocol, port: String(t.port), sni: t.sni.join(' '), fingerprint: t.fingerprint, ech: t.ech,
+  id: t.id, name: t.name, protocol: protoOf(t), port: String(t.port), sni: t.sni.join(' '), fingerprint: t.fingerprint, ech: t.ech,
   nodeIds: t.node_ids, entryId: t.entry_id ?? '', entryPort: String(t.entry_port ?? 9443),
-  st: { ...defaults(t.spec.protocol), ...t.spec } as Settings, certPem: '', keyPem: '',
+  st: { ...defaults(protoOf(t)), ...t.spec } as Settings, certPem: '', keyPem: '',
 });
 
 /** Краткое описание шаблона для списка: «VLESS · REALITY · TCP». */
 const describe = (t: Template) => {
   const sp = t.spec;
-  const parts = [PROTO[sp.protocol]?.name ?? sp.protocol];
-  if (PROTO[sp.protocol]?.sec.length > 1 || sp.security === 'tls') parts.push(SEC_LABEL[sp.security]);
-  if (PROTO[sp.protocol]?.tr.length > 1) parts.push(TR_LABEL[sp.transport]);
+  const p = protoOf(t);
+  const parts = [p === 'eskadra' ? 'Эскадра · VLESS + Hysteria2' : PROTO[p]?.name ?? p];
+  if (PROTO[p]?.sec.length > 1 || sp.security === 'tls') parts.push(SEC_LABEL[sp.security]);
+  if (PROTO[p]?.tr.length > 1) parts.push(TR_LABEL[sp.transport]);
   return parts.join(' · ');
 };
 
@@ -219,6 +224,9 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   const { busy, error, run } = useAsync();
   const managed = servers.filter((s) => s.sudo_mode === 'restricted');
   const info = PROTO[d.protocol];
+  // «Эскадра» на сервере — VLESS-конфигурация с bundle
+  const esk = d.protocol === 'eskadra';
+  const vless = d.protocol === 'vless' || esk;
   const st = d.st;
   const setSt = (patch: Partial<Settings>) => setD({ ...d, st: { ...st, ...patch } });
   const tls = st.security === 'tls' || d.protocol === 'hysteria2';
@@ -274,11 +282,11 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   };
   const dirty = JSON.stringify(d) !== JSON.stringify(draft);
   const body = () => ({
-    name: d.name, protocol: d.protocol, port: Number(d.port), sni: d.sni.split(/[\s,]+/).filter(Boolean), fingerprint: d.fingerprint, ech: d.ech,
+    name: d.name, protocol: esk ? 'vless' : d.protocol, port: Number(d.port), sni: d.sni.split(/[\s,]+/).filter(Boolean), fingerprint: d.fingerprint, ech: d.ech,
     // серверы, которых уже нет в панели (удалены), не отправляем — иначе конфигурацию не сохранить
     nodeIds: d.nodeIds.filter((id) => servers.some((s) => s.id === id)), entryId: d.entryId && servers.some((s) => s.id === d.entryId) ? d.entryId : null, entryPort: d.entryId ? Number(d.entryPort) : null,
     settings: {
-      security: st.security, transport: st.transport, flow: st.transport === 'tcp' && st.security !== 'none' && d.protocol === 'vless' ? st.flow : '',
+      security: st.security, transport: st.transport, flow: st.transport === 'tcp' && st.security !== 'none' && vless ? st.flow : '',
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
@@ -288,6 +296,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
       spreadGroups: Math.min(16, Math.max(2, Number(st.spreadGroups) || 6)), spreadHighPct: Math.min(95, Math.max(30, Number(st.spreadHighPct) || 80)), spreadFair: st.spreadFair,
       exitCapMbps: Object.fromEntries(exits.map((s) => [s.id, Number(st.exitCapMbps[s.id]) || 0])),
       hy2Relay: st.hy2Relay, hy2Leg: d.entryId && info.core === 'Xray' && info.relay ? st.hy2Leg : '',
+      bundle: esk, hy2Port: esk ? Number(st.hy2Port) || 0 : 0,
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -427,7 +436,8 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
                 <span className="k">{d.entryId ? 'Relay (вход)' : 'Пользователи'}</span>
                 {info.relay ? (
                   <select className="inp" value={d.entryId} onChange={(e) => { const v = e.target.value; setD({ ...d, entryId: v, nodeIds: v && nat ? d.nodeIds.filter((x) => x !== v).slice(0, 1) : d.nodeIds }); }} aria-label="Сервер-вход">
-                    <option value="">напрямую</option>
+                    {/* у «Эскадры» вход обязателен: пользователи подключаются к нему */}
+                    <option value="">{esk ? 'выберите вход' : 'напрямую'}</option>
                     {managed.map((s) => <option key={s.id} value={s.id}>через {s.name}</option>)}
                   </select>
                 ) : <span className="small">напрямую <Info>{info.name} не пересылается через вход.</Info></span>}
@@ -453,7 +463,8 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
             onMove={(id, dir) => move(exits.findIndex((x) => x.id === id), dir)}
           />
         )}
-        {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}: {i.error}</div>)}
+        {esk && !d.entryId && <div className="alert warn small">«Эскадра» работает через вход: выберите сервер-вход слева, выходы — справа.</div>}
+        {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}{i.kind === 'hy2' ? ' (Hysteria2)' : ''}: {i.error}</div>)}
         {d.entryId && info.relay && info.core === 'Xray' && (
           <label className="fld" style={{ maxWidth: '68ch' }}><span>Резервное плечо вход → выход <Info>Если основное плечо от входа до выхода (протокол этой конфигурации) перестаёт отвечать — например, его режут между серверами, — вход за ~10 секунд ведёт трафик этого выхода по Hysteria2 и сам возвращается, когда основное снова отвечает. Пользователи по-прежнему подключаются ко входу по этой конфигурации, ссылки не меняются. Нужна конфигурация Hysteria2 на тех же выходах; выходы без неё работают как раньше. На входе дополнительно запускается sing-box.</Info></span>
             <select className="inp" value={st.hy2Leg} onChange={(e) => setSt({ hy2Leg: e.target.value })}>
@@ -533,6 +544,17 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
         )}
       </div>
 
+      {esk && (
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="k">Hysteria2 на выходах — резерв <Info>На каждом выходе рядом с VLESS работает Hysteria2. Пользователям она не выдаётся: через неё вход ведёт трафик выхода, если VLESS между входом и выходом перестал отвечать (переключение ~10 секунд, возврат — сам). Выкатывается и снимается вместе с этой конфигурацией. Порт UDP — пусто или 0: тот же номер, что у VLESS (TCP и UDP не мешают друг другу).</Info></span>
+          <div className="grid g3">
+            <label className="fld">Порт Hysteria2 (UDP)<input className="inp mono" inputMode="numeric" value={st.hy2Port || ''} placeholder={d.port || '8443'} onChange={(e) => setSt({ hy2Port: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+            <label className="fld"><span>Пароль obfs (salamander) <Info>Дополнительно маскирует QUIC между входом и выходом. Пусто — без obfs.</Info></span><span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ flex: 1 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" title="Случайный пароль obfs" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>Случайный</button></span></label>
+            <label className="fld"><span>Смена портов (port hopping) <Info>Диапазон UDP-портов на выходах, например 20000-30000: вход периодически меняет порт плеча. Мешает резать одно UDP-соединение. Пусто — один порт.</Info></span><input className="inp mono" value={st.hy2Hop} onChange={(e) => setSt({ hy2Hop: e.target.value })} placeholder="20000-30000" /></label>
+          </div>
+        </div>
+      )}
+
       {d.protocol === 'hysteria2' && (
         <div className="stack" style={{ gap: 8 }}>
           <span className="k">Скорость клиента <Info>Вшивается в подписку sing-box и в ссылку. С указанной полосой клиент включает Brutal: скорость держится и при потерях на плече между странами. Без неё Hysteria2 сбрасывает скорость от потерь — бывает в 10–15 раз медленнее. Ставьте чуть ниже реального канала пользователя; 0 — клиент решает сам. Полосу из ссылки понимают не все клиенты — в остальных укажите её в настройках вручную.</Info></span>
@@ -565,7 +587,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
             )}
             {st.transport === 'grpc' && <label className="fld">Имя сервиса gRPC<input className="inp mono" value={st.serviceName} onChange={(e) => setSt({ serviceName: e.target.value.trim() })} /></label>}
             <div className="grid g3">
-              {d.protocol === 'vless' && st.transport === 'tcp' && st.security !== 'none' && (
+              {vless && st.transport === 'tcp' && st.security !== 'none' && (
                 <label className="fld">Flow<select className="inp" value={st.flow} onChange={(e) => setSt({ flow: e.target.value })}><option value="xtls-rprx-vision">xtls-rprx-vision</option><option value="">нет</option></select></label>
               )}
               {st.security !== 'none' && d.protocol !== 'hysteria2' && (
