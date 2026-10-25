@@ -44,6 +44,7 @@ interface Settings {
   hy2UpMbps: number; hy2DownMbps: number; hy2ServerUpMbps: number; hy2ServerDownMbps: number; hy2IgnoreClientBw: boolean; hy2Masquerade: string; hy2Hop: string; hy2HopInterval: number;
   autoEnabled: boolean; autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
   spreadGroups: number; exitCapMbps: Record<string, number>; spreadHighPct: number; spreadFair: boolean;
+  hy2Relay: 'nat' | 'core'; hy2Leg: string;
 }
 
 interface Draft {
@@ -61,7 +62,7 @@ const defaults = (p: Protocol): Settings => ({
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
   hy2UpMbps: 0, hy2DownMbps: 0, hy2ServerUpMbps: 0, hy2ServerDownMbps: 0, hy2IgnoreClientBw: false, hy2Masquerade: '', hy2Hop: '', hy2HopInterval: 30,
   autoEnabled: !PROTO[p].natRelay, autoMode: 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
-  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false,
+  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '',
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -113,7 +114,7 @@ export function ConfigsPage() {
         {!templates?.length && <p className="k" style={{ padding: 8 }}>Конфигураций пока нет.</p>}
       </section>
       <div className="stack" style={{ gap: 20 }}>
-        {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current} onServers={() => void reloadServers()}
+        {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current} templates={templates ?? []} onServers={() => void reloadServers()}
           onSaved={(t) => { void reload(); setDraft(toDraft(t)); }} onRollout={(id) => setJobId(id)} onDeleted={() => { setDraft(null); void reload(); }} />}
         {jobId && <JobLog id={jobId} onDone={() => void reload()} />}
         {current?.entry_id && current.spec.autoEnabled !== false && current.spec.autoMode !== 'random' && <ExitHealth t={current} />}
@@ -210,8 +211,8 @@ export function CoresPanel() {
   );
 }
 
-function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDeleted }: {
-  draft: Draft; servers: Server[]; current: Template | null; onServers: () => void; onSaved: (t: Template) => void; onRollout: (jobId: number) => void; onDeleted: () => void;
+function Editor({ draft, servers, current, templates, onServers, onSaved, onRollout, onDeleted }: {
+  draft: Draft; servers: Server[]; current: Template | null; templates: Template[]; onServers: () => void; onSaved: (t: Template) => void; onRollout: (jobId: number) => void; onDeleted: () => void;
 }) {
   const [d, setD] = useState(draft);
   useEffect(() => setD(draft), [draft]);   // после сохранения — то, что вернул сервер
@@ -286,6 +287,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
       autoEnabled: st.autoEnabled, autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0, speedEveryMin: Number(st.speedEveryMin) || 1, decideMin: Number(st.decideMin) || 1,
       spreadGroups: Math.min(16, Math.max(2, Number(st.spreadGroups) || 6)), spreadHighPct: Math.min(95, Math.max(30, Number(st.spreadHighPct) || 80)), spreadFair: st.spreadFair,
       exitCapMbps: Object.fromEntries(exits.map((s) => [s.id, Number(st.exitCapMbps[s.id]) || 0])),
+      hy2Relay: st.hy2Relay, hy2Leg: d.entryId && info.core === 'Xray' && info.relay ? st.hy2Leg : '',
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -303,7 +305,10 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
   });
   const pending = !!current && current.applied_revision < current.revision;
   // Hysteria2 через вход: вход пересылает UDP ядром ОС на один выход — выбор одного
-  const oneExit = !!d.entryId && !!info.natRelay;
+  const nat = !!info.natRelay && st.hy2Relay !== 'core';
+  const oneExit = !!d.entryId && nat;
+  // резервное плечо вход → выход: Hysteria2-конфигурации, у которых есть хоть один из выходов этой
+  const legChoices = templates.filter((t) => t.spec.protocol === 'hysteria2' && t.id !== d.id && t.node_ids.some((id) => id !== d.entryId && d.nodeIds.includes(id)));
   const toggleNode = (id: string) => setD({ ...d, nodeIds: d.nodeIds.includes(id) ? d.nodeIds.filter((x) => x !== id) : oneExit && id !== d.entryId ? [id] : [...d.nodeIds, id] });
   const stateOf = (sid: string, kind: string) => current?.inbounds.find((i) => i.server_id === sid && i.kind === kind);
   const relayState = d.entryId ? stateOf(d.entryId, 'relay') : undefined;
@@ -421,7 +426,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
               <>
                 <span className="k">{d.entryId ? 'Relay (вход)' : 'Пользователи'}</span>
                 {info.relay ? (
-                  <select className="inp" value={d.entryId} onChange={(e) => { const v = e.target.value; setD({ ...d, entryId: v, nodeIds: v && info.natRelay ? d.nodeIds.filter((x) => x !== v).slice(0, 1) : d.nodeIds }); }} aria-label="Сервер-вход">
+                  <select className="inp" value={d.entryId} onChange={(e) => { const v = e.target.value; setD({ ...d, entryId: v, nodeIds: v && nat ? d.nodeIds.filter((x) => x !== v).slice(0, 1) : d.nodeIds }); }} aria-label="Сервер-вход">
                     <option value="">напрямую</option>
                     {managed.map((s) => <option key={s.id} value={s.id}>через {s.name}</option>)}
                   </select>
@@ -429,7 +434,12 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
                 {d.entryId && (
                   <>
                     <label className="flex small" style={{ gap: 8 }}>порт<input className="inp mono" style={{ width: 90, minHeight: 34 }} inputMode="numeric" value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} aria-label="Порт входа" /><button type="button" className="btn ghost sm" title="Случайный свободный порт на сервере-входе" onClick={async () => setD(await randomPorts('entry'))}>Случайный</button>{relayState && <Tag kind={relayState.state === 'active' ? 'ok' : relayState.state === 'error' ? 'fail' : 'warn'}>{STATE_LABEL[relayState.state] ?? relayState.state}</Tag>}</label>
-                    {info.natRelay
+                    {info.natRelay && (
+                      <Seg value={st.hy2Relay} label="Режим входа Hysteria2" onChange={(v) => setSt({ hy2Relay: v, autoEnabled: v === 'core' })}
+                        options={[['nat', 'пересылка'], ['core', 'ядра на входе']]} />
+                    )}
+                    {info.natRelay && !nat && <span className="small muted">несколько выходов, авто <Info>На входе работают sing-box и Xray: вход сам принимает Hysteria2 (его сертификат), выбирает выход так же, как у VLESS (по порядку, по качеству, случайно), и ведёт трафик на выход по Hysteria2. Нагрузка на вход выше, чем у пересылки; «по нагрузке» недоступно.</Info></span>}
+                    {nat
                       ? <span className="small muted">один выход <Info>Вход пересылает UDP на выход ядром системы (nft), без своего ядра VPN: клиент подключается к адресу входа, а договаривается с выходом — его сертификат, obfs и пароли. Поэтому выход один, без авто-выбора; диапазон смены портов тоже пересылается на выход. У выхода нужен IPv4-адрес.</Info></span>
                       : <label className="cb small" style={{ minHeight: 28 }}><input type="checkbox" checked={d.nodeIds.includes(d.entryId)} onChange={() => toggleNode(d.entryId)} />и сам принимает напрямую</label>}
                   </>
@@ -444,7 +454,16 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
           />
         )}
         {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}: {i.error}</div>)}
-        {d.entryId && info.relay && !info.natRelay && (
+        {d.entryId && info.relay && info.core === 'Xray' && (
+          <label className="fld" style={{ maxWidth: '68ch' }}><span>Резервное плечо вход → выход <Info>Если основное плечо от входа до выхода (протокол этой конфигурации) перестаёт отвечать — например, его режут между серверами, — вход за ~10 секунд ведёт трафик этого выхода по Hysteria2 и сам возвращается, когда основное снова отвечает. Пользователи по-прежнему подключаются ко входу по этой конфигурации, ссылки не меняются. Нужна конфигурация Hysteria2 на тех же выходах; выходы без неё работают как раньше. На входе дополнительно запускается sing-box.</Info></span>
+            <select className="inp" value={st.hy2Leg} onChange={(e) => setSt({ hy2Leg: e.target.value })}>
+              <option value="">нет</option>
+              {legChoices.map((t) => <option key={t.id} value={t.id}>Hysteria2 «{t.name}»</option>)}
+              {st.hy2Leg && !legChoices.some((t) => t.id === st.hy2Leg) && <option value={st.hy2Leg}>недоступна — выберите другую</option>}
+            </select>
+          </label>
+        )}
+        {d.entryId && info.relay && !nat && (
           <div className="stack" style={{ gap: 8 }}>
             <div className="flex" style={{ justifyContent: 'space-between', maxWidth: '68ch' }}>
               <span className="small"><b>Авто-выбор выхода на сервере</b> <Info>Включён — у пользователей есть профиль «вход → авто»: вход сам выбирает выход и переключает его, если тот перестал отвечать (режимы ниже). Выключен — только явные профили «вход → выход»: пользователь сам выбирает страну, вход не проверяет выходы и ничего не переключает. Выключение убирает «вход → авто» из подписок при следующем обновлении.</Info></span>
@@ -452,7 +471,7 @@ function Editor({ draft, servers, current, onServers, onSaved, onRollout, onDele
             </div>
             {st.autoEnabled && (<>
             <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
-            <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ['spread', 'по нагрузке'], ['random', 'случайно']]} />
+            <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ...(d.protocol === 'hysteria2' ? [] : [['spread', 'по нагрузке'] as [AutoMode, string]]), ['random', 'случайно']]} />
             <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}{st.autoMode === 'order' ? ' Порядок — стрелками на схеме.' : st.autoMode === 'spread' ? ' Порядок запасных выходов — стрелками на схеме.' : ''}</span>
             {st.autoMode === 'smart' && (
               <div className="grid g4">

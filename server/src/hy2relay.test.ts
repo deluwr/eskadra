@@ -27,7 +27,8 @@ function fixture(settings: Record<string, unknown> = { certMode: 'self', hy2Hop:
   const user = () => db.prepare('SELECT * FROM users WHERE id = ?').get(id) as unknown as UserRow;
   return { db, ctx, vpn: new Vpn(ctx), id, user };
 }
-const hyUsers = (cfg: any) => cfg.inbounds[0].users as Array<{ name: string; password: string }>;
+// служебные (svc.*) — свои у каждого inbound'а, здесь важны пользователи
+const hyUsers = (cfg: any) => (cfg.inbounds[0].users as Array<{ name: string; password: string }>).filter((x) => !x.name.startsWith('svc.'));
 
 test('Hysteria2 через вход: один профиль «вход → выход» без «авто», ссылка на вход, TLS и пароль — выхода', () => {
   const { vpn, ctx, id, user } = fixture();

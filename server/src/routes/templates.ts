@@ -7,7 +7,7 @@ import { audit } from '../lib/audit.js';
 import { medianSpeed, Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
 import { checkTemplateServers, roleOf, ScopeError } from '../roles.js';
-import { hopRange, PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
+import { hopRange, natRelayOf, PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
 
 const settingsBody = z.object({
   security: z.enum(['reality', 'tls', 'none']).optional(),
@@ -47,6 +47,8 @@ const settingsBody = z.object({
   exitCapMbps: z.record(z.string().max(64), z.number().min(0).max(100000)).optional(),
   spreadHighPct: z.number().int().min(30).max(95).optional(),
   spreadFair: z.boolean().optional(),
+  hy2Relay: z.enum(['nat', 'core']).optional(),
+  hy2Leg: z.string().max(64).optional(),
 }).default({});
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -107,22 +109,34 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     const missing = [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])].filter((id) => !ctx.servers().some((s) => s.id === id));
     if (missing.length) throw new HttpError(400, `в конфигурации серверы, которых уже нет в панели (${missing.join(', ')}) — обновите страницу`);
     const info = PROTOCOLS[b.protocol as Protocol];
+    const sp = specOf({ protocol: b.protocol, sni: JSON.stringify(b.sni), fingerprint: b.fingerprint, settings: JSON.stringify(b.settings) });
+    const nat = natRelayOf(sp);
     if (b.entryId) {
       if (!info.relay) throw new HttpError(400, `режим «через вход» не поддерживается для ${info.name}`);
       if (!b.entryPort) throw new HttpError(400, 'укажите порт входа');
-      if (info.natRelay) {
+      if (nat) {
         // вход пересылает UDP ядром ОС на один адрес — выход ровно один, и это не сам вход
         if (b.nodeIds.includes(b.entryId)) throw new HttpError(400, `${info.name} через вход: вход только пересылает трафик на выход — уберите «и сам принимает напрямую»`);
         if (b.nodeIds.length !== 1) throw new HttpError(400, `${info.name} через вход: выберите один выход`);
         const x = ctx.server(b.nodeIds[0]!);
         if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(x.host)) throw new HttpError(400, `${info.name} через вход: у выхода ${x.name} адрес должен быть IPv4 (сейчас «${x.host}»)`);
       }
+      if (sp.protocol === 'hysteria2' && !nat && b.settings.autoMode === 'spread')
+        throw new HttpError(400, 'Hysteria2 через вход: «по нагрузке» недоступно (пользователей на входе различает sing-box, а не Xray) — выберите «по порядку» или «по качеству»');
     }
-    const sp = specOf({ protocol: b.protocol, sni: JSON.stringify(b.sni), fingerprint: b.fingerprint, settings: JSON.stringify(b.settings) });
+    if (sp.hy2Leg) {
+      // резервное плечо Hysteria2: inbounds той конфигурации на выходах этой
+      const h = vpn.template(sp.hy2Leg);
+      if (!b.entryId) throw new HttpError(400, 'резервное плечо Hysteria2 — только для конфигурации через вход');
+      if (!h || specOf(h).protocol !== 'hysteria2') throw new HttpError(400, 'резервное плечо: выберите существующую конфигурацию Hysteria2');
+      const hNodes = json<string[]>(h.node_ids, []);
+      if (!b.nodeIds.some((id) => id !== b.entryId && hNodes.includes(id)))
+        throw new HttpError(400, `резервное плечо: у конфигурации «${h.name}» нет ни одного из выходов этой — добавьте их туда`);
+    }
     if (sp.security === 'reality' && !b.sni.length) throw new HttpError(400, 'для REALITY укажите сайт маскировки (SNI)');
     if (sp.transport === 'xhttp' && sp.protocol !== 'vless') throw new HttpError(400, 'XHTTP — только для VLESS');
     // у пересылки ядром ОС сертификат только на выходе
-    const certIds = [...b.nodeIds, ...(b.entryId && !info.natRelay ? [b.entryId] : [])];
+    const certIds = [...b.nodeIds, ...(b.entryId && !nat ? [b.entryId] : [])];
     if ((sp.security === 'tls' || sp.protocol === 'hysteria2') && sp.certMode === 'domain')
       for (const id of certIds)
         if (!sp.domains[id]) throw new HttpError(400, `укажите домен для сервера ${ctx.server(id).name}`);

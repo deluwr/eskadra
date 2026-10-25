@@ -19,7 +19,8 @@ export interface ProtocolInfo {
   core: Core; name: string; securities: Security[]; transports: Transport[]; udp?: boolean; relay: boolean; certModes: CertMode[];
   /**
    * «Через вход» без ядра на входе: вход пересылает UDP ядром ОС (nft DNAT, fleet-core hy2-relay) на один выход,
-   * клиент договаривается с inbound'ом выхода напрямую. Авто-выбора и балансировщиков нет.
+   * клиент договаривается с inbound'ом выхода напрямую. Авто-выбора и балансировщиков нет. Режим по умолчанию;
+   * hy2Relay = 'core' — на входе свои ядра, несколько выходов и авто-выбор (см. natRelayOf).
    */
   natRelay?: boolean;
 }
@@ -72,6 +73,17 @@ export interface Spec {
   hy2Hop: string;
   /** Hysteria2: клиент меняет порт из диапазона раз в столько секунд */
   hy2HopInterval: number;
+  /**
+   * Hysteria2 через вход: nat — вход пересылает UDP ядром ОС на один выход; core — на входе sing-box принимает
+   * Hysteria2 и отдаёт трафик Xray входа (балансировщики, авто-выбор), а тот ведёт его на выходы плечами Hysteria2.
+   */
+  hy2Relay: 'nat' | 'core';
+  /**
+   * Xray-конфигурация через вход: резервное плечо вход → выход по Hysteria2 — id Hysteria2-конфигурации, чьи inbounds
+   * стоят на выходах. Основное плечо (протокол конфигурации) не отвечает — вход ведёт трафик выхода по Hysteria2,
+   * клиент по-прежнему подключается ко входу протоколом конфигурации. Пусто — без резерва.
+   */
+  hy2Leg: string;
   mtDomain: string;          // MTProto fake-TLS: домен маскировки
   sniffing: boolean;
   /**
@@ -137,11 +149,14 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     hy2Masquerade: raw.hy2Masquerade ?? '',
     hy2Hop: raw.hy2Hop ?? '',
     hy2HopInterval: raw.hy2HopInterval ?? 30,
+    hy2Relay: raw.hy2Relay === 'core' ? 'core' : 'nat',
+    hy2Leg: info.core === 'xray' && info.relay ? raw.hy2Leg ?? '' : '',
     mtDomain: raw.mtDomain || sni[0] || 'www.apple.com',
     sniffing: raw.sniffing ?? true,
     // пересылка ядром ОС ведёт на один выход — выбирать нечего
-    autoEnabled: info.natRelay ? false : raw.autoEnabled ?? true,
-    autoMode: raw.autoMode ?? 'smart',
+    autoEnabled: info.natRelay && raw.hy2Relay !== 'core' ? false : raw.autoEnabled ?? true,
+    // «по нагрузке» считает группы по счётчикам пользователей Xray — у Hysteria2 через вход пользователей различает sing-box
+    autoMode: protocol === 'hysteria2' && raw.autoMode === 'spread' ? 'order' : raw.autoMode ?? 'smart',
     exitOrder: raw.exitOrder ?? [],
     maxRttMs: raw.maxRttMs ?? 100,
     minMbps: raw.minMbps ?? 10,
@@ -160,6 +175,25 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
 /** Локальный SOCKS-порт пробы выхода на входном узле (127.0.0.1): через него панель меряет задержку и скорость конкретного выхода. */
 export function probePort(templateId: string, exitId: string): number {
   return 62000 + (createHash('sha256').update(`${templateId}:${exitId}`).digest().readUInt16BE(0) % 3000);
+}
+
+/** Пересылка через вход ядром ОС (nft DNAT, один выход) — Hysteria2 в режиме nat. */
+export const natRelayOf = (sp: Pick<Spec, 'protocol' | 'hy2Relay'>) => !!PROTOCOLS[sp.protocol].natRelay && sp.hy2Relay !== 'core';
+
+/**
+ * Локальный SOCKS sing-box на входе (127.0.0.1) для плеча Hysteria2 к выходу: Xray входа отдаёт в него трафик
+ * плеча, sing-box ведёт его по Hysteria2 на inbound выхода.
+ */
+export function legPort(templateId: string, exitId: string): number {
+  return 59000 + (createHash('sha256').update(`leg:${templateId}:${exitId}`).digest().readUInt16BE(0) % 3000);
+}
+
+/**
+ * Локальный SOCKS Xray на входе (127.0.0.1) для Hysteria2 через вход (режим core): sing-box принимает клиента и
+ * отдаёт трафик сюда — по порту на каждый выход и один на «авто» (route — id выхода или 'auto').
+ */
+export function hinPort(inboundId: string, route: string): number {
+  return 56000 + (createHash('sha256').update(`hin:${inboundId}:${route}`).digest().readUInt16BE(0) % 3000);
 }
 
 /** Диапазон смены портов Hysteria2 «20000-30000» → [20000, 30000]; null — не задан или с ошибкой. */

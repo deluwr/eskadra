@@ -4,7 +4,7 @@ import { coreMode, foreignCore, panelPorts, type Ctx, type InboundRow, type Node
 import { getSetting, setSetting } from './db.js';
 import { json, orderBalancer, Vpn } from './vpn.js';
 import { releaseFor, type Core } from './releases.js';
-import { certName, probePort, PROTOCOLS, protoOf } from './protocols.js';
+import { certName, natRelayOf, probePort, PROTOCOLS, protoOf } from './protocols.js';
 import { blockedDevices, limitRules, updateDevices, userOfEmail } from './devices.js';
 import { parseHostStat } from './hoststats.js';
 import { parseAutoUserStats, counterDeltas, planSpread, SPREAD_COOLDOWN_MIN, spreadBal, spreadChain, spreadCaps, spreadGroupOf, spreadLayout, spreadLoop, parseLinkTest, type LinkTest, type SpreadExit, type SpreadGroup, type SpreadMove } from './spread.js';
@@ -272,7 +272,7 @@ export class Ops {
       ib.port = port;
     }
     // пересылка ядром ОС: на входе ни ядра, ни ключей, ни сертификата — всё у inbound'а выхода
-    if (kind === 'relay' && PROTOCOLS[sp.protocol].natRelay) return ib;
+    if (kind === 'relay' && natRelayOf(sp)) return ib;
     if (sp.security === 'reality' && !ib.private_key_sealed) {
       const out = coreMode(s) === 'xui' ? String(await this.xui(s, n, 'x25519')) : await n.must(['xray-x25519']);
       const priv = out.match(/^private=(\S+)/m)?.[1];
@@ -801,7 +801,7 @@ export class Ops {
       const core = PROTOCOLS[sp.protocol].core;
       const proto = protoOf(sp.protocol);
       // Hysteria2 через вход: вход только пересылает UDP ядром ОС — ядро VPN на нём не нужно, 3x-ui не мешает
-      const nat = kind === 'relay' && !!PROTOCOLS[sp.protocol].natRelay;
+      const nat = kind === 'relay' && natRelayOf(sp);
       const bad = this.lintPort(s, port, proto, t.id);
       if (bad) throw new Error(`${s.name}: ${bad}`);
       if (kind === 'relay' && !nat && coreMode(s) === 'xui')
