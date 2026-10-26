@@ -7,7 +7,7 @@ import { audit } from '../lib/audit.js';
 import { medianSpeed, Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
 import { checkTemplateServers, roleOf, ScopeError } from '../roles.js';
-import { hopRange, natRelayOf, PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
+import { hopRange, hy2Entry, natRelayOf, PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
 
 const settingsBody = z.object({
   security: z.enum(['reality', 'tls', 'none']).optional(),
@@ -51,6 +51,7 @@ const settingsBody = z.object({
   hy2Leg: z.string().max(64).optional(),
   bundle: z.boolean().optional(),
   hy2Port: z.number().int().min(0).max(65535).optional(),
+  entryProto: z.enum(['vless', 'hysteria2']).optional(),
 }).default({});
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -84,18 +85,18 @@ export function templateView(vpn: Vpn, t: TemplateRow) {
     hasCustomCert: !!ctx_hasCert(t),
     node_ids: json<string[]>(t.node_ids, []),
     ech: !!t.ech,
-    // у «Эскадры» — и inbounds её Hysteria2 на выходах (kind hy2): их состояние и ошибки видны в той же карточке
+    // у «eskadra» — и inbounds её Hysteria2 на выходах (kind hy2): их состояние и ошибки видны в той же карточке
     inbounds: [...vpn.inbounds('template_id = ?', t.id), ...(specOf(t).bundle ? companionOf(vpn, t.id).flatMap((c) => vpn.inbounds('template_id = ?', c.id).map((i) => ({ ...i, kind: 'hy2' as const }))) : [])]
       .map((i) => ({ id: i.id, server_id: i.server_id, kind: i.kind, port: i.port, proto: i.proto, state: i.state, error: i.error })),
   };
 }
 
-/** Служебная Hysteria2 «Эскадры» (0 или 1 шт.). */
+/** Служебная Hysteria2 «eskadra» (0 или 1 шт.). */
 const companionOf = (vpn: Vpn, ownerId: string) => vpn.templates().filter((c) => specOf(c).companionOf === ownerId);
 
 /**
- * Hysteria2 «Эскадры» на выходах: создать или обновить служебную конфигурацию по настройкам владельца и сослаться на
- * неё резервным плечом (hy2Leg). Выходы, убранные из «Эскадры», теряют её inbound при следующем выкате.
+ * Hysteria2 «eskadra» на выходах: создать или обновить служебную конфигурацию по настройкам владельца и сослаться на
+ * неё резервным плечом (hy2Leg). Выходы, убранные из «eskadra», теряют её inbound при следующем выкате.
  */
 export function syncCompanion(db: Ctx['db'], vpn: Vpn, t: TemplateRow): TemplateRow | null {
   const sp = specOf(t);
@@ -167,12 +168,14 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
       if (sp.protocol === 'hysteria2' && !nat && b.settings.autoMode === 'spread')
         throw new HttpError(400, 'Hysteria2 через вход: «по нагрузке» недоступно (пользователей на входе различает sing-box, а не Xray) — выберите «по порядку» или «по качеству»');
     }
-    // своя Hysteria2 «Эскадры» — служебная, её id сюда вписывает панель (syncCompanion)
+    // своя Hysteria2 «eskadra» — служебная, её id сюда вписывает панель (syncCompanion)
     const own = new Set([selfId ?? '', ...(selfId ? companionOf(vpn, selfId).map((c) => c.id) : [])]);
     if (b.settings.bundle) {
-      if (b.protocol !== 'vless') throw new HttpError(400, '«Эскадра» строится на VLESS');
-      if (!b.entryId) throw new HttpError(400, '«Эскадра»: выберите сервер-вход');
-      if (!b.nodeIds.some((id) => id !== b.entryId)) throw new HttpError(400, '«Эскадра»: выберите хотя бы один выход');
+      if (b.protocol !== 'vless') throw new HttpError(400, '«eskadra» строится на VLESS');
+      if (!b.entryId) throw new HttpError(400, '«eskadra»: выберите сервер-вход');
+      if (!b.nodeIds.some((id) => id !== b.entryId)) throw new HttpError(400, '«eskadra»: выберите хотя бы один выход');
+      if (sp.entryProto === 'hysteria2' && b.settings.autoMode === 'spread')
+        throw new HttpError(400, '«eskadra» со входом по Hysteria2: «по нагрузке» недоступно (пользователей на входе различает sing-box, а не Xray) — выберите «по порядку» или «по качеству»');
     } else if (sp.hy2Leg) {
       // резервное плечо Hysteria2: inbounds той конфигурации на выходах этой
       const h = vpn.template(sp.hy2Leg);
@@ -192,7 +195,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     if ((sp.security === 'tls' || sp.protocol === 'hysteria2') && sp.certMode === 'ip')
       for (const id of certIds)
         if (!/^[0-9.]+$|:/.test(ctx.server(id).host)) throw new HttpError(400, `сертификат на IP: у сервера ${ctx.server(id).name} адрес — домен; выберите «свой домен»`);
-    // у «Эскадры» Hysteria2 — на выходах (вход принимает VLESS)
+    // у «eskadra» Hysteria2 — на выходах (вход принимает VLESS)
     if (sp.protocol === 'hysteria2' || sp.bundle) {
       if (!sp.hy2UpMbps !== !sp.hy2DownMbps) throw new HttpError(400, 'полоса клиента: укажите и отдачу, и загрузку (или обе 0)');
       if (sp.hy2IgnoreClientBw && (sp.hy2ServerUpMbps || sp.hy2ServerDownMbps)) throw new HttpError(400, 'BBR на сервере несовместим с потолком полосы — уберите одно из двух');
@@ -201,7 +204,8 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
         if (!r) throw new HttpError(400, 'диапазон портов: от 1024 до 65535, начало меньше конца');
         if (r[1] - r[0] > 20000) throw new HttpError(400, 'диапазон портов: не больше 20000 портов');
         // UDP с диапазона уходит в этот inbound (через вход — и с входа на выход): порты других конфигураций и SSH внутри диапазона перестанут работать
-        for (const id of sp.bundle ? b.nodeIds.filter((x) => x !== b.entryId) : [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]) {
+        // у eskadra диапазон — на выходах, а при входе по Hysteria2 и на входе
+        for (const id of sp.bundle && !hy2Entry(sp) ? b.nodeIds.filter((x) => x !== b.entryId) : [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]) {
           const s = ctx.server(id);
           const ssh = json<number[]>(s.ssh_ports, []).find((p) => p >= r[0] && p <= r[1]);
           if (ssh) throw new HttpError(400, `диапазон портов задевает SSH ${ssh} на сервере ${s.name}`);
@@ -216,7 +220,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     }
   };
 
-  /** Служебную Hysteria2 «Эскадры» меняют, выкатывают и снимают только вместе с её конфигурацией. */
+  /** Служебную Hysteria2 «eskadra» меняют, выкатывают и снимают только вместе с её конфигурацией. */
   const notCompanion = (t: TemplateRow) => {
     const owner = specOf(t).companionOf;
     if (owner) throw new HttpError(409, `«${t.name}» — часть конфигурации «${vpn.template(owner)?.name ?? owner}»: меняйте и выкатывайте её`);
@@ -224,7 +228,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
 
   const scoped = (f: () => void) => { try { f(); } catch (e) { if (e instanceof ScopeError) throw new HttpError(403, e.message); throw e; } };
 
-  // служебная Hysteria2 «Эскадры» — часть своей конфигурации, отдельно не показывается
+  // служебная Hysteria2 «eskadra» — часть своей конфигурации, отдельно не показывается
   app.get('/api/v1/templates', async () => vpn.userTemplates().map((t) => templateView(vpn, t)));
 
   /**
@@ -381,7 +385,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     // выкат идёт в фоне; UI опрашивает задачу
     void (async () => {
       try {
-        // «Эскадра»: сначала Hysteria2 на выходах (резервные плечи), затем VLESS на выходах и вход
+        // «eskadra»: сначала Hysteria2 на выходах (резервные плечи), затем VLESS на выходах и вход
         const hy2 = syncCompanion(db, vpn, vpn.template(t.id)!);
         if (hy2 && specOf(vpn.template(t.id)!).bundle) {
           job.log(`Hysteria2 на выходах («${hy2.name}»)`);
@@ -412,7 +416,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     notCompanion(t);
     const job = startJob(ctx, null, `remove:${t.name}`);
     await ops.removeTemplate(t, job.log);
-    // вместе с «Эскадрой» снимается её Hysteria2 (после VLESS: плечи входа уже убраны)
+    // вместе с «eskadra» снимается её Hysteria2 (после VLESS: плечи входа уже убраны)
     for (const c of companionOf(vpn, t.id)) await ops.removeTemplate(c, job.log);
     job.finish('ok');
     audit(db, req.admin!.username, 'template.delete', t.id);

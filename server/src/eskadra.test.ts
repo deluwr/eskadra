@@ -11,7 +11,7 @@ import { kitVersion } from './nodekit.js';
 import { specOf } from './protocols.js';
 import { saveUser, userBody } from './routes/users.js';
 
-/** «Эскадра»: вход ru, выходы pl и fi — VLESS REALITY на входе и выходах, Hysteria2 на выходах, авто по порядку. */
+/** «eskadra»: вход ru, выходы pl и fi — VLESS REALITY на входе и выходах, Hysteria2 на выходах, авто по порядку. */
 async function fixture() {
   const db = openDb(fs.mkdtempSync(path.join(os.tmpdir(), 'esk-bundle-')));
   const ctx = new Ctx(db, new Sealer(Buffer.alloc(32, 9)));
@@ -31,7 +31,7 @@ async function fixture() {
   return { db, ctx, app, vpn, base, id, user, all };
 }
 
-test('«Эскадра»: одна конфигурация создаёт служебную Hysteria2 на выходах и ссылается на неё резервом', async () => {
+test('«eskadra»: одна конфигурация создаёт служебную Hysteria2 на выходах и ссылается на неё резервом', async () => {
   const { app, vpn, base, all } = await fixture();
   const r = await app.inject({ method: 'POST', url: '/api/v1/templates', payload: base });
   assert.equal(r.statusCode, 200, r.body);
@@ -50,7 +50,7 @@ test('«Эскадра»: одна конфигурация создаёт сл�
   assert.equal(hsp.hy2Obfs, 'ob');
   assert.equal(hsp.hy2Hop, '20000-21000');
   assert.equal(specOf(vpn.template(esk.id)!).hy2Leg, hy.id);
-  // в списке конфигураций — одна «Эскадра»
+  // в списке конфигураций — одна «eskadra»
   const list = (await app.inject({ method: 'GET', url: '/api/v1/templates' })).json();
   assert.deepEqual(list.map((t: any) => t.id), [esk.id]);
   // служебную отдельно не меняют
@@ -60,7 +60,7 @@ test('«Эскадра»: одна конфигурация создаёт сл�
   await app.close();
 });
 
-test('«Эскадра»: изменения переносятся в Hysteria2; убранный выход теряет её inbound', async () => {
+test('«eskadra»: изменения переносятся в Hysteria2; убранный выход теряет её inbound', async () => {
   const { app, db, base, all } = await fixture();
   const esk = (await app.inject({ method: 'POST', url: '/api/v1/templates', payload: base })).json();
   const hy = () => all().find((t) => specOf(t).companionOf === esk.id)!;
@@ -80,7 +80,7 @@ test('«Эскадра»: изменения переносятся в Hysteria2
   await app.close();
 });
 
-test('«Эскадра»: пользователь видит только VLESS-профили; Hysteria2 на выходе — только плечо входа', async () => {
+test('«eskadra»: пользователь видит только VLESS-профили; Hysteria2 на выходе — только плечо входа', async () => {
   const { app, db, vpn, ctx, base, user, all } = await fixture();
   const esk = (await app.inject({ method: 'POST', url: '/api/v1/templates', payload: base })).json();
   const hy = all().find((t) => specOf(t).companionOf === esk.id)!;
@@ -108,7 +108,7 @@ test('«Эскадра»: пользователь видит только VLESS
   await app.close();
 });
 
-test('«Эскадра»: проверка — только VLESS со входом и хотя бы одним выходом', async () => {
+test('«eskadra»: проверка — только VLESS со входом и хотя бы одним выходом', async () => {
   const { app, base } = await fixture();
   const save = (over: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/templates', payload: { ...base, ...over } });
   assert.match((await save({ name: 'a', entryId: null, entryPort: null })).body, /выберите сервер-вход/);
@@ -118,7 +118,7 @@ test('«Эскадра»: проверка — только VLESS со вход�
   await app.close();
 });
 
-test('«Эскадра»: выкат — сначала Hysteria2 на выходах, затем VLESS и вход; удаление снимает обе', async () => {
+test('«eskadra»: выкат — сначала Hysteria2 на выходах, затем VLESS и вход; удаление снимает обе', async () => {
   const { app, ctx, db, base, all } = await fixture();
   const esk = (await app.inject({ method: 'POST', url: '/api/v1/templates', payload: base })).json();
   const hyId = all().find((t) => specOf(t).companionOf === esk.id)!.id;
@@ -148,5 +148,128 @@ test('«Эскадра»: выкат — сначала Hysteria2 на выхо�
   assert.equal((db.prepare(`SELECT applied_revision FROM templates WHERE id = ?`).get(hyId) as { applied_revision: number }).applied_revision, 1);
   assert.equal((await app.inject({ method: 'DELETE', url: `/api/v1/templates/${esk.id}` })).statusCode, 200);
   assert.equal(all().length, 0, 'обе конфигурации сняты');
+  await app.close();
+});
+
+test('eskadra: «по нагрузке», скорость клиента и сайт маскировки — группы ведут на выходы с резервом, полоса и маскировка у Hysteria2', async () => {
+  const { app, db, vpn, ctx, base, all } = await fixture();
+  const settings = { ...base.settings, autoMode: 'spread', spreadGroups: 4, hy2UpMbps: 50, hy2DownMbps: 200, hy2Masquerade: 'https://www.apple.com/' };
+  const r = await app.inject({ method: 'POST', url: '/api/v1/templates', payload: { ...base, settings } });
+  assert.equal(r.statusCode, 200, r.body);
+  const esk = r.json();
+  assert.equal(esk.spec.autoMode, 'spread');
+  const hy = all().find((t) => specOf(t).companionOf === esk.id)!;
+  assert.equal(specOf(hy).hy2UpMbps, 50);
+  assert.equal(specOf(hy).hy2Masquerade, 'https://www.apple.com/');
+  const ib = (id: string, t: string, s: string, kind: string, proto: string, pub: string | null) =>
+    db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, public_key, short_id, tls_pin) VALUES (?, ?, ?, ?, 8443, ?, 'active', ?, 'aa', ?)`).run(id, t, s, kind, proto, pub, 'ab'.repeat(32));
+  ib('v-pl', esk.id, 'pl', 'direct', 'tcp', 'PUB'); ib('v-fi', esk.id, 'fi', 'direct', 'tcp', 'PUB'); ib('v-ru', esk.id, 'ru', 'relay', 'tcp', null);
+  ib('h-pl', hy.id, 'pl', 'direct', 'udp', null); ib('h-fi', hy.id, 'fi', 'direct', 'udp', null);
+  const x = vpn.renderXray(ctx.server('ru')) as any;
+  const groups = x.routing.balancers.filter((b: any) => b.tag.startsWith(`sg-${esk.id}-`));
+  assert.ok(groups.length >= 4, 'балансировщики групп «по нагрузке»');
+  // уровни групп выбирают из выходов to-…, а каждый выход — VLESS с резервом по Hysteria2
+  assert.ok(groups.every((b: any) => b.selector.every((s: string) => s.startsWith(`to-${esk.id}-`))));
+  assert.equal(x.outbounds.find((o: any) => o.tag === `to-${esk.id}-pl`).protocol, 'loopback');
+  assert.ok(x.routing.balancers.some((b: any) => b.tag === `fo-${esk.id}-pl`));
+  // полоса и маскировка: плечо входа — Brutal, inbound выхода — сайт маскировки
+  assert.equal((vpn.renderSingbox(ctx.server('ru')) as any).outbounds.find((o: any) => o.tag === `hy-${esk.id}-pl`).up_mbps, 50);
+  assert.equal((vpn.renderSingbox(ctx.server('pl')) as any).inbounds.find((i: any) => i.tag === 'in-h-pl').masquerade, 'https://www.apple.com/');
+  await app.close();
+});
+
+test('eskadra со входом по Hysteria2: клиенты — Hysteria2 ко входу, плечо — Hysteria2, резерв — VLESS', async () => {
+  const { app, db, vpn, ctx, base, id, user, all } = await fixture();
+  const r = await app.inject({ method: 'POST', url: '/api/v1/templates', payload: { ...base, settings: { ...base.settings, entryProto: 'hysteria2' } } });
+  assert.equal(r.statusCode, 200, r.body);
+  const esk = r.json();
+  assert.equal(esk.spec.entryProto, 'hysteria2');
+  const hy = all().find((t) => specOf(t).companionOf === esk.id)!;
+  const ib = (iid: string, t: string, s: string, kind: string, port: number, proto: string, pub: string | null, pin: string) =>
+    db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, public_key, short_id, tls_pin) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'aa', ?)`).run(iid, t, s, kind, port, proto, pub, pin);
+  ib('v-pl', esk.id, 'pl', 'direct', 8443, 'tcp', 'PUB', 'ab'.repeat(32)); ib('v-fi', esk.id, 'fi', 'direct', 8443, 'tcp', 'PUB', 'ab'.repeat(32));
+  ib('v-ru', esk.id, 'ru', 'relay', 9443, 'udp', null, 'cd'.repeat(32));
+  ib('h-pl', hy.id, 'pl', 'direct', 8443, 'udp', null, 'ab'.repeat(32)); ib('h-fi', hy.id, 'fi', 'direct', 8443, 'udp', null, 'ab'.repeat(32));
+
+  // ссылка «вход → авто» — Hysteria2 на вход: сертификат входа, obfs, смена портов
+  const auto = vpn.profiles(user()).find((p) => p.key === `v:${esk.id}:auto`)!;
+  const u = new URL(vpn.link(user(), auto).replace('hysteria2://', 'https://'));
+  assert.equal(u.hostname, '198.51.100.10');
+  assert.equal(u.port, '9443');
+  assert.equal(u.searchParams.get('pinSHA256'), 'cd'.repeat(32));
+  assert.equal(u.searchParams.get('sni'), 'www.apple.com');
+  assert.equal(u.searchParams.get('obfs-password'), 'ob');
+  assert.equal(decodeURIComponent(u.username), vpn.cred(id, `v:${esk.id}:auto`));
+  // напрямую к выходу — по-прежнему VLESS
+  assert.match(vpn.link(user(), vpn.profiles(user()).find((p) => p.key === `d:${esk.id}:pl`)!), /^vless:\/\//);
+
+  // sing-box входа принимает клиентов и раздаёт их в SOCKS Xray; плечи к выходам — тоже его
+  const sb = vpn.renderSingbox(ctx.server('ru')) as any;
+  const entry = sb.inbounds.find((i: any) => i.tag === 'in-v-ru');
+  assert.equal(entry.type, 'hysteria2');
+  assert.equal(entry.listen_port, 9443);
+  assert.deepEqual(entry.obfs, { type: 'salamander', password: 'ob' });
+  assert.equal(entry.users.find((x: any) => x.name === `${id}.a-${esk.id}`).password, vpn.cred(id, `v:${esk.id}:auto`));
+  assert.ok(sb.outbounds.some((o: any) => o.tag === 'hin-v-ru-auto'));
+  assert.ok(sb.outbounds.some((o: any) => o.tag === `hy-${esk.id}-pl`));
+  assert.match(vpn.hy2Hops(ctx.server('ru')), /9443:20000-21000/, 'смена портов — и на входе');
+
+  // Xray входа: VLESS-inbound'а нет, основное плечо — Hysteria2, резерв — VLESS
+  const x = vpn.renderXray(ctx.server('ru')) as any;
+  assert.ok(!x.inbounds.some((i: any) => i.tag === 'in-v-ru'));
+  assert.ok(x.routing.rules.some((rr: any) => rr.inboundTag?.[0] === 'hin-v-ru-auto' && rr.balancerTag === `bal-${esk.id}`));
+  for (const e of ['pl', 'fi']) {
+    const fo = x.routing.balancers.find((b: any) => b.tag === `fo-${esk.id}-${e}`);
+    assert.deepEqual(fo.selector, [`hy-${esk.id}-${e}`]);
+    assert.equal(fo.fallbackTag, `vl-${esk.id}-${e}`);
+    assert.equal(x.outbounds.find((o: any) => o.tag === `vl-${esk.id}-${e}`).protocol, 'vless');
+  }
+  assert.ok(x.burstObservatory.subjectSelector.includes(`hy-${esk.id}-`), 'проверяется основное плечо — Hysteria2');
+  assert.ok(!x.burstObservatory.subjectSelector.includes(`vl-${esk.id}-`));
+
+  // «по нагрузке» с входом по Hysteria2 — нельзя
+  assert.match((await app.inject({ method: 'POST', url: '/api/v1/templates', payload: { ...base, name: 'sp', port: 8450, entryPort: 9450, settings: { ...base.settings, entryProto: 'hysteria2', autoMode: 'spread' } } })).body, /по нагрузке/);
+  await app.close();
+});
+
+test('eskadra: смена входного протокола меняет порт входа TCP ↔ UDP и закрывает прежний', async () => {
+  const { app, db, ctx, base, vpn } = await fixture();
+  const esk = (await app.inject({ method: 'POST', url: '/api/v1/templates', payload: base })).json();
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, private_key_sealed, public_key) VALUES ('v-ru', ?, 'ru', 'relay', 9443, 'tcp', 'active', ?, 'PUB')`).run(esk.id, ctx.seal('PRIV'));
+  await app.inject({ method: 'PUT', url: `/api/v1/templates/${esk.id}`, payload: { ...base, settings: { ...base.settings, entryProto: 'hysteria2' } } });
+  const calls: string[] = [];
+  const n = {
+    op: async (a: (string | number)[]) => { calls.push(a.join(' ')); return { code: 0, stdout: a[0] === 'singbox-tls' ? `pin=${'ef'.repeat(32)}` : '', stderr: '' }; },
+    must: async (a: (string | number)[]) => (await n.op(a)).stdout,
+    stage: async () => 'sha',
+  };
+  const { Ops } = await import('./ops.js');
+  const ib = await new Ops(ctx).ensureInbound(vpn.template(esk.id)!, ctx.server('ru'), 'relay', n as never);
+  assert.equal(ib.proto, 'udp');
+  assert.equal(ib.tls_pin, 'ef'.repeat(32), 'на входе выпущен сертификат Hysteria2');
+  assert.ok(calls.includes('port-close tcp 9443'), 'прежний TCP-порт закрыт');
+  assert.ok(calls.includes('singbox-tls www.apple.com'));
+  await app.close();
+});
+
+test('eskadra: потолок на клиента и BBR — на Hysteria2 выходов и входа; вместе их не задать', async () => {
+  const { app, db, vpn, ctx, base, all } = await fixture();
+  const r = await app.inject({ method: 'POST', url: '/api/v1/templates', payload: { ...base, settings: { ...base.settings, entryProto: 'hysteria2', hy2ServerUpMbps: 300, hy2ServerDownMbps: 100 } } });
+  assert.equal(r.statusCode, 200, r.body);
+  const esk = r.json();
+  const hy = all().find((t) => specOf(t).companionOf === esk.id)!;
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, tls_pin) VALUES ('h-pl', ?, 'pl', 'direct', 8443, 'udp', 'active', ?)`).run(hy.id, 'ab'.repeat(32));
+  db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, tls_pin) VALUES ('v-ru', ?, 'ru', 'relay', 9443, 'udp', 'active', ?)`).run(esk.id, 'cd'.repeat(32));
+  const exitIn = (vpn.renderSingbox(ctx.server('pl')) as any).inbounds.find((i: any) => i.tag === 'in-h-pl');
+  assert.equal(exitIn.up_mbps, 300, 'выход: потолок к клиенту (ко входу)');
+  assert.equal(exitIn.down_mbps, 100);
+  const entryIn = (vpn.renderSingbox(ctx.server('ru')) as any).inbounds.find((i: any) => i.tag === 'in-v-ru');
+  assert.equal(entryIn.up_mbps, 300, 'вход по Hysteria2: тот же потолок для пользователей');
+  // BBR вместо Brutal
+  const put = await app.inject({ method: 'PUT', url: `/api/v1/templates/${esk.id}`, payload: { ...base, settings: { ...base.settings, entryProto: 'hysteria2', hy2IgnoreClientBw: true } } });
+  assert.equal(put.statusCode, 200, put.body);
+  assert.equal((vpn.renderSingbox(ctx.server('pl')) as any).inbounds.find((i: any) => i.tag === 'in-h-pl').ignore_client_bandwidth, true);
+  assert.equal((vpn.renderSingbox(ctx.server('ru')) as any).inbounds.find((i: any) => i.tag === 'in-v-ru').ignore_client_bandwidth, true);
+  assert.match((await app.inject({ method: 'PUT', url: `/api/v1/templates/${esk.id}`, payload: { ...base, settings: { ...base.settings, hy2IgnoreClientBw: true, hy2ServerUpMbps: 300 } } })).body, /BBR/);
   await app.close();
 });

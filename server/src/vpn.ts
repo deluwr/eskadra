@@ -5,7 +5,7 @@ import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
 import { blockedDevices, limitRules } from './devices.js';
 import { blocksOf, needsSniff, singboxBlockRules, xrayBlockRules } from './blocks.js';
 import { spreadBal, spreadCaps, spreadChain, spreadGroupOf, spreadHomes, spreadLoop, spreadLoopIn } from './spread.js';
-import { certName, hinPort, hopRange, hy2InboundExtra, legPort, link as protoLink, natRelayOf, type LinkTarget, probePort, singboxOutbound, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
+import { certName, entrySpec, hinPort, hopRange, hy2Entry, hy2InboundExtra, legPort, link as protoLink, natRelayOf, type LinkTarget, probePort, singboxOutbound, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
 export const json = <T>(s: string | null | undefined, fallback: T): T => {
   if (!s) return fallback;
@@ -45,7 +45,7 @@ export class Vpn {
     return this.db.prepare('SELECT * FROM templates ORDER BY created_at').all() as unknown as TemplateRow[];
   }
 
-  /** Конфигурации, которые выдаются пользователям: без служебной Hysteria2 «Эскадры» (она — часть своей конфигурации). */
+  /** Конфигурации, которые выдаются пользователям: без служебной Hysteria2 «eskadra» (она — часть своей конфигурации). */
   userTemplates(): TemplateRow[] {
     return this.templates().filter((t) => !this.spec(t).companionOf);
   }
@@ -101,7 +101,7 @@ export class Vpn {
     const modes = json<string[]>(u.modes, ['direct', 'via']);
     const servers = new Map(this.ctx.servers().map((s) => [s.id, s]));
     const out: Profile[] = [];
-    // служебная Hysteria2 «Эскадры» — только плечи входа, своих профилей у неё нет
+    // служебная Hysteria2 «eskadra» — только плечи входа, своих профилей у неё нет
     const templates = this.userTemplates();
     // имена профилей — на языке панели и с маршрутом: «de-1 · напрямую», «relay → de-1», «relay → авто»
     const L = getSetting<string>(this.db, 'ui.lang', 'ru') === 'en' ? { direct: 'direct', auto: 'auto' } : { direct: 'напрямую', auto: 'авто' };
@@ -213,8 +213,13 @@ export class Vpn {
     return { host: p.host, port: p.port, name: p.name, serverId: (p.exit?.inbound ?? p.inbound).server_id, inbound: p.exit?.inbound ?? p.inbound, tlsHost: p.exit?.server.host };
   }
 
+  /** Настройки, по которым клиент подключается: через вход — настройки inbound'а входа (у eskadra это может быть Hysteria2). */
+  profileSpec(p: Profile): Spec {
+    return p.mode === 'direct' ? this.spec(p.template) : entrySpec(this.spec(p.template));
+  }
+
   link(u: UserRow, p: Profile): string {
-    return protoLink(this.spec(p.template), this.cred(u.id, p.credKey), this.target(p));
+    return protoLink(this.profileSpec(p), this.cred(u.id, p.credKey), this.target(p));
   }
 
   // ───── рендер конфигов узла ─────
@@ -252,7 +257,8 @@ export class Vpn {
       const sp = this.spec(t);
       // Hysteria2 через вход (core): sing-box входа отдаёт трафик сюда по локальным SOCKS — порт на выход и на «авто»;
       // пользователей различает sing-box, плечи к выходам — Hysteria2 через sing-box входа (entryLegs)
-      const hy = sp.protocol === 'hysteria2';
+      // то же у eskadra со входом по Hysteria2
+      const hy = ib.kind === 'relay' && (sp.protocol === 'hysteria2' || hy2Entry(sp));
       const hin = (route: string) => {
         const tag = `hin-${ib.id}-${route}`;
         inbounds.push({ tag, listen: '127.0.0.1', port: hinPort(ib.id, route), protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' },
@@ -273,15 +279,17 @@ export class Vpn {
         for (const { x, xi } of pairs) {
           const outTag = `to-${t.id}-${x.id}`;
           const leg = this.legTarget(t, x);
-          if (hy) outbounds.push(socksOut(outTag, legPort(t.id, x.id)));
+          if (sp.protocol === 'hysteria2') outbounds.push(socksOut(outTag, legPort(t.id, x.id)));
           else if (!leg) outbounds.push(relayLive(xrayOutbound(sp, xi, outTag, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id)));
           else {
-            // резервное плечо Hysteria2: выход — это loopback в балансировщик «основное плечо, если отвечает, иначе Hysteria2».
+            // два плеча: выход — это loopback в балансировщик «основное плечо, если отвечает, иначе резервное». Основное —
+            // протокол конфигурации, у eskadra — её входной протокол (VLESS или Hysteria2), резервное — другой.
             // Для «Авто», проб и явных «вход → выход» выход один (to-…) и жив, пока отвечает хоть одно плечо
             failover = true;
-            const main = `vl-${t.id}-${x.id}`, back = `hy-${t.id}-${x.id}`, lvl = `lg-${t.id}-${x.id}`, fo = `fo-${t.id}-${x.id}`;
-            outbounds.push(relayLive(xrayOutbound(sp, xi, main, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id)),
-              socksOut(back, legPort(t.id, x.id)), { tag: outTag, protocol: 'loopback', settings: { inboundTag: lvl } });
+            const vl = `vl-${t.id}-${x.id}`, hyLeg = `hy-${t.id}-${x.id}`, lvl = `lg-${t.id}-${x.id}`, fo = `fo-${t.id}-${x.id}`;
+            const [main, back] = hy2Entry(sp) ? [hyLeg, vl] : [vl, hyLeg];
+            outbounds.push(relayLive(xrayOutbound(sp, xi, vl, x.host, this.svcCred(`relay:${t.id}:${server.id}:${x.id}`), x.id)),
+              socksOut(hyLeg, legPort(t.id, x.id)), { tag: outTag, protocol: 'loopback', settings: { inboundTag: lvl } });
             balancers.push({ tag: fo, selector: [main], fallbackTag: back, strategy: { type: 'leastLoad', settings: { expected: 1, tolerance: 0.5 } } });
             rules.push({ type: 'field', inboundTag: [lvl], balancerTag: fo });
           }
@@ -296,8 +304,8 @@ export class Vpn {
           us.forEach((u, k) => clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:${x.id}`), emails[k]!)));
           if (emails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: emails, outboundTag: outTag });
         }
-        // основное плечо проверяется часто: не отвечает — трафик выхода за ~10 с уходит на Hysteria2 и возвращается сам
-        if (failover) { observed.push(`vl-${t.id}-`); fastObserve = true; }
+        // основное плечо проверяется часто: не отвечает — трафик выхода за ~10 с уходит на резервное и возвращается сам
+        if (failover) { observed.push(hy2Entry(sp) ? `hy-${t.id}-` : `vl-${t.id}-`); fastObserve = true; }
         // авто-выбор выхода выключен — ни клиентов «авто», ни балансировщиков, ни проверок выходов
         if (ready.length && sp.autoEnabled) {
           const autoUsers = via.auto.map((u) => u.id);
@@ -461,9 +469,13 @@ export class Vpn {
   /** Конфиг sing-box (Hysteria2) для узла. */
   renderSingbox(server: ServerRow): object | null {
     const blocks = blocksOf(this.db);
-    // relay — Hysteria2 через вход в режиме core (у пересылки ядром ОС на входе ядра нет)
+    // relay — Hysteria2 через вход в режиме core (у пересылки ядром ОС на входе ядра нет) и вход eskadra по Hysteria2
     const ibs = this.inbounds(`server_id = ? AND state IN ('active','deploying')`, server.id)
-      .filter((i) => { const t = this.template(i.template_id); return t?.core === 'sing-box' && (i.kind === 'direct' || !natRelayOf(this.spec(t))); });
+      .filter((i) => {
+        const t = this.template(i.template_id);
+        if (!t) return false;
+        return t.core === 'sing-box' ? i.kind === 'direct' || !natRelayOf(this.spec(t)) : i.kind === 'relay' && hy2Entry(this.spec(t));
+      });
     const legs = this.entryLegs(server);
     if (!ibs.length && !legs.length) return null;
     const users = this.users(true);
@@ -473,7 +485,7 @@ export class Vpn {
     const relayRules: object[] = [];
     const inbounds: object[] = ibs.map((ib) => {
       const t = this.template(ib.template_id)!;
-      const sp = this.spec(t);
+      const sp = ib.kind === 'relay' ? entrySpec(this.spec(t)) : this.spec(t);
       const cert = certName(sp, t.id, server.id, server.host);
       const self = sp.sni[0] ?? 'localhost';
       let list: Array<{ name: string; password: string }>;
@@ -494,7 +506,7 @@ export class Vpn {
         relayRules.push({ inbound: [`in-${ib.id}`], action: 'reject' });
         list.push({ name: 'svc.panel', password: this.svcCred(`hy:${t.id}:${server.id}`) });
       } else if (sp.companionOf) {
-        // служебная Hysteria2 «Эскадры»: пользователи сюда не подключаются, только плечи входа
+        // служебная Hysteria2 «eskadra»: пользователи сюда не подключаются, только плечи входа
         list = this.hy2SvcUsers(t, server);
       } else {
         list = [
@@ -547,7 +559,9 @@ export class Vpn {
     const hops = this.inbounds(`server_id = ? AND state IN ('active','deploying')`, server.id)
       .flatMap((ib) => {
         const t = this.template(ib.template_id);
-        const r = t?.core === 'sing-box' && (ib.kind === 'direct' || !natRelayOf(this.spec(t))) ? hopRange(this.spec(t).hy2Hop) : null;
+        // inbound Hysteria2 на узле: direct, вход Hysteria2 в режиме core и вход eskadra по Hysteria2
+        const sp = t && (ib.kind === 'relay' ? entrySpec(this.spec(t)) : this.spec(t));
+        const r = sp?.protocol === 'hysteria2' && (ib.kind === 'direct' || !natRelayOf(sp)) ? hopRange(sp.hy2Hop) : null;
         return r ? [`${ib.port}:${r[0]}-${r[1]}`] : [];
       });
     return hops.join(',') || '-';

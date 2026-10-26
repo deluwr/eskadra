@@ -17,7 +17,7 @@ type CertMode = 'ip' | 'domain' | 'custom' | 'self';
 
 /** Что поддерживает протокол (как в protocols.ts на сервере). */
 const PROTO: Record<Protocol, { name: string; hint: string; core: string; sec: Security[]; tr: Transport[]; udp?: boolean; relay: boolean; natRelay?: boolean; cert: CertMode[]; port: string }> = {
-  eskadra: { name: 'Эскадра', hint: 'всё в одной конфигурации: пользователи подключаются ко входу по VLESS, на выходах VLESS и Hysteria2, вход сам выбирает выход по порядку и переходит на Hysteria2, если VLESS до выхода не отвечает', core: 'Xray + sing-box', sec: ['reality', 'tls'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
+  eskadra: { name: 'eskadra', hint: 'всё в одной конфигурации: пользователи подключаются ко входу по VLESS, на выходах VLESS и Hysteria2, вход сам выбирает выход по порядку и переходит на Hysteria2, если VLESS до выхода не отвечает', core: 'Xray + sing-box', sec: ['reality', 'tls'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   vless: { name: 'VLESS', hint: 'основной вариант: REALITY без своего сертификата, или TLS', core: 'Xray', sec: ['reality', 'tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   vmess: { name: 'VMess', hint: 'для старых клиентов; обычно поверх WebSocket + TLS', core: 'Xray', sec: ['tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   trojan: { name: 'Trojan', hint: 'похож на обычный HTTPS; TLS или REALITY', core: 'Xray', sec: ['tls', 'reality'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
@@ -46,7 +46,7 @@ interface Settings {
   hy2UpMbps: number; hy2DownMbps: number; hy2ServerUpMbps: number; hy2ServerDownMbps: number; hy2IgnoreClientBw: boolean; hy2Masquerade: string; hy2Hop: string; hy2HopInterval: number;
   autoEnabled: boolean; autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
   spreadGroups: number; exitCapMbps: Record<string, number>; spreadHighPct: number; spreadFair: boolean;
-  hy2Relay: 'nat' | 'core'; hy2Leg: string; hy2Port: number;
+  hy2Relay: 'nat' | 'core'; hy2Leg: string; hy2Port: number; entryProto: 'vless' | 'hysteria2';
 }
 
 interface Draft {
@@ -64,7 +64,7 @@ const defaults = (p: Protocol): Settings => ({
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
   hy2UpMbps: 0, hy2DownMbps: 0, hy2ServerUpMbps: 0, hy2ServerDownMbps: 0, hy2IgnoreClientBw: false, hy2Masquerade: '', hy2Hop: '', hy2HopInterval: 30,
   autoEnabled: !PROTO[p].natRelay, autoMode: p === 'eskadra' ? 'order' : 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
-  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '', hy2Port: 0,
+  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '', hy2Port: 0, entryProto: 'vless',
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -84,7 +84,7 @@ const toDraft = (t: Template): Draft => ({
 const describe = (t: Template) => {
   const sp = t.spec;
   const p = protoOf(t);
-  const parts = [p === 'eskadra' ? 'Эскадра · VLESS + Hysteria2' : PROTO[p]?.name ?? p];
+  const parts = [p === 'eskadra' ? 'eskadra · VLESS + Hysteria2' : PROTO[p]?.name ?? p];
   if (PROTO[p]?.sec.length > 1 || sp.security === 'tls') parts.push(SEC_LABEL[sp.security]);
   if (PROTO[p]?.tr.length > 1) parts.push(TR_LABEL[sp.transport]);
   return parts.join(' · ');
@@ -224,7 +224,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   const { busy, error, run } = useAsync();
   const managed = servers.filter((s) => s.sudo_mode === 'restricted');
   const info = PROTO[d.protocol];
-  // «Эскадра» на сервере — VLESS-конфигурация с bundle
+  // «eskadra» на сервере — VLESS-конфигурация с bundle
   const esk = d.protocol === 'eskadra';
   const vless = d.protocol === 'vless' || esk;
   const st = d.st;
@@ -241,7 +241,9 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   // случайные свободные порты: проверяются на серверах конфигурации (не выбраны — на всех) так же, как при выкате
   const randomPorts = async (which: 'port' | 'entry' | 'both', base: Draft = d) => {
     const ids = [...base.nodeIds, ...(base.entryId ? [base.entryId] : [])];
-    const q = new URLSearchParams({ proto: PROTO[base.protocol].udp ? 'udp' : 'tcp', count: which === 'both' ? '2' : '1', servers: ids.join(','),
+    // вход eskadra по Hysteria2 слушает UDP
+    const udp = which === 'entry' && base.protocol === 'eskadra' ? base.st.entryProto === 'hysteria2' : PROTO[base.protocol].udp;
+    const q = new URLSearchParams({ proto: udp ? 'udp' : 'tcp', count: which === 'both' ? '2' : '1', servers: ids.join(','),
       avoid: which === 'port' ? base.entryPort : which === 'entry' ? base.port : '' });
     try {
       const { ports } = await api.get<{ ports: number[] }>(`/api/v1/free-ports?${q}`);
@@ -296,7 +298,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
       spreadGroups: Math.min(16, Math.max(2, Number(st.spreadGroups) || 6)), spreadHighPct: Math.min(95, Math.max(30, Number(st.spreadHighPct) || 80)), spreadFair: st.spreadFair,
       exitCapMbps: Object.fromEntries(exits.map((s) => [s.id, Number(st.exitCapMbps[s.id]) || 0])),
       hy2Relay: st.hy2Relay, hy2Leg: d.entryId && info.core === 'Xray' && info.relay ? st.hy2Leg : '',
-      bundle: esk, hy2Port: esk ? Number(st.hy2Port) || 0 : 0,
+      bundle: esk, hy2Port: esk ? Number(st.hy2Port) || 0 : 0, entryProto: esk ? st.entryProto : 'vless',
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -436,7 +438,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
                 <span className="k">{d.entryId ? 'Relay (вход)' : 'Пользователи'}</span>
                 {info.relay ? (
                   <select className="inp" value={d.entryId} onChange={(e) => { const v = e.target.value; setD({ ...d, entryId: v, nodeIds: v && nat ? d.nodeIds.filter((x) => x !== v).slice(0, 1) : d.nodeIds }); }} aria-label="Сервер-вход">
-                    {/* у «Эскадры» вход обязателен: пользователи подключаются к нему */}
+                    {/* у «eskadra» вход обязателен: пользователи подключаются к нему */}
                     <option value="">{esk ? 'выберите вход' : 'напрямую'}</option>
                     {managed.map((s) => <option key={s.id} value={s.id}>через {s.name}</option>)}
                   </select>
@@ -463,7 +465,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
             onMove={(id, dir) => move(exits.findIndex((x) => x.id === id), dir)}
           />
         )}
-        {esk && !d.entryId && <div className="alert warn small">«Эскадра» работает через вход: выберите сервер-вход слева, выходы — справа.</div>}
+        {esk && !d.entryId && <div className="alert warn small">«eskadra» работает через вход: выберите сервер-вход слева, выходы — справа.</div>}
         {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}{i.kind === 'hy2' ? ' (Hysteria2)' : ''}: {i.error}</div>)}
         {d.entryId && info.relay && info.core === 'Xray' && (
           <label className="fld" style={{ maxWidth: '68ch' }}><span>Резервное плечо вход → выход <Info>Если основное плечо от входа до выхода (протокол этой конфигурации) перестаёт отвечать — например, его режут между серверами, — вход за ~10 секунд ведёт трафик этого выхода по Hysteria2 и сам возвращается, когда основное снова отвечает. Пользователи по-прежнему подключаются ко входу по этой конфигурации, ссылки не меняются. Нужна конфигурация Hysteria2 на тех же выходах; выходы без неё работают как раньше. На входе дополнительно запускается sing-box.</Info></span>
@@ -482,7 +484,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
             </div>
             {st.autoEnabled && (<>
             <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
-            <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ...(d.protocol === 'hysteria2' ? [] : [['spread', 'по нагрузке'] as [AutoMode, string]]), ['random', 'случайно']]} />
+            <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ...(d.protocol === 'hysteria2' || (esk && st.entryProto === 'hysteria2') ? [] : [['spread', 'по нагрузке'] as [AutoMode, string]]), ['random', 'случайно']]} />
             <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}{st.autoMode === 'order' ? ' Порядок — стрелками на схеме.' : st.autoMode === 'spread' ? ' Порядок запасных выходов — стрелками на схеме.' : ''}</span>
             {st.autoMode === 'smart' && (
               <div className="grid g4">
@@ -546,18 +548,47 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
 
       {esk && (
         <div className="stack" style={{ gap: 8 }}>
-          <span className="k">Hysteria2 на выходах — резерв <Info>На каждом выходе рядом с VLESS работает Hysteria2. Пользователям она не выдаётся: через неё вход ведёт трафик выхода, если VLESS между входом и выходом перестал отвечать (переключение ~10 секунд, возврат — сам). Выкатывается и снимается вместе с этой конфигурацией. Порт UDP — пусто или 0: тот же номер, что у VLESS (TCP и UDP не мешают друг другу).</Info></span>
-          <div className="grid g3">
-            <label className="fld">Порт Hysteria2 (UDP)<input className="inp mono" inputMode="numeric" value={st.hy2Port || ''} placeholder={d.port || '8443'} onChange={(e) => setSt({ hy2Port: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-            <label className="fld"><span>Пароль obfs (salamander) <Info>Дополнительно маскирует QUIC между входом и выходом. Пусто — без obfs.</Info></span><span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ flex: 1 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" title="Случайный пароль obfs" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>Случайный</button></span></label>
-            <label className="fld"><span>Смена портов (port hopping) <Info>Диапазон UDP-портов на выходах, например 20000-30000: вход периодически меняет порт плеча. Мешает резать одно UDP-соединение. Пусто — один порт.</Info></span><input className="inp mono" value={st.hy2Hop} onChange={(e) => setSt({ hy2Hop: e.target.value })} placeholder="20000-30000" /></label>
-          </div>
+          <span className="k">Входной протокол <Info>Чем пользователи подключаются ко входу. От входа до выхода трафик идёт тем же протоколом, а если он перестал отвечать — другим: примерно за 10 секунд, обратно — сам. VLESS: основной VLESS, резерв Hysteria2. Hysteria2: основной Hysteria2, резерв VLESS; на входе принимает sing-box со своим сертификатом, порт входа — UDP, «по нагрузке» недоступно. Смена протокола меняет ссылки «через вход» у пользователей — пусть обновят подписку.</Info></span>
+          <Seg value={st.entryProto} label="Входной протокол" onChange={(v) => setSt({ entryProto: v, ...(v === 'hysteria2' && st.autoMode === 'spread' ? { autoMode: 'order' as AutoMode } : {}) })}
+            options={[['vless', 'VLESS → резерв Hysteria2'], ['hysteria2', 'Hysteria2 → резерв VLESS']]} />
         </div>
       )}
 
-      {d.protocol === 'hysteria2' && (
+      {esk && (
         <div className="stack" style={{ gap: 8 }}>
-          <span className="k">Скорость клиента <Info>Вшивается в подписку sing-box и в ссылку. С указанной полосой клиент включает Brutal: скорость держится и при потерях на плече между странами. Без неё Hysteria2 сбрасывает скорость от потерь — бывает в 10–15 раз медленнее. Ставьте чуть ниже реального канала пользователя; 0 — клиент решает сам. Полосу из ссылки понимают не все клиенты — в остальных укажите её в настройках вручную.</Info></span>
+          <span className="k">{st.entryProto === 'hysteria2' ? 'Hysteria2 на выходах — основное плечо' : 'Hysteria2 на выходах — резерв'} <Info>На каждом выходе рядом с VLESS работает Hysteria2. Пользователям она не выдаётся: по ней вход ведёт трафик до выхода — основным плечом при входе по Hysteria2 или резервным при входе по VLESS (переключение ~10 секунд, возврат — сам). Выкатывается и снимается вместе с этой конфигурацией. Порт UDP — пусто или 0: тот же номер, что у VLESS (TCP и UDP не мешают друг другу).</Info></span>
+          <div className="grid g3">
+            <label className="fld">Порт Hysteria2 (UDP)<input className="inp mono" inputMode="numeric" value={st.hy2Port || ''} placeholder={d.port || '8443'} onChange={(e) => setSt({ hy2Port: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+            <label className="fld"><span>Пароль obfs (salamander) <Info>Дополнительно маскирует QUIC между входом и выходом. Пусто — без obfs.</Info></span><span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ flex: 1 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" title="Случайный пароль obfs" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>Случайный</button></span></label>
+            <label className="fld"><span>Сайт маскировки <Info>Кто подключится к Hysteria2 выхода без пароля (например, сканер), увидит этот сайт — выход проксирует его, как обычный HTTP/3-сайт. Пусто — ответ 404. Лучше брать тот же сайт, что у REALITY: под его имя выпущен сертификат Hysteria2.</Info></span>
+              <span className="flex" style={{ gap: 6 }}>
+                <input className="inp mono" style={{ flex: 1 }} list="esk-masq" value={st.hy2Masquerade} onChange={(e) => setSt({ hy2Masquerade: e.target.value.trim() })} placeholder="https://www.bing.com/" aria-label="Сайт маскировки" />
+                {d.sni.split(/[\s,]+/)[0] && <button type="button" className="btn sm" title="Тот же сайт, что у REALITY (SNI)" onClick={() => setSt({ hy2Masquerade: `https://${d.sni.split(/[\s,]+/)[0]}/` })}>Как SNI</button>}
+              </span>
+              <datalist id="esk-masq">{[...new Set([...d.sni.split(/[\s,]+/).filter(Boolean), 'www.bing.com', 'www.apple.com', 'www.microsoft.com', 'www.cloudflare.com', 'www.samsung.com', 'dl.google.com'])].map((h) => <option key={h} value={`https://${h}/`} />)}</datalist>
+            </label>
+            <label className="fld"><span>Смена портов (port hopping) <Info>Диапазон UDP-портов на выходах, например 20000-30000: вход периодически меняет порт плеча. Мешает резать одно UDP-соединение. Пусто — один порт.</Info></span><input className="inp mono" value={st.hy2Hop} onChange={(e) => setSt({ hy2Hop: e.target.value })} placeholder="20000-30000" /></label>
+          </div>
+          {/* серверная сторона Hysteria2 eskadra: inbounds на выходах (клиент — вход) и, при входе по Hysteria2, inbound входа (клиенты — пользователи) */}
+          <div className="flex" style={{ justifyContent: 'space-between', maxWidth: '68ch' }}>
+            <span className="small">BBR вместо Brutal <Info>Серверы Hysteria2 eskadra велят клиентам не учитывать заявленную полосу и работать по BBR: выходы — входу, а при входе по Hysteria2 и вход — пользователям. Бережнее к чужим каналам, но на плече с потерями заметно медленнее. Обычно выключено. Несовместимо с потолком на клиента.</Info></span>
+            <Switch label="BBR вместо Brutal" on={st.hy2IgnoreClientBw} onChange={(v) => setSt({ hy2IgnoreClientBw: v, ...(v ? { hy2ServerUpMbps: 0, hy2ServerDownMbps: 0 } : {}) })} />
+          </div>
+          {!st.hy2IgnoreClientBw && (<>
+            <span className="k">Потолок на одного клиента <Info>Сервер Hysteria2 не даст клиенту больше этой полосы, даже если тот заявит больше. На выходах клиент — вход (плечо до выхода); при входе по Hysteria2 тот же потолок действует на входе для каждого пользователя. 0 — без потолка.</Info></span>
+            <div className="grid g3">
+              <label className="fld">К клиенту, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2ServerUpMbps} onChange={(e) => setSt({ hy2ServerUpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+              <label className="fld">От клиента, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2ServerDownMbps} onChange={(e) => setSt({ hy2ServerDownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+            </div>
+          </>)}
+        </div>
+      )}
+
+      {(d.protocol === 'hysteria2' || esk) && (
+        <div className="stack" style={{ gap: 8 }}>
+          {/* у eskadra клиент Hysteria2 — вход: полоса задаёт Brutal на плече вход → выход, когда трафик идёт по резерву */}
+          {esk ? <span className="k">Скорость клиента <Info>Клиент Hysteria2 у eskadra — сам вход: полоса включает Brutal на плече вход → выход, когда трафик выхода идёт по Hysteria2. Скорость держится и при потерях между странами; без полосы Hysteria2 сбрасывает скорость от потерь — бывает в 10–15 раз медленнее. Ставьте чуть ниже канала между входом и выходом; 0 — без Brutal. Отдача — от входа к выходу, загрузка — от выхода ко входу. При входе по Hysteria2 эта же полоса попадает в ссылки и подписку пользователей.</Info></span>
+          : <span className="k">Скорость клиента <Info>Вшивается в подписку sing-box и в ссылку. С указанной полосой клиент включает Brutal: скорость держится и при потерях на плече между странами. Без неё Hysteria2 сбрасывает скорость от потерь — бывает в 10–15 раз медленнее. Ставьте чуть ниже реального канала пользователя; 0 — клиент решает сам. Полосу из ссылки понимают не все клиенты — в остальных укажите её в настройках вручную.</Info></span>}
           <div className="grid g3">
             <label className="fld">Отдача, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2UpMbps} onChange={(e) => setSt({ hy2UpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
             <label className="fld">Загрузка, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2DownMbps} onChange={(e) => setSt({ hy2DownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>

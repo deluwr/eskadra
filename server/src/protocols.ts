@@ -85,14 +85,19 @@ export interface Spec {
    */
   hy2Leg: string;
   /**
-   * «Эскадра» (VLESS): одна конфигурация — VLESS-вход, на выходах VLESS и Hysteria2, авто-выбор выхода и резерв по
+   * «eskadra» (VLESS): одна конфигурация — VLESS-вход, на выходах VLESS и Hysteria2, авто-выбор выхода и резерв по
    * Hysteria2. Hysteria2 на выходах — служебная конфигурация-спутник (companionOf), её создаёт и выкатывает панель,
    * hy2Leg указывает на неё. Настройки Hysteria2 (hy2Obfs, hy2Hop, полоса) задаются здесь и переносятся в спутник.
    */
   bundle: boolean;
-  /** «Эскадра»: UDP-порт Hysteria2 на выходах; 0 — тот же номер, что у VLESS (TCP и UDP не мешают друг другу) */
+  /** «eskadra»: UDP-порт Hysteria2 на выходах; 0 — тот же номер, что у VLESS (TCP и UDP не мешают друг другу) */
   hy2Port: number;
-  /** Служебная Hysteria2 «Эскадры»: id конфигурации-владельца. Профилей и пользователей нет — только плечи входа. */
+  /**
+   * «eskadra»: входной протокол — чем клиенты подключаются ко входу. Плечо вход → выход идёт тем же протоколом, а если
+   * он не отвечает — другим: vless — VLESS, резерв Hysteria2; hysteria2 — Hysteria2 (sing-box входа), резерв VLESS.
+   */
+  entryProto: 'vless' | 'hysteria2';
+  /** Служебная Hysteria2 «eskadra»: id конфигурации-владельца. Профилей и пользователей нет — только плечи входа. */
   companionOf: string;
   mtDomain: string;          // MTProto fake-TLS: домен маскировки
   sniffing: boolean;
@@ -163,14 +168,17 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     hy2Leg: info.core === 'xray' && info.relay ? raw.hy2Leg ?? '' : '',
     bundle: protocol === 'vless' && !!raw.bundle,
     hy2Port: raw.hy2Port ?? 0,
+    entryProto: protocol === 'vless' && raw.bundle && raw.entryProto === 'hysteria2' ? 'hysteria2' : 'vless',
     companionOf: protocol === 'hysteria2' ? raw.companionOf ?? '' : '',
     mtDomain: raw.mtDomain || sni[0] || 'www.apple.com',
     sniffing: raw.sniffing ?? true,
     // пересылка ядром ОС ведёт на один выход — выбирать нечего
     autoEnabled: info.natRelay && raw.hy2Relay !== 'core' ? false : raw.autoEnabled ?? true,
     // «по нагрузке» считает группы по счётчикам пользователей Xray — у Hysteria2 через вход пользователей различает sing-box
-    // «Эскадра» по умолчанию — по порядку: первый отвечающий выход, недоступен — следующий
-    autoMode: protocol === 'hysteria2' && raw.autoMode === 'spread' ? 'order' : raw.autoMode ?? (protocol === 'vless' && raw.bundle ? 'order' : 'smart'),
+    // «eskadra» по умолчанию — по порядку: первый отвечающий выход, недоступен — следующий
+    // (то же у eskadra с входом по Hysteria2)
+    autoMode: (protocol === 'hysteria2' || (protocol === 'vless' && raw.bundle && raw.entryProto === 'hysteria2')) && raw.autoMode === 'spread' ? 'order'
+      : raw.autoMode ?? (protocol === 'vless' && raw.bundle ? 'order' : 'smart'),
     exitOrder: raw.exitOrder ?? [],
     maxRttMs: raw.maxRttMs ?? 100,
     minMbps: raw.minMbps ?? 10,
@@ -189,6 +197,18 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
 /** Локальный SOCKS-порт пробы выхода на входном узле (127.0.0.1): через него панель меряет задержку и скорость конкретного выхода. */
 export function probePort(templateId: string, exitId: string): number {
   return 62000 + (createHash('sha256').update(`${templateId}:${exitId}`).digest().readUInt16BE(0) % 3000);
+}
+
+/** «eskadra» со входом по Hysteria2: клиентов на входе принимает sing-box, а не Xray. */
+export const hy2Entry = (sp: Pick<Spec, 'bundle' | 'entryProto'>) => sp.bundle && sp.entryProto === 'hysteria2';
+
+/**
+ * Настройки inbound'а входа: у «eskadra» со входом по Hysteria2 — Hysteria2 с самоподписанным сертификатом под
+ * сайт маскировки VLESS и её настройками Hysteria2 (obfs, смена портов, полоса, маскировка); у остальных — как есть.
+ */
+export function entrySpec(sp: Spec): Spec {
+  if (!hy2Entry(sp)) return sp;
+  return { ...sp, protocol: 'hysteria2', security: 'tls', certMode: 'self', sni: [sp.sni[0] || 'www.bing.com'], bundle: false, hy2Relay: 'core' };
 }
 
 /** Пересылка через вход ядром ОС (nft DNAT, один выход) — Hysteria2 в режиме nat. */

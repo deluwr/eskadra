@@ -4,7 +4,7 @@ import { coreMode, foreignCore, panelPorts, type Ctx, type InboundRow, type Node
 import { getSetting, setSetting } from './db.js';
 import { json, orderBalancer, Vpn } from './vpn.js';
 import { releaseFor, type Core } from './releases.js';
-import { certName, natRelayOf, probePort, PROTOCOLS, protoOf } from './protocols.js';
+import { certName, entrySpec, natRelayOf, probePort, PROTOCOLS, protoOf } from './protocols.js';
 import { blockedDevices, limitRules, updateDevices, userOfEmail } from './devices.js';
 import { parseHostStat } from './hoststats.js';
 import { parseAutoUserStats, counterDeltas, planSpread, SPREAD_COOLDOWN_MIN, spreadBal, spreadChain, spreadCaps, spreadGroupOf, spreadLayout, spreadLoop, parseLinkTest, type LinkTest, type SpreadExit, type SpreadGroup, type SpreadMove } from './spread.js';
@@ -259,7 +259,8 @@ export class Ops {
   /** Создать запись inbound и ключи на узле (REALITY x25519 / самоподписанный TLS для Hysteria2). */
   async ensureInbound(t: TemplateRow, s: ServerRow, kind: 'direct' | 'relay', n: NodeSession): Promise<InboundRow> {
     const port = kind === 'relay' ? t.entry_port! : t.port;
-    const sp = this.vpn.spec(t);
+    // вход eskadra может принимать Hysteria2: ключи, сертификат и протокол порта — по настройкам входа
+    const sp = kind === 'relay' ? entrySpec(this.vpn.spec(t)) : this.vpn.spec(t);
     const proto = protoOf(sp.protocol);
     let ib = this.vpn.inbounds('template_id = ? AND server_id = ? AND kind = ?', t.id, s.id, kind)[0];
     if (!ib) {
@@ -267,9 +268,12 @@ export class Ops {
       this.ctx.db.prepare('INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, short_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(id, t.id, s.id, kind, port, proto, randomBytes(4).toString('hex'));
       ib = this.vpn.inbounds('id = ?', id)[0]!;
-    } else if (ib.port !== port) {
-      this.ctx.db.prepare('UPDATE inbounds SET port = ? WHERE id = ?').run(port, ib.id);
-      ib.port = port;
+    } else if (ib.port !== port || ib.proto !== proto) {
+      // сменился порт или входной протокол eskadra (TCP ↔ UDP): прежний порт закрываем, если он больше никому не нужен
+      const old = { port: ib.port, proto: ib.proto };
+      this.ctx.db.prepare('UPDATE inbounds SET port = ?, proto = ? WHERE id = ?').run(port, proto, ib.id);
+      Object.assign(ib, { port, proto });
+      if (!this.portUsed(s.id, old.port, old.proto)) await n.op(['port-close', old.proto, old.port]);
     }
     // пересылка ядром ОС: на входе ни ядра, ни ключей, ни сертификата — всё у inbound'а выхода
     if (kind === 'relay' && natRelayOf(sp)) return ib;
@@ -302,7 +306,7 @@ export class Ops {
       }
     }
     if (sp.protocol === 'hysteria2' && sp.certMode === 'self' && !ib.tls_pin) {
-      const sni = json<string[]>(t.sni, [])[0] ?? 'localhost';
+      const sni = sp.sni[0] ?? 'localhost';
       const out = await n.must(['singbox-tls', sni]);
       const pin = out.match(/^pin=([0-9a-f]{64})/m)?.[1];
       if (!pin) throw new Error('не удалось выпустить сертификат Hysteria2');
@@ -797,7 +801,8 @@ export class Ops {
     for (const [i, { s, kind }] of plan.entries()) {
       if (s.sudo_mode !== 'restricted') throw new Error(`${s.name}: сначала установите nodekit`);
       const port = kind === 'relay' ? t.entry_port! : t.port;
-      const sp = this.vpn.spec(t);
+      // вход eskadra может принимать Hysteria2 (sing-box, UDP)
+      const sp = kind === 'relay' ? entrySpec(this.vpn.spec(t)) : this.vpn.spec(t);
       const core = PROTOCOLS[sp.protocol].core;
       const proto = protoOf(sp.protocol);
       // Hysteria2 через вход: вход только пересылает UDP ядром ОС — ядро VPN на нём не нужно, 3x-ui не мешает
