@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { api, ApiError, paidLeftText, ruDate, setOtpProvider, setMe, type BillingAlert, type Scope } from './api';
-import { CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, Toasts, useAsync, usePoll } from './ui';
+import { Component, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { api, ApiError, can, paidLeftText, ruDate, setOtpProvider, setMe, type BillingAlert, type Scope } from './api';
+import { ask, CopyButton, ErrorBox, Icon, Info, Modal, setConfirmProvider, toast, Toasts, useAsync, usePoll } from './ui';
 import { OverviewPage } from './pages/Overview';
 import { ServersPage } from './pages/Servers';
 import { ServerDetailPage } from './pages/ServerDetail';
@@ -25,7 +25,7 @@ const parseHash = (): Route => {
 type Theme = 'dark' | 'light';
 const readTheme = (): Theme => { try { return localStorage.getItem('eskadra.theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; } };
 
-export interface AuthState { setupNeeded: boolean; loggedIn: boolean; username: string | null; role: string | null; roleName: string | null; perms: string[]; scope: Scope | null; owner: boolean; totp: boolean }
+export interface AuthState { setupNeeded: boolean; loggedIn: boolean; username: string | null; role: string | null; roleName: string | null; perms: string[]; scope: Scope | null; owner: boolean; totp: boolean; created?: { users: number; templates: number } | null; movedTo?: string | null }
 
 export function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -67,11 +67,15 @@ export function App() {
   if (!auth.loggedIn) return <LoginPage setup={auth.setupNeeded} onDone={refreshAuth} />;
 
   const logout = async () => { await api.post('/api/v1/auth/logout'); void refreshAuth(); };
+  // разделы, где роли нечего делать, не показываются: администраторы и роли — у owner, у остальных «Мой аккаунт»;
+  // бэкапы — с правом запуска, настройки — с правом их менять (сервер проверяет права всё равно)
+  const hidden = (page: string) => (page === 'backups' && !can('backups.run')) || (page === 'settings' && !can('settings.edit'));
   const nav: Array<[string, string, ReactNode]> = [
     ['overview', 'Обзор', Icon.overview], ['servers', 'Серверы', Icon.servers], ['configs', 'Конфигурации', Icon.configs], ['cores', 'Ядра', Icon.cores],
-    ['users', 'Пользователи', Icon.users], ['ports', 'Порты и связность', Icon.ports], ['analytics', 'Аналитика', Icon.analytics], ['access', 'Права и роли', Icon.access],
+    ['users', 'Пользователи', Icon.users], ['ports', 'Порты и связность', Icon.ports], ['analytics', 'Аналитика', Icon.analytics], ['access', auth.owner ? 'Права и роли' : 'Мой аккаунт', Icon.access],
   ];
-  const nav2: Array<[string, string, ReactNode]> = [['backups', 'Бэкапы', Icon.backups], ['audit', 'Аудит', Icon.audit], ['settings', 'Настройки', Icon.settings], ['help', 'Справка', Icon.help]];
+  const nav2 = ([['backups', 'Бэкапы', Icon.backups], ['audit', 'Аудит', Icon.audit], ['settings', 'Настройки', Icon.settings], ['help', 'Справка', Icon.help]] as Array<[string, string, ReactNode]>)
+    .filter(([id]) => !hidden(id));
   const active = route.page === 'server' ? 'servers' : route.page;
 
   return (
@@ -101,6 +105,11 @@ export function App() {
         </header>
         <main className="content">
           <BillingBanner />
+          {auth.movedTo && <MovedBanner url={auth.movedTo} owner={auth.owner} onBack={refreshAuth} />}
+          {/* страница с ошибкой показывает её, а не роняет всю панель; при переходе на другой раздел — сброс */}
+          <PageBoundary key={route.page}>
+          {hidden(route.page) && <div className="card pad stack"><h2>Нет доступа</h2><p className="k">У роли «{auth.roleName ?? auth.role}» нет прав на этот раздел.</p></div>}
+          {!hidden(route.page) && <>
           {route.page === 'overview' && <OverviewPage />}
           {route.page === 'servers' && <ServersPage />}
           {route.page === 'server' && route.id && <ServerDetailPage id={route.id} />}
@@ -114,6 +123,8 @@ export function App() {
           {route.page === 'help' && <HelpPage />}
           {route.page === 'cores' && <CoresPage />}
           {route.page === 'analytics' && <AnalyticsPage />}
+          </>}
+          </PageBoundary>
         </main>
       </div>
       <Toasts />
@@ -134,6 +145,37 @@ export function App() {
 export type Ver = { version: string; latest: string | null; updateAvailable: boolean };
 
 /** Низ меню: только когда есть обновление (версия — под логотипом). */
+/** Панель перенесена на другой сервер: здесь только просмотр; owner может вернуть управление сюда. */
+function MovedBanner({ url, owner, onBack }: { url: string; owner: boolean; onBack: () => void }) {
+  const { busy, error, run } = useAsync();
+  const back = async () => {
+    if (!(await ask('Вернуть управление сюда? Эта панель снова будет управлять серверами и опрашивать бота. Новую панель тогда остановите (eskadra stop на новом сервере), иначе две панели будут мешать друг другу.'))) return;
+    void run(async () => { await api.post('/api/v1/panel/move/cancel'); toast('Управление возвращено сюда'); onBack(); });
+  };
+  return (
+    <div className="alert warn stack" style={{ gap: 8 }}>
+      <span>Панель перенесена на <a href={url}>{url}</a>. Здесь она больше не управляет серверами: бот и фоновые задачи остановлены, изменения недоступны.</span>
+      {owner && <span><button className="btn sm" disabled={busy} onClick={() => void back()}>Вернуть управление сюда</button></span>}
+      <ErrorBox error={error} />
+    </div>
+  );
+}
+
+/** Ошибка в разделе: сообщение вместо пустой панели — меню и остальные разделы продолжают работать. */
+class PageBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="card pad stack">
+        <h2>Раздел не открылся</h2>
+        <p className="k">Ошибка в интерфейсе: {this.state.error.message}. Откройте другой раздел или обновите страницу.</p>
+      </div>
+    );
+  }
+}
+
 function SideFoot({ ver, owner }: { ver: Ver | null; owner: boolean }) {
   const [open, setOpen] = useState(false);
   if (!ver?.updateAvailable) return null;

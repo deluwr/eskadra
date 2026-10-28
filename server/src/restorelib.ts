@@ -1,5 +1,5 @@
 /**
- * Восстановление из бэкапа: расшифровка приватным ключом age, проверка sha256 по манифесту, подготовка
+ * Восстановление из бэкапа: расшифровка паролем бэкапа (старые копии — ключом age), проверка sha256 по манифесту, подготовка
  * файлов рядом с данными панели и их подмена при следующем запуске (пока база открыта, менять её нельзя).
  */
 import fs from 'node:fs';
@@ -9,20 +9,34 @@ import { DatabaseSync } from 'node:sqlite';
 import { Decrypter } from 'age-encryption';
 import { tarUnpack } from './lib/tar.js';
 import { sha256hex } from './lib/crypto.js';
+import { decryptWithPassword, isPasswordBackup } from './lib/backupcrypt.js';
 
 export interface Manifest { created: string; profile?: string; contents: Array<{ file: string; sha256: string }> }
 export interface RestoreSummary { created: string; servers: number; users: number; admins: string[]; templates: number }
 
 const FILES = ['fleet.db', 'master.key'] as const;
 
-export async function decryptBackup(data: Buffer, identityText: string): Promise<{ manifest: Manifest; files: Map<string, Buffer> }> {
-  const identity = identityText.split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith('AGE-SECRET-KEY-'));
-  if (!identity) throw new Error('нужен приватный ключ age: строка AGE-SECRET-KEY-…');
-  const d = new Decrypter();
-  try { d.addIdentity(identity); } catch { throw new Error('ключ age повреждён: проверьте, что строка AGE-SECRET-KEY-… скопирована целиком'); }
+/**
+ * Расшифровать копию: новые (.enc) — паролем бэкапа, старые (.age, до v0.37) — приватным ключом age;
+ * secret — пароль или ключ, что подходит к файлу. Без шифрования — архив переноса панели (.tar.gz).
+ */
+export async function decryptBackup(data: Buffer, secret: string): Promise<{ manifest: Manifest; files: Map<string, Buffer> }> {
   let plain: Uint8Array;
-  try { plain = await d.decrypt(data); } catch { throw new Error('ключ не подходит к этой копии или файл не является бэкапом Эскадры'); }
-  const entries = tarUnpack(gunzipSync(Buffer.from(plain)));
+  if (isPasswordBackup(data)) plain = decryptWithPassword(data, secret);
+  else if (data[0] === 0x1f && data[1] === 0x8b) plain = data;
+  else {
+    const identity = secret.split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith('AGE-SECRET-KEY-'));
+    if (!identity) throw new Error('это старая копия (age): нужен приватный ключ age — строка AGE-SECRET-KEY-…');
+    const d = new Decrypter();
+    try { d.addIdentity(identity); } catch { throw new Error('ключ age повреждён: проверьте, что строка AGE-SECRET-KEY-… скопирована целиком'); }
+    try { plain = await d.decrypt(data); } catch { throw new Error('ключ не подходит к этой копии или файл не является бэкапом Эскадры'); }
+  }
+  return unpackArchive(Buffer.from(plain));
+}
+
+/** Распаковать tar.gz копии и проверить sha256 файлов по манифесту. */
+export function unpackArchive(archive: Buffer): { manifest: Manifest; files: Map<string, Buffer> } {
+  const entries = tarUnpack(gunzipSync(archive));
   const m = entries.find((f) => f.name === 'manifest.json');
   if (!m) throw new Error('в копии нет manifest.json');
   const manifest = JSON.parse(m.data.toString()) as Manifest;

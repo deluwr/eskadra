@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, ago, type Job, type Server, type Template } from '../api';
+import { api, ago, can, inScope, quota, refreshMe, type Job, type Server, type Template } from '../api';
 import { RouteMap, exitView, type MapExit } from '../RouteMap';
 import { CopyBlock, ErrorBox, Info, Modal, Seg, Switch, Tag, toast, useAsync, usePoll, ask } from '../ui';
 import { getLang } from '../i18n';
@@ -105,7 +105,9 @@ export function ConfigsPage() {
     <>
       <div className="page-head">
         <div><h1>Конфигурации</h1><p>Протоколы и порты, по которым подключаются пользователи</p></div>
-        <button className="btn pri" onClick={() => { setDraft(empty()); setJobId(null); }}>Новая конфигурация</button>
+        {/* новую создаёт роль с правом и без ограничения списка конфигураций; лимит роли — «создано N из M» */}
+        {can('configs.edit') && inScope('templates', '') && (() => { const q = quota('templates'); const full = !!q && q.made >= q.max; return (
+          <span className="flex" style={{ gap: 8 }}>{q && <span className="k">создано {q.made} из {q.max}</span>}<button className="btn pri" disabled={full} title={full ? 'лимит конфигураций роли исчерпан' : undefined} onClick={() => { setDraft(empty()); setJobId(null); }}>Новая конфигурация</button></span>); })()}
       </div>
       {/* лента конфигураций: растёт вбок и переносится, редактор под ней — во всю ширину */}
       <section className="card tpl-list" aria-label="Конфигурации">
@@ -156,7 +158,7 @@ export function CoresPanel() {
     if (!c) return (
       <span className="stack" style={{ gap: 4 }}>
         <span className="k">не установлено</span>
-        <span><button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/update`, { version: data.pins[k] ?? 'latest' }); void reload(); })}>Установить</button></span>
+        {can('cores.manage') && <span><button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/update`, { version: data.pins[k] ?? 'latest' }); void reload(); })}>Установить</button></span>}
       </span>
     );
     const old = s.outdated.includes(k);
@@ -164,8 +166,8 @@ export function CoresPanel() {
       <span className="stack" style={{ gap: 4 }}>
         <span className="flex" style={{ gap: 6 }}><span className="mono small">{c.version}</span>{old && <Tag kind="warn">устарел</Tag>}</span>
         <span className="flex" style={{ gap: 6 }}>
-          {old && <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/update`, { version: data.pins[k] ?? 'latest' }); void reload(); })}>Обновить</button>}
-          {c.previous && <button className="btn ghost sm" disabled={busy} onClick={async () => { if (await ask(`Вернуть ${k} ${c.previous} на ${s.name}?`)) void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/rollback`); void reload(); }); }}>Откат на {c.previous}</button>}
+          {old && can('cores.manage') && <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/update`, { version: data.pins[k] ?? 'latest' }); void reload(); })}>Обновить</button>}
+          {c.previous && can('cores.manage') && <button className="btn ghost sm" disabled={busy} onClick={async () => { if (await ask(`Вернуть ${k} ${c.previous} на ${s.name}?`)) void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/rollback`); void reload(); }); }}>Откат на {c.previous}</button>}
         </span>
       </span>
     );
@@ -194,7 +196,8 @@ export function CoresPanel() {
           </tbody>
         </table>
       </div>
-      <div className="row stack" style={{ alignItems: 'stretch' }}>
+      {/* установка, обновление и откат ядер — право cores.manage */}
+      {can('cores.manage') && <div className="row stack" style={{ alignItems: 'stretch' }}>
         <h3>Обновление <Info>Отметьте серверы в таблице — ядро ставится или обновляется только на них, по одному: первая ошибка останавливает, сервер с ошибкой сам возвращает прежнюю версию. Так новую версию можно сначала проверить на одном сервере, а потом раскатить на остальные.</Info></h3>
         <div className="flex">
           <Seg value={core} label="Ядро" onChange={(c) => { setCore(c); setVersion('latest'); }} options={[['xray', 'Xray'], ['sing-box', 'sing-box']]} />
@@ -210,7 +213,7 @@ export function CoresPanel() {
           <span className="k">Сейчас новые узлы получают: {core} {data.pins[core] ?? 'latest'}</span>
         </div>
         <ErrorBox error={error} />
-      </div>
+      </div>}
       {jobId && <div style={{ padding: '0 20px 16px' }}><JobLog id={jobId} onDone={() => void reload()} /></div>}
     </section>
   );
@@ -304,6 +307,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   });
   const saveT = async () => {
     const t = d.id ? await api.put<Template>(`/api/v1/templates/${d.id}`, body()) : await api.post<Template>('/api/v1/templates', body());
+    if (!d.id) void refreshMe();   // счётчик «создано N из M» у лимита роли
     onSaved(t);
     return t;
   };
@@ -668,12 +672,14 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
 
       <ErrorBox error={error} />
       <div className="savebar">
-        <button className="btn pri" disabled={busy || !d.name || (!d.nodeIds.length && !d.entryId)} onClick={() => void rollout()}>{dirty || !d.id ? 'Сохранить и выкатить' : 'Выкатить'}</button>
-        <button className="btn" disabled={busy || !d.name || (!dirty && !!d.id)} onClick={() => void save()}>Сохранить черновик</button>
+        {/* кнопки по правам роли: сохранить — configs.edit, выкатить — configs.rollout (с изменениями — оба), удалить — configs.delete */}
+        {can('configs.rollout') && (can('configs.edit') || (!dirty && d.id)) && <button className="btn pri" disabled={busy || !d.name || (!d.nodeIds.length && !d.entryId)} onClick={() => void rollout()}>{dirty || !d.id ? 'Сохранить и выкатить' : 'Выкатить'}</button>}
+        {can('configs.edit') && <button className="btn" disabled={busy || !d.name || (!dirty && !!d.id)} onClick={() => void save()}>Сохранить черновик</button>}
+        {!can('configs.edit') && !can('configs.rollout') && <span className="k">Только просмотр: у роли нет прав менять и выкатывать конфигурации.</span>}
         <Info>Выкат идёт по одному серверу: проверка конфига на сервере, открытие порта, проверка снаружи. Ошибка — откат и остановка. Черновик сохраняется в панели, серверы его не получают.</Info>
         {dirty && d.id && <><span className="dirty"><span className="dot" />Есть несохранённые изменения</span><button className="btn ghost sm" onClick={() => setD(draft)}>Отменить</button></>}
         <span className="spacer" />
-        {d.id && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Снять «${d.name}» со всех серверов и удалить? Профили этой конфигурации пропадут из подписок.`)) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); toast(`«${d.name}» удалена`); onDeleted(); }); }}>Удалить</button>}
+        {d.id && can('configs.delete') && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Снять «${d.name}» со всех серверов и удалить? Профили этой конфигурации пропадут из подписок.`)) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); toast(`«${d.name}» удалена`); onDeleted(); }); }}>Удалить</button>}
       </div>
       {pick && <SniPicker servers={managed} prefer={[...d.nodeIds, ...(d.entryId ? [d.entryId] : [])]} current={d.sni.split(/[\s,]+/).filter(Boolean)}
         onPick={(domain) => { setD({ ...d, sni: domain }); setPick(false); toast(`Сайт маскировки: ${domain}. Сохраните и выкатите конфигурацию`, 'info'); }} onClose={() => setPick(false)} />}
@@ -681,13 +687,13 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   );
 }
 
-function JobLog({ id, onDone }: { id: number; onDone: () => void }) {
+export function JobLog({ id, onDone, title = 'Выкат' }: { id: number; onDone: () => void; title?: string }) {
   const { data } = usePoll(() => api.get<Job>(`/api/v1/jobs/${id}`), 2000, [id]);
   const [notified, setNotified] = useState(false);
   useEffect(() => { if (data && data.status !== 'running' && !notified) { setNotified(true); onDone(); } }, [data, notified, onDone]);
   return (
     <section className="card pad stack">
-      <div className="flex" style={{ justifyContent: 'space-between' }}><h2>Выкат #{id}</h2>{data && <Tag kind={data.status === 'ok' ? 'ok' : data.status === 'failed' ? 'fail' : 'warn'}>{data.status === 'running' ? 'идёт…' : data.status}</Tag>}</div>
+      <div className="flex" style={{ justifyContent: 'space-between' }}><h2>{title} #{id}</h2>{data && <Tag kind={data.status === 'ok' ? 'ok' : data.status === 'failed' ? 'fail' : 'warn'}>{data.status === 'running' ? 'идёт…' : data.status}</Tag>}</div>
       <pre className="code">{data?.log || 'запуск…'}</pre>
     </section>
   );
@@ -724,7 +730,7 @@ function ExitHealth({ t }: { t: Template }) {
         <h2>Выходы «Авто» <Info>{order ? <>По порядку: трафик идёт через первый отвечающий выход. Переключает сам вход за ~10 секунд; таблица обновляется раз в минуту.{thr > 0 && <> {`Выход медленнее ${thr} Мбит/с пропускается: скорость меряется каждые ${sp.speedEveryMin ?? 1} мин, решение — раз в ${sp.decideMin ?? 1} мин по медиане замеров; по кнопке «Проверить сейчас» — сразу.`}</>}</> : `Пороги: задержка не больше ${sp.maxRttMs ?? 100} мс, скорость не меньше ${sp.minMbps ?? 10} Мбит/с. Выбранный выход меняется, только когда текущий перестаёт проходить пороги.`}</Info></h2>
         <span className="flex">
           {data?.checkedAt && <span className="k">проверено {ago(data.checkedAt)}</span>}
-          <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/templates/${t.id}/health/check`); await reload(); })}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>
+          {can('configs.rollout') && <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/templates/${t.id}/health/check`); await reload(); })}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>}
         </span>
       </div>
       <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
@@ -762,7 +768,7 @@ function SpreadHealth({ t, data, busy, error, check }: { t: Template; data: Heal
         <h2>Выходы «Авто» <Info>По нагрузке: у каждой группы пользователей свой выход. Канал загружен выше {st?.high ?? 80}% — самая тяжёлая группа, которая поместится, переводится на выход с запасом (не чаще раза в 3 минуты); нагрузка спала — возвращается домой. Таблица обновляется раз в минуту.</Info></h2>
         <span className="flex">
           {data?.checkedAt && <span className="k">проверено {ago(data.checkedAt)}</span>}
-          <button className="btn sm" disabled={busy} onClick={check}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>
+          {can('configs.rollout') && <button className="btn sm" disabled={busy} onClick={check}>{busy ? 'Проверяю…' : 'Проверить сейчас'}</button>}
         </span>
       </div>
       <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>

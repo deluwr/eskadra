@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, can, fmtTime } from '../api';
 import { UpdateModal, type Ver } from '../App';
+import { JobLog } from './Configs';
 import { ErrorBox, Icon, Info, Switch, Tag, useAsync, usePoll, toast, Addr } from '../ui';
 
 interface S {
@@ -9,7 +10,7 @@ interface S {
   knockTtlHours: number;
   failThresholdMin: number;
   bot: { configured: boolean };
-  backup: { recipients: string[]; time: string; enabled: boolean };
+  backup: { tgIds: string[]; time: string; enabled: boolean; hasPassword: boolean };
 }
 
 export function SettingsPage() {
@@ -23,7 +24,9 @@ export function SettingsPage() {
       <General s={data} />
       <BlocksCard />
       <BotCard s={data} onSaved={reload} />
-      <BackupCard s={data} />
+      {/* бэкапы и перенос панели — только owner */}
+      {can('owner') && <BackupCard s={data} />}
+      {can('owner') && <MoveCard />}
     </>
   );
 }
@@ -206,19 +209,82 @@ function BotProxy() {
 }
 
 function BackupCard({ s }: { s: S }) {
-  const [v, setV] = useState({ recipients: s.backup.recipients.join('\n'), time: s.backup.time, enabled: s.backup.enabled });
+  const [v, setV] = useState({ tgIds: s.backup.tgIds.join('\n'), time: s.backup.time, enabled: s.backup.enabled });
+  const [pw, setPw] = useState('');
+  const [hasPw, setHasPw] = useState(s.backup.hasPassword);
   const { busy, error, run } = useAsync();
+  const save = () => run(async () => {
+    await api.put('/api/v1/settings/backup', { tgIds: v.tgIds.split(/[\s,;]+/).filter(Boolean), time: v.time, enabled: v.enabled, password: pw || null });
+    setPw(''); setHasPw(true);
+    toast('Настройки бэкапа сохранены');
+  });
   return (
     <section className="card pad stack">
       <h2>Бэкапы</h2>
-      <p className="small muted">Копия (база и мастер-ключ) шифруется age на публичные ключи ниже и уходит ботом двум админам-получателям. Приватный ключ age храните офлайн: без него копию не расшифровать. Восстановление — в разделе «Бэкапы»: загрузите копию и приватный ключ age.</p>
-      <label className="fld">Публичные ключи age получателей (age1…, по одному в строке)<textarea className="inp mono" rows={3} value={v.recipients} onChange={(e) => setV({ ...v, recipients: e.target.value })} /></label>
+      <p className="small muted">Каждый день бот присылает копию панели (база и мастер-ключ: серверы, пользователи, конфигурации, настройки) на Telegram ID ниже. Копия зашифрована паролем бэкапа: в ней ключи доступа ко всем серверам. Восстановить — в разделе «Бэкапы»: файл копии и этот пароль. Запишите пароль отдельно: без него копию не открыть.</p>
+      <div className="grid g2">
+        <label className="fld"><span>Telegram ID получателей <Info>По одному в строке: ваш ID (узнать — у бота @userinfobot) или ID группы (с минусом). Получатель должен открыть бота панели и нажать «Старт» — иначе Telegram не даст боту написать первым.</Info></span>
+          <textarea className="inp mono" rows={3} value={v.tgIds} onChange={(e) => setV({ ...v, tgIds: e.target.value })} placeholder="123456789" spellCheck={false} /></label>
+        <label className="fld"><span>Пароль бэкапа <Info>От 10 символов. Хранится в панели зашифрованным, чтобы копии делались сами. Смена пароля действует на новые копии; старые открываются прежним паролем.</Info></span>
+          <input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder={hasPw ? 'задан — оставьте пустым, чтобы не менять' : 'не задан — копии не делаются'} autoComplete="new-password" aria-label="Пароль бэкапа" />
+          {!hasPw && <span className="k" style={{ color: 'var(--warn)' }}>Без пароля бэкапы не делаются.</span>}</label>
+      </div>
       <div className="flex">
         <label className="fld">Ежедневно в (UTC)<input className="inp mono" style={{ width: 120 }} value={v.time} onChange={(e) => setV({ ...v, time: e.target.value })} /></label>
         <span className="flex small" style={{ marginTop: 22 }}><Switch label="Включено" on={v.enabled} onChange={(x) => setV({ ...v, enabled: x })} />по расписанию</span>
       </div>
-      <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.put('/api/v1/settings/backup', { recipients: v.recipients.split(/\s+/).filter(Boolean), time: v.time, enabled: v.enabled }); toast('Настройки сохранены'); })}>Сохранить</button><a href="#/backups">История бэкапов</a></div>
+      <div className="flex"><button className="btn pri" disabled={busy || (!hasPw && pw.length < 10)} onClick={() => void save()}>Сохранить</button><a href="#/backups">История бэкапов</a></div>
       <ErrorBox error={error} />
+    </section>
+  );
+}
+
+/** Перенос панели на другой сервер: та же версия, порт и путь, все данные; эта панель после переноса отходит. */
+function MoveCard() {
+  const [f, setF] = useState({ host: '', sshPort: '22', user: 'root', password: '', privateKey: '', tls: 'ip' as 'ip' | 'domain', domain: '' });
+  const [useKey, setUseKey] = useState(false);
+  const [jobId, setJobId] = useState<number | null>(null);
+  const [done, setDone] = useState(false);   // перенос закончился — журнал остаётся на экране
+  const { busy, error, run } = useAsync();
+  const start = () => run(async () => {
+    const r = await api.post<{ jobId: number }>('/api/v1/panel/move', {
+      host: f.host.trim(), sshPort: Number(f.sshPort) || 22, user: f.user.trim() || 'root', tls: f.tls,
+      ...(f.tls === 'domain' ? { domain: f.domain.trim() } : {}),
+      ...(useKey ? { privateKey: f.privateKey } : { password: f.password }),
+    });
+    setF({ ...f, password: '', privateKey: '' });
+    setDone(false);
+    setJobId(r.jobId);
+  });
+  const ready = f.host.trim().length > 3 && (useKey ? f.privateKey.includes('PRIVATE KEY') : f.password.length > 0) && (f.tls === 'ip' || f.domain.includes('.'));
+  return (
+    <section className="card pad stack">
+      <h2>Перенос панели на другой сервер <Info>Для переезда на другой хостинг. Панель сама заходит на новый сервер по SSH, ставит туда эту же версию Эскадры с тем же портом и путём в адресе и переносит все данные: серверы, пользователи, конфигурации, администраторы, настройки, бот. На узлах заранее разрешается новый адрес панели. Когда новая панель ответит, эта перестаёт управлять серверами (бот и фоновые задачи останавливаются) — вернуть управление можно кнопкой в баннере.</Info></h2>
+      <ul className="small muted" style={{ margin: 0, paddingLeft: 18 }}>
+        <li>Новый сервер — чистый, с доступом в интернет; порт 80 свободен (сертификат Let's Encrypt).</li>
+        <li>Текущий сервер остаётся узлом флота: VPN на нём продолжает работать, панель на нём можно потом удалить (eskadra uninstall).</li>
+        <li>Если адрес подписок — IP этого сервера, у пользователей сменятся ссылки подписок: пусть обновят подписку. С доменом для подписок ничего менять не нужно — только A-запись.</li>
+      </ul>
+      <div className="grid g3">
+        <label className="fld">Адрес нового сервера<input className="inp mono" value={f.host} onChange={(e) => setF({ ...f, host: e.target.value })} placeholder="192.0.2.50" /></label>
+        <label className="fld">Порт SSH<input className="inp mono" inputMode="numeric" value={f.sshPort} onChange={(e) => setF({ ...f, sshPort: e.target.value })} /></label>
+        <label className="fld">Пользователь<input className="inp mono" value={f.user} onChange={(e) => setF({ ...f, user: e.target.value })} placeholder="root" /></label>
+      </div>
+      <div className="flex small"><Switch label="Вход по ключу" on={useKey} onChange={setUseKey} />вход по ключу SSH вместо пароля</div>
+      {useKey
+        ? <label className="fld">Приватный ключ SSH<textarea className="inp mono" rows={4} value={f.privateKey} onChange={(e) => setF({ ...f, privateKey: e.target.value })} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" spellCheck={false} /></label>
+        : <label className="fld" style={{ maxWidth: 360 }}>Пароль SSH<input className="inp" type="password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} autoComplete="off" /></label>}
+      <div className="flex">
+        <label className="fld"><span>Сертификат новой панели</span>
+          <select className="inp" style={{ width: 'auto' }} value={f.tls} onChange={(e) => setF({ ...f, tls: e.target.value as 'ip' | 'domain' })}>
+            <option value="ip">на IP нового сервера</option><option value="domain">на домен</option>
+          </select></label>
+        {f.tls === 'domain' && <label className="fld"><span>Домен <Info>A-запись домена уже должна вести на новый сервер — иначе сертификат не выпустится.</Info></span><input className="inp mono" value={f.domain} onChange={(e) => setF({ ...f, domain: e.target.value })} placeholder="panel.example.com" /></label>}
+      </div>
+      <span className="k">Пароль и ключ используются только на время переноса и не сохраняются.</span>
+      <div className="flex"><button className="btn pri" disabled={busy || !ready || (!!jobId && !done)} onClick={() => void start()}>Перенести панель</button></div>
+      <ErrorBox error={error} />
+      {jobId && <JobLog id={jobId} title="Перенос" onDone={() => setDone(true)} />}
     </section>
   );
 }

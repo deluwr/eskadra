@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { api, ago, type Server } from '../api';
+import { api, ago, can, type Server } from '../api';
 import { ErrorBox, Info, Seg, useAsync, usePoll } from '../ui';
 import { ServerTable } from '../ServerTable';
 import { ViaPicker, viaBody, viaReady, type Via } from '../ViaPicker';
@@ -17,7 +17,7 @@ export function ServersPage() {
       <div className="page-head">
         <div><h1>Серверы</h1><p>Узлы флота и их состояние</p></div>
         <div className="flex">
-          <button className="btn pri" onClick={() => setAdding((v) => !v)}>{adding ? 'Скрыть форму' : 'Добавить сервер'}</button>
+          {can('servers.manage') && <button className="btn pri" onClick={() => setAdding((v) => !v)}>{adding ? 'Скрыть форму' : 'Добавить сервер'}</button>}
         </div>
       </div>
       <ErrorBox error={error} />

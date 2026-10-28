@@ -12,7 +12,7 @@ const PERM_GROUPS: Array<[string, string[]]> = [
   ['Серверы', ['servers.manage', 'servers.protect', 'cores.manage', 'ports.groups']],
   ['Панель', ['backups.run', 'settings.edit', 'ips.view']],
 ];
-const OWNER_ONLY = ['Администраторы и роли', 'Бэкапы: получатели, ключи, восстановление', 'Токен бота, обновление панели', 'Терминал (shell) и режим SSH на сервере'];
+const OWNER_ONLY = ['Администраторы и роли', 'Бэкапы: получатели, пароль, восстановление; перенос панели', 'Токен бота, обновление панели', 'Терминал (shell) и режим SSH на сервере'];
 const MODE_LABEL: Record<string, string> = { via: 'через вход', direct: 'напрямую' };
 
 /** Краткая область роли: только то, что ограничено. */
@@ -23,6 +23,9 @@ function scopeSummary(s: Scope, names: { t: Map<string, string>; s: Map<string, 
   if (s.servers) out.push(`серверы: ${list(s.servers, names.s)}`);
   if (s.modes) out.push(`режимы: ${s.modes.map((m) => MODE_LABEL[m]).join(', ')}`);
   if (s.limitGroups) out.push(`группы лимитов: ${list(s.limitGroups)}`);
+  if (s.maxUsers != null) out.push(`пользователей: до ${s.maxUsers}`);
+  if (s.maxTemplates != null) out.push(`конфигураций: до ${s.maxTemplates}`);
+  if (s.maxDevices != null) out.push(`устройств: до ${s.maxDevices}`);
   return out.join(' · ') || 'область: всё';
 }
 
@@ -96,7 +99,14 @@ function RoleEditor({ role, perms, templates, servers, onClose, onSaved }: {
 }) {
   const [name, setName] = useState(role?.name ?? '');
   const [p, setP] = useState<string[]>(role?.perms ?? ['users.edit']);
-  const [sc, setSc] = useState<Scope>(role?.scope ?? { templates: null, servers: null, modes: null, limitGroups: null });
+  const [sc, setSc] = useState<Scope>({ maxUsers: null, maxTemplates: null, maxDevices: null, ...(role?.scope ?? { templates: null, servers: null, modes: null, limitGroups: null }) });
+  // поле лимита: пусто — без лимита
+  const limitField = (key: 'maxUsers' | 'maxTemplates' | 'maxDevices', label: string, hint: string) => (
+    <label className="fld"><span>{label} <Info>{hint}</Info></span>
+      <input className="inp mono" inputMode="numeric" value={sc[key] ?? ''} placeholder="без лимита" aria-label={label}
+        onChange={(e) => { const v = e.target.value.replace(/\D/g, ''); setSc({ ...sc, [key]: v === '' ? null : Number(v) }); }} />
+    </label>
+  );
   const { data: groups } = usePoll(() => api.get<Array<{ name: string }>>('/api/v1/limit-groups'), null);
   const { busy, error, run } = useAsync();
   const togglePerm = (k: string) => setP(p.includes(k) ? p.filter((x) => x !== k) : [...p, k]);
@@ -132,6 +142,14 @@ function RoleEditor({ role, perms, templates, servers, onClose, onSaved }: {
           <ScopePick label="Серверы" hint="На какие серверы роль выдаёт доступ пользователям и какими управляет в рамках своих прав. С ограничением роль не подключает новые серверы." all={servers.map((x) => [x.id, x.name])} value={sc.servers} onChange={(v) => setSc({ ...sc, servers: v })} />
           <ScopePick label="Режимы подключения" hint="Что роль может выдать пользователю: через вход (relay) или напрямую к серверу." all={[['via', 'через вход'], ['direct', 'напрямую']]} value={sc.modes} onChange={(v) => setSc({ ...sc, modes: v as Scope['modes'] })} />
           <ScopePick label="Группы лимитов" hint="Какие группы лимитов роль назначает пользователям." all={(groups ?? []).map((g) => [g.name, g.name])} value={sc.limitGroups} onChange={(v) => setSc({ ...sc, limitGroups: v })} />
+          <section className="ublock stack">
+            <h3>Лимиты на администратора <Info>Считаются для каждого администратора с этой ролью отдельно. Пусто — без лимита. Удалённые пользователи и конфигурации освобождают место. Пользователи и конфигурации, созданные до появления лимита, не считаются.</Info></h3>
+            <div className="grid g3">
+              {limitField('maxUsers', 'Пользователей', 'Сколько пользователей может создать каждый администратор роли — в панели и в боте.')}
+              {limitField('maxTemplates', 'Конфигураций', 'Сколько конфигураций может создать каждый администратор роли. Служебная Hysteria2 у eskadra не считается.')}
+              {limitField('maxDevices', 'Устройств у пользователя', 'Лимит устройств пользователя, которого администратор роли создаёт или меняет, — не больше этого числа. Без лимита устройств сохранить нельзя: свой лимит пользователя или лимит его группы. Группы лимитов с бо́льшим числом устройств роль тоже не сохранит.')}
+            </div>
+          </section>
         </div>
       </div>
       <ErrorBox error={error} />

@@ -327,6 +327,11 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX host_metrics_at ON host_metrics (at);
   `,
+  `
+  -- кто создал (admins.id): по нему считаются лимиты роли «пользователей» и «конфигураций» на администратора
+  ALTER TABLE users ADD COLUMN created_by INTEGER;
+  ALTER TABLE templates ADD COLUMN created_by INTEGER;
+  `,
 ];
 
 export type Db = DatabaseSync;

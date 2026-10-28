@@ -8,8 +8,9 @@ import type { Ctx, Role } from '../ctx.js';
 import { config } from '../config.js';
 import { hashPassword, randomToken, sha256hex, verifyPassword } from '../lib/crypto.js';
 import { verifyTotp } from '../lib/totp.js';
-import { roleOf } from '../roles.js';
+import { createdBy, roleOf } from '../roles.js';
 import { audit } from '../lib/audit.js';
+import { movedTo } from '../migrate.js';
 
 export const COOKIE = 'fleet_session';
 
@@ -44,6 +45,10 @@ export function requireAdmin(ctx: Ctx) {
     const admin = sessionAdmin(ctx, req);
     if (!admin) return reply.code(401).send({ error: 'unauthorized' });
     if (req.method !== 'GET' && req.headers['x-fleet'] !== '1') return reply.code(403).send({ error: 'missing X-Fleet header' });
+    // панель перенесена: серверами управляет новая — здесь только просмотр (и возврат управления owner-ом)
+    const moved = movedTo(ctx.db);
+    if (moved && req.method !== 'GET' && !req.url.endsWith('/api/v1/panel/move/cancel'))
+      return reply.code(409).send({ error: `панель перенесена на ${moved} — управляйте серверами там` });
     req.admin = admin;
   };
 }
@@ -65,7 +70,11 @@ export async function authRoutes(app: FastifyInstance, ctx: Ctx) {
     const role = admin ? roleOf(db, admin.role) : null;
     // права и область — чтобы интерфейс показывал только доступное; проверяет всё равно сервер
     return { setupNeeded: !hasAdmins(), loggedIn: !!admin, username: admin?.username ?? null, role: admin?.role ?? null, roleName: role?.name ?? null,
-      perms: role?.perms ?? [], scope: role?.scope ?? null, owner: role?.owner ?? false, totp: admin?.totp ?? false };
+      perms: role?.perms ?? [], scope: role?.scope ?? null, owner: role?.owner ?? false, totp: admin?.totp ?? false,
+      // сколько этот администратор уже создал — для подсказок «создано 3 из 10» у лимитов роли
+      created: admin ? createdBy(db, admin.id) : null,
+      // панель перенесена на другой сервер: баннер со ссылкой на новую
+      movedTo: movedTo(db) };
   });
 
   // Первичная настройка owner: пока нет ни одного админа — с loopback или по одноразовому токену установщика.

@@ -121,7 +121,7 @@ The bot answers only linked people and only in private chats; to a stranger on `
 
 **Subscription page.** A subscription link opened in a browser shows a page: a QR code and buttons for apps, expiry, traffic and limits, available nodes, individual links with QR codes. Apps get the subscription from the same link as before.
 
-**Updating and restoring from the panel.** The "Update" button at the bottom of the menu (owner) runs `eskadra update` through a root helper and shows the log; the helper is installed by an update from the console, so the first time after v0.15 update with the `eskadra update` command. "Backups" has a restore: the backup file and the age private key → check and summary → data swap and panel restart (the previous files stay on the server).
+**Updating and restoring from the panel.** The "Update" button at the bottom of the menu (owner) runs `eskadra update` through a root helper and shows the log; the helper is installed by an update from the console, so the first time after v0.15 update with the `eskadra update` command. "Backups" has a restore: the backup file and the backup password → check and summary → data swap and panel restart (the previous files stay on the server). "Settings" → "Move the panel to another server" moves the panel with all data to a new host over SSH (same version, port and URL path).
 
 **Already installed cores.** Preflight finds 3x-ui, xray, sing-box, etc.:
 
@@ -142,7 +142,7 @@ The bot answers only linked people and only in private chats; to a stranger on `
 - A key per server, manual host-key verification (no trust on first use), `from=` and a strict mode for the panel's key.
 - Firewall blocks are applied only after a manual checklist — first in shadow mode, then under a rollback timer that runs on the node itself.
 - Emergency access: "temporarily open SSH", emergency lifting of blocks, a short command for the hosting provider's KVM console (`sudo fleetctl allow 1 2 3 4`).
-- Secrets in the database are encrypted with a master key; backups are encrypted with age to the recipients' public keys.
+- Secrets in the database are encrypted with a master key; backups are encrypted with a backup password and sent by the bot to the Telegram IDs from the settings.
 - Roles owner / admin / operator, TOTP 2FA, an audit log with a hash chain.
 
 Detailed architecture (in Russian) — [`eskadra-architecture.md`](eskadra-architecture.md).

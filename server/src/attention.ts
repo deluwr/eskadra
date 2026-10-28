@@ -2,6 +2,7 @@ import type { Ctx } from './ctx.js';
 import type { Vpn } from './vpn.js';
 import { certProblems } from './certs.js';
 import { coresOff } from './ops.js';
+import { backupPassword, backupSettings } from './backup.js';
 
 export interface Attention { level: 'fail' | 'warn' | 'info'; title: string; detail: string; serverId?: string }
 
@@ -23,7 +24,7 @@ export function attentionOf(ctx: Ctx, vpn: Vpn): Attention[] {
     for (const ib of vpn.inbounds(`server_id = ? AND state = 'error'`, s.id))
       attention.push({ level: 'warn', title: `${s.name}: конфигурация не поднялась`, detail: ib.error ?? '', serverId: s.id });
   }
-  const recipients = db.prepare(`SELECT COUNT(*) AS n FROM admins WHERE backup_recipient = 1 AND tg_id IS NOT NULL`).get() as { n: number };
-  if (recipients.n < 2) attention.push({ level: 'warn', title: 'Бэкапы: меньше двух получателей', detail: 'Если единственный получатель удалит чат, копии пропадут.' });
+  if (!backupPassword(ctx)) attention.push({ level: 'warn', title: 'Бэкапы не делаются: не задан пароль бэкапа', detail: 'Задайте пароль и Telegram ID получателей в «Настройках».' });
+  else if (backupSettings(db).tgIds.length < 2) attention.push({ level: 'warn', title: 'Бэкапы: меньше двух получателей', detail: 'Если единственный получатель удалит чат, копии пропадут.' });
   return attention;
 }

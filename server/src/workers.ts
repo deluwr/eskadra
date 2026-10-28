@@ -11,6 +11,7 @@ import type { Bot } from './bot.js';
 import { certLabel, certProblems } from './certs.js';
 import { billingDue, billingText } from './billing.js';
 import { collectMetrics, METRICS_EVERY_MS } from './analytics.js';
+import { movedTo } from './migrate.js';
 
 const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60_000 : 0);
 
@@ -105,7 +106,8 @@ export class Workers {
 
   private every(name: string, ms: number, fn: () => Promise<void>) {
     const run = async () => {
-      if (this.busy.has(name)) return;
+      // панель перенесена — серверами управляет новая, здесь фоновые задачи не работают
+      if (this.busy.has(name) || movedTo(this.ctx.db)) return;
       this.busy.add(name);
       try { await fn(); } catch (e) { this.log.warn({ err: e }, `worker ${name}`); } finally { this.busy.delete(name); }
     };

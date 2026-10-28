@@ -1,5 +1,5 @@
 import { useState, type MouseEvent } from 'react';
-import { api, fmtTime } from '../api';
+import { api, can, fmtTime } from '../api';
 import { ErrorBox, Info, Tag, toast, useAsync, usePoll } from '../ui';
 
 interface Stat { avg: number; max: number }
@@ -78,7 +78,7 @@ export function AnalyticsPage() {
           <select className="inp" style={{ width: 'auto' }} value={hours} onChange={(e) => setHours(e.target.value)} aria-label="За сколько часов">
             <option value="6">за 6 часов</option><option value="24">за сутки</option><option value="48">за двое суток</option>
           </select>
-          <button className="btn pri" disabled={dl.busy} onClick={() => void download()}>{dl.busy ? 'Собираю с серверов…' : 'Скачать для анализа'}</button>
+          {can('servers.manage') && <button className="btn pri" disabled={dl.busy} onClick={() => void download()}>{dl.busy ? 'Собираю с серверов…' : 'Скачать для анализа'}</button>}
           <span className="k">Собирается по запросу, 10–60 секунд: журналы читаются с каждого сервера, в фоне ничего не копируется.</span>
         </div>
         <ErrorBox error={dl.error} />

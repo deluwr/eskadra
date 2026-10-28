@@ -7,6 +7,8 @@ import { cmpVersion } from './releases.js';
 const read = (f: string) => { try { return fs.readFileSync(path.join(REPO_ROOT, f), 'utf8').trim(); } catch { return ''; } };
 /** Версия панели из релизного архива (dev — из репозитория). */
 export const panelVersion = () => read('VERSION') || 'dev';
+/** Репозиторий релизов (из релизного архива). */
+export const panelRepo = () => read('REPO') || 'deluwr/eskadra';
 let cache: { at: number; latest: string | null; error: string | null } | null = null;
 
 export async function versionInfo() {

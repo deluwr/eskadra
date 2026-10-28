@@ -6,7 +6,7 @@ import { Ctx, guard, HttpError, type TemplateRow } from '../ctx.js';
 import { audit } from '../lib/audit.js';
 import { medianSpeed, Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
-import { checkTemplateServers, roleOf, ScopeError } from '../roles.js';
+import { checkTemplateQuota, checkTemplateServers, roleOf, ScopeError } from '../roles.js';
 import { hopRange, hy2Entry, natRelayOf, PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
 
 const settingsBody = z.object({
@@ -283,12 +283,14 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!role.owner && role.scope.templates) throw new HttpError(403, `роль «${role.name}» работает только со своими конфигурациями — новую создаёт owner или роль без ограничения`);
     scoped(() => checkTemplateServers(role, [], [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]));
     validate(b);
+    // лимит роли на число конфигураций, которые создаёт её администратор
+    scoped(() => checkTemplateQuota(db, role, req.admin!.id));
     const id = 'tpl-' + randomBytes(3).toString('hex');
     db.prepare(
-      `INSERT INTO templates (id, name, core, protocol, port, sni, fingerprint, ech, node_ids, entry_id, entry_port, settings)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO templates (id, name, core, protocol, port, sni, fingerprint, ech, node_ids, entry_id, entry_port, settings, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(id, b.name, PROTOCOLS[b.protocol as Protocol].core, b.protocol, b.port, JSON.stringify(b.sni), b.fingerprint,
-      b.ech ? 1 : 0, JSON.stringify(b.nodeIds), b.entryId, b.entryPort, JSON.stringify(b.settings));
+      b.ech ? 1 : 0, JSON.stringify(b.nodeIds), b.entryId, b.entryPort, JSON.stringify(b.settings), req.admin!.id);
     saveCert(id, b.customCert);
     syncCompanion(db, vpn, vpn.template(id)!);
     audit(db, req.admin!.username, 'template.create', id, b);

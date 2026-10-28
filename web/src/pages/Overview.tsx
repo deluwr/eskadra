@@ -1,4 +1,4 @@
-import { api, ago, fmtBytes, fmtTime, type Server } from '../api';
+import { api, ago, can, fmtBytes, fmtTime, type Server } from '../api';
 import { ErrorBox, Info, usePoll } from '../ui';
 import { RouteMap, exitView } from '../RouteMap';
 import { HostStatsPanel } from '../HostStats';
@@ -31,7 +31,7 @@ export function OverviewPage() {
           <section className="card">
             <div className="route-head" style={{ padding: '20px 20px 0' }}>
               <h1>{d.counts.servers ? `Флот в строю: ${d.counts.online} из ${d.counts.servers}` : 'Флот пока пуст'}</h1>
-              <div className="flex"><a className="btn" href="#/users">Новый пользователь</a><a className="btn pri" href="#/servers">Добавить сервер</a></div>
+              <div className="flex">{can('users.edit') && <a className="btn" href="#/users">Новый пользователь</a>}{can('servers.manage') && <a className="btn pri" href="#/servers">Добавить сервер</a>}</div>
             </div>
             <p className="small muted" style={{ padding: '6px 20px 0' }}>
               {`Пользователей: ${d.counts.users}, активны ${d.counts.activeUsers}`} · {`трафик за месяц ${fmtBytes(d.trafficBytes)}`} · {d.lastBackup ? `последний бэкап ${fmtTime(d.lastBackup.created_at)}` : <a href="#/settings">бэкапы не настроены</a>}

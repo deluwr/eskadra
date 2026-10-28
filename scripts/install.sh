@@ -11,6 +11,8 @@
 #   ESKADRA_TLS=ip|domain        сертификат Let's Encrypt без вопроса (это согласие с условиями Let's Encrypt)
 #   ESKADRA_DOMAIN=panel.example  домен для ESKADRA_TLS=domain
 #   ESKADRA_XUI=keep|remove      что делать с найденным 3x-ui без вопроса
+#   ESKADRA_BASE_PATH=/abc123/   путь панели в адресе (по умолчанию — случайный)
+#   ESKADRA_RESTORE=/root/eskadra-move.tar.gz  перенос панели: данные (база и мастер-ключ) подставляются до первого запуска
 set -Eeuo pipefail
 
 REPO="${ESKADRA_REPO:-deluwr/eskadra}"
@@ -162,7 +164,8 @@ IP="$(public_ip)"
 if [ "$FRESH" = 1 ]; then
   say "Первичная настройка"
   PORT="${ESKADRA_PORT:-$(free_port)}"
-  BASE="/$(rand_path)/"
+  BASE="${ESKADRA_BASE_PATH:-/$(rand_path)/}"
+  [[ "$BASE" =~ ^/[a-z0-9]{4,64}/$ ]] || die "ESKADRA_BASE_PATH: вида /abc123/"
   cat > "$ENVF" <<EOF
 # Эскадра — настройки панели (меняйте через команду eskadra)
 FLEET_HOST=0.0.0.0
@@ -179,6 +182,17 @@ FLEET_PUBLIC_HOST=$IP
 FLEET_SUB_TLS=0
 EOF
   chmod 640 "$ENVF"; chgrp eskadra "$ENVF"
+fi
+
+# Перенос панели с другого сервера: данные подставляются до первого запуска, первичная настройка не нужна
+if [ -n "${ESKADRA_RESTORE:-}" ] && [ "$FRESH" = 1 ]; then
+  say "Перенос: данные панели из $ESKADRA_RESTORE"
+  [ -s "$ESKADRA_RESTORE" ] || die "нет файла с данными переноса: $ESKADRA_RESTORE"
+  SECRET="$(mktemp)"; printf 'move' > "$SECRET"   # архив переноса не зашифрован: он шёл по SSH
+  FLEET_DATA="$DATA" "$PREFIX/node/bin/node" "$PREFIX/app/server/dist/restore.js" "$ESKADRA_RESTORE" "$SECRET" "$DATA" || die "данные переноса не распакованы"
+  rm -f "$SECRET" "$ESKADRA_RESTORE"
+  chown eskadra:eskadra "$DATA/fleet.db" "$DATA/master.key"; chmod 600 "$DATA/fleet.db" "$DATA/master.key"
+  date -u +%FT%TZ > "$SETUP_MARK"
 fi
 
 cat > /etc/systemd/system/eskadra.service <<EOF

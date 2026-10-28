@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, ago, paidLeftText, type Server } from './api';
+import { api, ago, can, paidLeftText, type Server } from './api';
 import { Addr, Icon, Info, Level, RoleTag, StageHelp, StagePip, Tag, ask, toast } from './ui';
 import { HostStatsPanel } from './HostStats';
 
@@ -43,7 +43,7 @@ export function ServerTable({ servers, empty, onChanged }: { servers: Server[]; 
                 <td><Level value={s.protection_current} /></td>
                 <td>{s.fail_since ? <Tag kind="fail" dot>нет связи</Tag> : <Tag kind={s.last_seen_at ? 'ok' : undefined} dot>{ago(s.last_seen_at)}</Tag>}</td>
                 <td className="srv-acts" onClick={(e) => e.stopPropagation()}>
-                  {managed && <>
+                  {managed && can('servers.manage') && <>
                     <button type="button" className="btn ghost icon sm-icon" title="Перезапустить ядра" aria-label={`Перезапустить ядра ${s.name}`} disabled={!!busy} onClick={() => void act(s, 'cores')}>{busy === `${s.id}:cores` ? <span className="spin" /> : Icon.restart}</button>
                     <button type="button" className="btn ghost icon sm-icon" title="Перезагрузить сервер" aria-label={`Перезагрузить ${s.name}`} disabled={!!busy} onClick={() => void act(s, 'host')}>{busy === `${s.id}:host` ? <span className="spin" /> : Icon.power}</button>
                   </>}

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, ago } from '../api';
+import { api, ago, can } from '../api';
 import { ErrorBox, Info, Tag, roleLabel, useAsync, usePoll, toast } from '../ui';
 
 interface Conn {
@@ -20,7 +20,7 @@ export function PortsPage() {
     <>
       <div className="page-head"><div><h1>Порты и связность</h1><p>Открытые порты и связь между серверами</p></div></div>
       <section className="card">
-        <div className="card-head"><h2>Политика групп <Info>Группа задаёт скрытность портов, связь между нодами и разрешённый диапазон портов. Новая нода попадает в наборы соседей сама. Нажмите на группу, чтобы изменить её политику.</Info></h2><NewGroup onSaved={reload} /></div>
+        <div className="card-head"><h2>Политика групп <Info>Группа задаёт скрытность портов, связь между нодами и разрешённый диапазон портов. Новая нода попадает в наборы соседей сама. Нажмите на группу, чтобы изменить её политику.</Info></h2>{can('ports.groups') && <NewGroup onSaved={reload} />}</div>
         <div className="grp-list">
           {d.groups.map((g) => <GroupRow key={g.name} g={g} servers={d.servers.filter((s) => s.group === g.name)} onSaved={reload} />)}
         </div>
@@ -106,11 +106,11 @@ function GroupRow({ g, servers, onSaved }: { g: Conn['groups'][number]; servers:
         <label className="fld">Скрытность<select className="inp" value={v.stealth} onChange={(e) => setV({ ...v, stealth: e.target.value })}>{Object.entries(STEALTH).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></label>
         <label className="fld">Связность нод<select className="inp" value={v.peerScope} onChange={(e) => setV({ ...v, peerScope: e.target.value })}>{Object.entries(PEER).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></label>
         <label className="fld grp-range">Разрешённый диапазон портов<input className="inp mono" value={v.portRange} onChange={(e) => setV({ ...v, portRange: e.target.value })} /></label>
-        <span className="flex grp-acts">
+        {can('ports.groups') && <span className="flex grp-acts">
           <button className="btn sm pri" disabled={busy || !dirty} onClick={() => void run(async () => { await api.put('/api/v1/groups', { name: g.name, ...v }); toast(`Политика группы ${g.name} сохранена`); onSaved(); })}>Сохранить</button>
           {dirty && <button type="button" className="btn ghost sm" onClick={() => setV({ stealth: g.stealth, peerScope: g.peer_scope, portRange: g.port_range })}>Отменить</button>}
           {!servers.length && g.name !== 'default' && <button type="button" className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={() => void run(async () => { await api.del(`/api/v1/groups/${encodeURIComponent(g.name)}`); toast(`Группа ${g.name} удалена`); onSaved(); })}>Удалить группу</button>}
-        </span>
+        </span>}
         <ErrorBox error={error} />
       </div>
     </details>

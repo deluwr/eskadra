@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ago, api, can, fmtBytes, fmtTime, inScope, type Server, type User } from '../api';
+import { ago, api, can, fmtBytes, fmtTime, inScope, maxDevices, quota, refreshMe, type Server, type User } from '../api';
 import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll, ask, Info, QrButton, Addr } from '../ui';
 
 interface Form {
@@ -36,9 +36,10 @@ export function UsersPage() {
     <>
       <div className="page-head">
         <div><h1>Пользователи</h1><p>Лимиты, режимы подключения, подписки и ссылки</p></div>
-        <div className="flex">{can('users.limits') && <button className="btn" onClick={() => setGroups(true)}>Группы лимитов</button>}{can('users.edit') && <button className="btn pri" onClick={() => setSel('new')}>Новый пользователь</button>}</div>
+        <div className="flex">{can('users.limits') && <button className="btn" onClick={() => setGroups(true)}>Группы лимитов</button>}{can('users.edit') && (() => { const q = quota('users'); const full = !!q && q.made >= q.max; return <span className="flex" style={{ gap: 8 }}>{q && <span className="k">создано {q.made} из {q.max}</span>}<button className="btn pri" disabled={full} title={full ? 'лимит пользователей роли исчерпан' : undefined} onClick={() => setSel('new')}>Новый пользователь</button></span>; })()}</div>
       </div>
-      <SubServiceCard />
+      {/* адрес и порт подписок — настройка панели (settings.edit) */}
+      {can('settings.edit') && <SubServiceCard />}
       <section className="card">
         <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['online', `Онлайн · ${onlineN}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
@@ -131,6 +132,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
     // Telegram существующего пользователя меняется привязкой (кнопка «Привязать») — здесь берём сохранённый
     const body = { ...bodyOf(f), tgId: user ? user.tg_id : f.tgId || null };
     const saved = user ? await api.put<User>(`/api/v1/users/${user.id}`, body) : await api.post<User>('/api/v1/users', body);
+    if (!user) void refreshMe();   // счётчик «создано N из M» у лимита роли
     // форма — ровно то, что сохранил сервер (он, например, обрезает пробелы у комментария), иначе «несохранённые изменения» остаются
     setF(toForm(saved));
     onSaved(saved);
@@ -172,7 +174,9 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
               <label className="fld">Группа лимитов<select className="inp" value={f.limitGroup} onChange={(e) => setF({ ...f, limitGroup: e.target.value })}>{groups?.filter((x) => inScope('limitGroups', x.name) || x.name === user?.limit_group).map((x) => <option key={x.name}>{x.name}</option>)}</select></label>
               <label className="fld">Трафик в месяц, ГБ<input className="inp mono" value={f.trafficLimitGb} onChange={(e) => setF({ ...f, trafficLimitGb: e.target.value })} placeholder={g?.traffic_gb ? `из группы: ${g.traffic_gb}` : '∞'} /></label>
               <label className="fld">Действует до<input className="inp mono" type="date" value={f.expireAt} onChange={(e) => setF({ ...f, expireAt: e.target.value })} /></label>
-              <label className="fld">Устройств одновременно<input className="inp mono" value={f.deviceLimit} onChange={(e) => setF({ ...f, deviceLimit: e.target.value })} placeholder={g?.devices ? `из группы: ${g.devices}` : '∞'} /></label>
+              <label className="fld">Устройств одновременно<input className="inp mono" value={f.deviceLimit} onChange={(e) => setF({ ...f, deviceLimit: e.target.value })} placeholder={g?.devices ? `из группы: ${g.devices}` : '∞'} />
+                {/* потолок роли: сервер не сохранит больше или без лимита */}
+                {maxDevices() !== null && <span className="k">роль разрешает не больше {maxDevices()}</span>}</label>
               <label className="fld">При превышении<select className="inp" value={f.overAction} onChange={(e) => setF({ ...f, overAction: e.target.value })}><option value="disable">отключить</option><option value="notify">только уведомить</option></select></label>
               <label className="fld">Статус<select className="inp" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value as Form['status'] })}><option value="active">активен</option><option value="disabled">отключён</option></select></label>
             </div>

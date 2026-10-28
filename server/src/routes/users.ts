@@ -9,7 +9,7 @@ import { randomToken } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { effectiveLimits, json, period, Vpn } from '../vpn.js';
 import { pushAllowedIp, revokeAllowedIp } from '../access.js';
-import { roleOf, ScopeError, scopeUserBody, type RoleInfo } from '../roles.js';
+import { checkUserQuota, roleOf, ScopeError, scopeUserBody, type RoleInfo } from '../roles.js';
 
 /** Онлайн — если подключения пользователя видели за последнюю минуту (опрос узлов раз в 30 с). */
 const ONLINE_MS = 75_000;
@@ -46,11 +46,15 @@ export function subBase(ctx: Ctx): string | null {
  * Создать (id = null) или изменить пользователя — панель и бот. role — кто сохраняет: конфигурации, серверы,
  * режимы и группа лимитов приводятся к области роли (roles.ts), выданное вне области остаётся как было.
  */
-export function saveUser(ctx: Ctx, id: string | null, input: z.infer<typeof userBody>, role: RoleInfo = roleOf(ctx.db, 'owner')): string {
+export function saveUser(ctx: Ctx, id: string | null, input: z.infer<typeof userBody>, role: RoleInfo = roleOf(ctx.db, 'owner'), adminId: number | null = null): string {
   const { db } = ctx;
   const prev = id ? (db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined) ?? null : null;
   let b: z.infer<typeof userBody>;
-  try { b = scopeUserBody(db, role, prev, input); } catch (e) { if (e instanceof ScopeError) throw new HttpError(403, e.message); throw e; }
+  try {
+    b = scopeUserBody(db, role, prev, input);
+    // лимиты роли: сколько пользователей создаёт её администратор и потолок устройств
+    checkUserQuota(db, role, adminId, !id, b);
+  } catch (e) { if (e instanceof ScopeError) throw new HttpError(403, e.message); throw e; }
   if (b.nodeIds) for (const n of b.nodeIds) ctx.server(n);
   if (!db.prepare('SELECT 1 FROM limit_groups WHERE name = ?').get(b.limitGroup)) throw new HttpError(400, 'нет такой группы лимитов');
   if (b.templateIds) for (const t of b.templateIds) if (!db.prepare('SELECT 1 FROM templates WHERE id = ?').get(t)) throw new HttpError(400, 'нет такой конфигурации');
@@ -64,8 +68,8 @@ export function saveUser(ctx: Ctx, id: string | null, input: z.infer<typeof user
     return id;
   }
   const nid = 'u-' + randomBytes(4).toString('hex');
-  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token, note, excluded_profiles)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18), b.note || null, b.excludedProfiles?.length ? JSON.stringify(b.excludedProfiles) : null);
+  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token, note, excluded_profiles, created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18), b.note || null, b.excludedProfiles?.length ? JSON.stringify(b.excludedProfiles) : null, adminId);
   return nid;
 }
 
@@ -127,7 +131,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
   app.post('/api/v1/users', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     const b = userBody.parse(req.body);
     if (db.prepare('SELECT 1 FROM users WHERE name = ?').get(b.name)) throw new HttpError(409, 'пользователь с таким именем уже есть');
-    const id = saveUser(ctx, null, b, roleOfReq(req));
+    const id = saveUser(ctx, null, b, roleOfReq(req), req.admin!.id);
     vpn.markDirty();
     audit(db, req.admin!.username, 'user.create', id, { name: b.name });
     return view(getUser(id));
@@ -136,7 +140,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
   app.put<{ Params: { id: string } }>('/api/v1/users/:id', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     const u = getUser(req.params.id);
     const b = userBody.parse(req.body);
-    saveUser(ctx, u.id, b, roleOfReq(req));
+    saveUser(ctx, u.id, b, roleOfReq(req), req.admin!.id);
     vpn.markDirty();
     audit(db, req.admin!.username, 'user.update', u.id, b);
     return view(getUser(u.id));
@@ -187,6 +191,10 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get('/api/v1/limit-groups', async () => db.prepare('SELECT * FROM limit_groups ORDER BY name').all());
   app.put('/api/v1/limit-groups', { preHandler: guard(ctx, 'users.limits') }, async (req) => {
     const b = z.object({ name: z.string().trim().min(1).max(32), trafficGb: z.number().min(0).nullable(), days: z.number().int().min(1).nullable(), devices: z.number().int().min(0).nullable() }).parse(req.body);
+    // потолок устройств роли нельзя обойти группой лимитов: группа без лимита или с большим лимитом — тоже нельзя
+    const role = roleOfReq(req);
+    const max = role.owner ? null : role.scope.maxDevices;
+    if (max !== null && (b.devices === null || b.devices > max)) throw new HttpError(403, `роль «${role.name}»: устройств в группе лимитов — не больше ${max}`);
     db.prepare(`INSERT INTO limit_groups (name, traffic_gb, days, devices) VALUES (?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET traffic_gb = excluded.traffic_gb, days = excluded.days, devices = excluded.devices`).run(b.name, b.trafficGb, b.days, b.devices);
     audit(db, req.admin!.username, 'limit_group.save', b.name, b);

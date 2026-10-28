@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, fmtBytes, fmtTime } from '../api';
+import { api, can, fmtBytes, fmtTime } from '../api';
 import { ErrorBox, Info, Tag, ask, useAsync, usePoll } from '../ui';
 
 interface Backup { id: number; created_at: string; profile: string; size: number | null; status: string; detail: string | null }
@@ -11,7 +11,8 @@ export function BackupsPage() {
     <>
       <div className="page-head">
         <div><h1>Бэкапы</h1><p>Зашифрованные копии панели: отправляются ботом получателям, локально хранятся последние 14</p></div>
-        <div className="flex"><a className="btn" href="#/settings">Настройки бэкапов</a><a className="btn" href="#/backups" onClick={(e) => { e.preventDefault(); document.querySelector('.restore-anchor')?.scrollIntoView({ behavior: 'smooth' }); }}>Восстановить</a><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.post('/api/v1/backups/run'); void reload(); })}>{busy ? 'Создаю…' : 'Бэкап сейчас'}</button></div>
+        {/* восстановление и настройки бэкапов — только owner (раздел виден с правом запуска бэкапа) */}
+        <div className="flex">{can('owner') && <a className="btn" href="#/settings">Настройки бэкапов</a>}{can('owner') && <a className="btn" href="#/backups" onClick={(e) => { e.preventDefault(); document.querySelector('.restore-anchor')?.scrollIntoView({ behavior: 'smooth' }); }}>Восстановить</a>}<button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.post('/api/v1/backups/run'); void reload(); })}>{busy ? 'Создаю…' : 'Бэкап сейчас'}</button></div>
       </div>
       <ErrorBox error={error} />
       <section className="card table-wrap">
@@ -19,7 +20,8 @@ export function BackupsPage() {
           <thead><tr><th>Время</th><th>Профиль</th><th>Размер</th><th>Доставка</th><th>Файл</th></tr></thead>
           <tbody>
             {data?.map((b) => {
-              const d = b.detail ? (JSON.parse(b.detail) as { file?: string; delivered?: number; total?: number; errors?: string[] } | string) : null;
+              // detail — JSON доставки или просто текст ошибки («нет получателей age»): текст не должен ронять страницу
+              const d = b.detail ? ((() => { try { return JSON.parse(b.detail) as { file?: string; delivered?: number; total?: number; errors?: string[] } | string; } catch { return b.detail; } })()) : null;
               const o = typeof d === 'object' && d ? d : null;
               return (
                 <tr key={b.id}>
@@ -35,14 +37,14 @@ export function BackupsPage() {
           </tbody>
         </table>
       </section>
-      <RestoreCard />
+      {can('owner') && <RestoreCard />}
     </>
   );
 }
 
 interface Summary { created: string; servers: number; users: number; admins: string[]; templates: number }
 
-/** Восстановление: копия .age + приватный ключ age → проверка и сводка → подтверждение → перезапуск панели. */
+/** Восстановление: файл копии + пароль бэкапа (старые .age — приватный ключ age) → проверка и сводка → подтверждение → перезапуск панели. */
 function RestoreCard() {
   const [file, setFile] = useState<File | null>(null);
   const [key, setKey] = useState('');
@@ -50,7 +52,9 @@ function RestoreCard() {
   const [restarting, setRestarting] = useState(false);
   const { busy, error, run } = useAsync();
   const b64 = (f: File) => new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] ?? ''); r.onerror = () => rej(new Error('файл не прочитан')); r.readAsDataURL(f); });
-  const check = () => run(async () => { setSum(await api.post<Summary>('/api/v1/backups/restore/check', { file: await b64(file!), identity: key })); });
+  const check = () => run(async () => { setSum(await api.post<Summary>('/api/v1/backups/restore/check', { file: await b64(file!), secret: key })); });
+  // старые копии (.age, до v0.37) открываются приватным ключом age, новые — паролем бэкапа
+  const legacy = !!file?.name.endsWith('.age');
   const apply = async () => {
     if (!sum || !(await ask(`Заменить данные панели копией от ${fmtTime(sum.created)}? Всё, что изменилось после неё, пропадёт (прежние файлы сохранятся на сервере). Панель перезапустится, войдите учётной записью из копии.`))) return;
     void run(async () => {
@@ -65,14 +69,16 @@ function RestoreCard() {
   };
   return (
     <section className="card pad stack restore-anchor">
-      <h2>Восстановить из бэкапа <Info>Нужны файл копии (.tar.gz.age — из Telegram или с сервера) и приватный ключ age, на публичную часть которого копия зашифрована. Ключ используется только для расшифровки и не сохраняется.</Info></h2>
+      <h2>Восстановить из бэкапа <Info>Нужны файл копии (.tar.gz.enc — из Telegram или с сервера) и пароль бэкапа из «Настроек». Старые копии (.tar.gz.age) открываются приватным ключом age. Пароль используется только для расшифровки.</Info></h2>
       {restarting ? <span className="flex small" style={{ gap: 8 }}><span className="spin" aria-hidden="true" />Панель перезапускается с восстановленными данными…</span> : !sum ? (
         <>
           <div className="grid g2">
-            <label className="fld">Файл копии<input className="inp" type="file" accept=".age" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setSum(null); }} style={{ paddingTop: 8 }} /></label>
-            <label className="fld">Приватный ключ age<textarea className="inp mono" rows={2} value={key} onChange={(e) => setKey(e.target.value)} placeholder="AGE-SECRET-KEY-1…" autoComplete="off" spellCheck={false} /></label>
+            <label className="fld">Файл копии<input className="inp" type="file" accept=".enc,.age" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setSum(null); }} style={{ paddingTop: 8 }} /></label>
+            {legacy
+              ? <label className="fld">Приватный ключ age<textarea className="inp mono" rows={2} value={key} onChange={(e) => setKey(e.target.value)} placeholder="AGE-SECRET-KEY-1…" autoComplete="off" spellCheck={false} /></label>
+              : <label className="fld">Пароль бэкапа<input className="inp" type="password" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" aria-label="Пароль бэкапа" /></label>}
           </div>
-          <div><button className="btn" disabled={busy || !file || !key.includes('AGE-SECRET-KEY-')} onClick={() => void check()}>{busy ? 'Проверяю…' : 'Проверить копию'}</button></div>
+          <div><button className="btn" disabled={busy || !file || (legacy ? !key.includes('AGE-SECRET-KEY-') : !key)} onClick={() => void check()}>{busy ? 'Проверяю…' : 'Проверить копию'}</button></div>
         </>
       ) : (
         <>

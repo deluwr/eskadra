@@ -33,8 +33,14 @@ export interface Scope {
   servers: string[] | null;
   modes: Array<'direct' | 'via'> | null;
   limitGroups: string[] | null;
+  /** Лимиты на каждого администратора роли; null — без лимита. Сколько пользователей он может создать… */
+  maxUsers: number | null;
+  /** …сколько конфигураций */
+  maxTemplates: number | null;
+  /** …и сколько устройств не больше может быть у пользователя, которого он создаёт или меняет (без лимита — нельзя) */
+  maxDevices: number | null;
 }
-export const FULL_SCOPE: Scope = { templates: null, servers: null, modes: null, limitGroups: null };
+export const FULL_SCOPE: Scope = { templates: null, servers: null, modes: null, limitGroups: null, maxUsers: null, maxTemplates: null, maxDevices: null };
 
 export interface RoleInfo { id: string; name: string; builtin: boolean; owner: boolean; perms: Perm[]; scope: Scope }
 
@@ -102,6 +108,42 @@ export function scopeUserBody<B extends { templateIds: string[] | null; nodeIds:
     excludedProfiles = [...prevOff.filter((k) => !s.templates!.includes(tplOf(k))), ...excludedProfiles.filter((k) => s.templates!.includes(tplOf(k)))];
   }
   return { ...b, templateIds, nodeIds, modes, ...(excludedProfiles !== undefined ? { excludedProfiles } : {}) };
+}
+
+/** Сколько пользователей и конфигураций создал администратор (служебная Hysteria2 eskadra не считается: её создаёт панель). */
+export function createdBy(db: Db, adminId: number): { users: number; templates: number } {
+  const n = (sql: string) => (db.prepare(sql).get(adminId) as { n: number }).n;
+  return {
+    users: n('SELECT COUNT(*) AS n FROM users WHERE created_by = ?'),
+    templates: n(`SELECT COUNT(*) AS n FROM templates WHERE created_by = ? AND json_extract(settings, '$.companionOf') IS NULL`),
+  };
+}
+
+/**
+ * Лимиты роли для пользователя, которого сохраняет её администратор: новый — пока не исчерпан лимит пользователей;
+ * устройств — не больше потолка роли (свой лимит пользователя или, если его нет, группы лимитов; без лимита — нельзя).
+ */
+export function checkUserQuota(db: Db, role: RoleInfo, adminId: number | null, isNew: boolean, b: { deviceLimit: number | null; limitGroup: string }) {
+  if (role.owner) return;
+  const { maxUsers, maxDevices } = role.scope;
+  if (isNew && maxUsers !== null && adminId !== null) {
+    const made = createdBy(db, adminId).users;
+    if (made >= maxUsers) throw new ScopeError(`роль «${role.name}»: можно создать не больше ${maxUsers} пользователей (создано ${made}) — удалите ненужных или попросите owner поднять лимит`);
+  }
+  if (maxDevices !== null) {
+    const group = db.prepare('SELECT devices FROM limit_groups WHERE name = ?').get(b.limitGroup) as { devices: number | null } | undefined;
+    const devices = b.deviceLimit ?? group?.devices ?? null;
+    if (devices === null || devices > maxDevices)
+      throw new ScopeError(`роль «${role.name}»: лимит устройств пользователя — не больше ${maxDevices}${devices === null ? ' (сейчас без лимита: укажите число)' : ` (указано ${devices})`}`);
+  }
+}
+
+/** Лимит роли на число конфигураций, которые создаёт её администратор. */
+export function checkTemplateQuota(db: Db, role: RoleInfo, adminId: number) {
+  const { maxTemplates } = role.scope;
+  if (role.owner || maxTemplates === null) return;
+  const made = createdBy(db, adminId).templates;
+  if (made >= maxTemplates) throw new ScopeError(`роль «${role.name}»: можно создать не больше ${maxTemplates} конфигураций (создано ${made})`);
 }
 
 /** Серверы конфигурации, которые роль меняет: добавлять и убирать можно только серверы из области. */

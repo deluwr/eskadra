@@ -337,7 +337,7 @@ export class AdminFlows {
     if (this.ctx.db.prepare('SELECT 1 FROM users WHERE name = ?').get(parsed.data.name)) { await this.io.send(chatId, 'Пользователь с таким именем уже есть.'); return; }
     if (parsed.data.tgId && this.ctx.db.prepare('SELECT 1 FROM users WHERE tg_id = ?').get(parsed.data.tgId)) { await this.io.send(chatId, 'Этот Telegram ID уже привязан к другому пользователю.'); return; }
     let id: string;
-    try { id = saveUser(this.ctx, null, parsed.data, roleOf(this.ctx.db, a.role)); } catch (e) { await this.io.send(chatId, `Не получилось: ${esc((e as Error).message)}`); return; }
+    try { id = saveUser(this.ctx, null, parsed.data, roleOf(this.ctx.db, a.role), a.id); } catch (e) { await this.io.send(chatId, `Не получилось: ${esc((e as Error).message)}`); return; }
     this.vpn().markDirty();
     audit(this.ctx.db, a.username, 'user.create', id, { name: parsed.data.name, via: 'bot' });
     const card = this.userCard(a, this.user(id)!);

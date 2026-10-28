@@ -121,9 +121,10 @@ export class Bot {
   }
 
   /** Отправить зашифрованный бэкап всем админам-получателям; большие файлы — частями. */
-  async sendBackup(name: string, data: Buffer): Promise<{ ok: number; total: number; errors: string[] }> {
-    const ids = this.ctx.db.prepare(`SELECT username, tg_id FROM admins WHERE backup_recipient = 1 AND tg_id IS NOT NULL`).all() as Array<{ username: string; tg_id: string }>;
-    if (!this.token() || !ids.length) return { ok: 0, total: 0, errors: this.token() ? ['нет получателей с привязанным Telegram'] : ['бот не настроен'] };
+  /** Отправить файл бэкапа на Telegram ID из настроек бэкапа (частями, если больше лимита бота). */
+  async sendBackup(name: string, data: Buffer, tgIds: string[]): Promise<{ ok: number; total: number; errors: string[] }> {
+    const ids = tgIds.map((id) => ({ username: id, tg_id: id }));
+    if (!this.token() || !ids.length) return { ok: 0, total: 0, errors: this.token() ? ['не заданы Telegram ID получателей'] : ['бот не настроен'] };
     const parts: Buffer[] = [];
     for (let i = 0; i < data.length; i += PART) parts.push(data.subarray(i, i + PART));
     let ok = 0;
@@ -139,7 +140,9 @@ export class Bot {
         }
         ok++;
       } catch (e) {
-        errors.push(`${a.username}: ${(e as Error).message}`);
+        const m = (e as Error).message;
+        // бот не может написать первым: получатель должен открыть бота и нажать «Старт»
+        errors.push(`${a.username}: ${/chat not found|bot can't initiate|Forbidden/i.test(m) ? 'не написал боту /start (или заблокировал его)' : m}`);
       }
     }
     return { ok, total: ids.length, errors };
@@ -183,7 +186,8 @@ export class Bot {
   // ───── цикл ─────
 
   start() {
-    if (this.running || !this.token()) return;
+    // панель перенесена на другой сервер — бота опрашивает новая (две панели на одном токене мешают друг другу)
+    if (this.running || !this.token() || getSetting<string | null>(this.ctx.db, 'panel.movedTo', null)) return;
     this.running = true;
     // общий список команд — без админских: незнакомец не узнаёт, чем управляет бот
     void this.api('setMyCommands', { commands: [{ command: 'menu', description: 'Меню' }, { command: 'help', description: 'Справка' }] }).catch(() => undefined);

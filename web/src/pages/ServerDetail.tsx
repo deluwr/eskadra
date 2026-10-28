@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { HostStatsPanel } from '../HostStats';
 import { ViaPicker, viaBody, viaOnly, viaReady, type Via } from '../ViaPicker';
-import { api, ago, fmtTime, paidLeftText, ruDate, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
+import { api, ago, can, fmtTime, paidLeftText, ruDate, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
 import { CopyBlock, CopyButton, ErrorBox, Info, Level, Modal, Seg, StagePip, StageHelp, Switch, Tag, RoleTag, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
@@ -10,7 +10,8 @@ export function ServerDetailPage({ id }: { id: string }) {
   const [fast, setFast] = useState(false);
   const { data: d, error, reload } = usePoll(() => api.get<ServerDetail>(`/api/v1/servers/${id}`), fast ? 2_000 : 15_000, [id]);
   useEffect(() => setFast(!!d?.onboarding.running || !!d?.server.config_dirty), [d?.onboarding.running, d?.server.config_dirty]);
-  const [tab, setTab] = useState<Tab>('protect');
+  // «Защита» и «Аварийный доступ» — с правом servers.protect; без него сервер открывается на «Портах»
+  const [tab, setTab] = useState<Tab>(can('servers.protect') ? 'protect' : 'ports');
   if (!d) return <><ErrorBox error={error} />{!error && <p className="muted">Загрузка…</p>}</>;
   const s = d.server;
   // блок подключения виден, пока идёт настройка или если последняя попытка не удалась (в т. ч. на шаге ядер)
@@ -40,14 +41,14 @@ export function ServerDetailPage({ id }: { id: string }) {
       {onboarding ? <Onboarding d={d} onChange={reload} /> : (
         <>
           <div className="tabs" role="tablist">
-            {([['protect', 'Защита'], ['ports', 'Порты'], ['access', 'Доступ и SSH'], ['sos', 'Аварийный доступ'], ['host', 'Хост'], ['jobs', 'Задачи']] as Array<[Tab, string]>).map(([t, l]) => (
+            {([['protect', 'Защита'], ['ports', 'Порты'], ['access', 'Доступ и SSH'], ['sos', 'Аварийный доступ'], ['host', 'Хост'], ['jobs', 'Задачи']] as Array<[Tab, string]>).filter(([t]) => can('servers.protect') || (t !== 'protect' && t !== 'sos')).map(([t, l]) => (
               <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>{l}</button>
             ))}
           </div>
-          {tab === 'protect' && <ProtectTab d={d} onChange={reload} />}
+          {tab === 'protect' && can('servers.protect') && <ProtectTab d={d} onChange={reload} />}
           {tab === 'ports' && <PortsTab d={d} />}
           {tab === 'access' && <AccessTab d={d} onChange={reload} />}
-          {tab === 'sos' && <SosTab d={d} />}
+          {tab === 'sos' && can('servers.protect') && <SosTab d={d} />}
           {tab === 'host' && <HostTab d={d} onChange={reload} />}
           {tab === 'jobs' && <JobsCard serverId={s.id} jobs={d.jobs} />}
         </>
@@ -83,7 +84,7 @@ function HeaderActions({ d, onChange }: { d: ServerDetail; onChange: () => void 
     <div className="stack" style={{ alignItems: 'flex-end' }}>
       <div className="flex">
         {s.host_key_fp && <button className="btn" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/check`); onChange(); })}>Проверить связь</button>}
-        <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={del}>Удалить из панели</button>
+        {can('servers.manage') && <button className="btn ghost" style={{ color: 'var(--fail)' }} disabled={busy} onClick={del}>Удалить из панели</button>}
       </div>
       <ErrorBox error={error} />
     </div>
@@ -405,19 +406,22 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   return (
     <section className="card">
       <div className="card-head"><h2>Доступ и SSH</h2></div>
-      <div className="row">
+      {/* админские адреса — защита сервера (servers.protect), терминал — только owner */}
+      {can('servers.protect') && <div className="row">
         <div className="row-text"><b>Админские адреса</b><span className="k">Пускаются по SSH на уровне P3. Если адрес неизвестен — «Временно открыть SSH» на вкладке «Аварийный доступ».</span></div>
         <div className="flex">
           {s.admin_ips.map((a) => <span key={a} className="tag"><Addr value={a} /> <button className="link" aria-label={`убрать ${a}`} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/admin-ips`, { ip: a, remove: true }); onChange(); })}>×</button></span>)}
           <input className="inp mono" style={{ width: 170 }} value={ip} onChange={(e) => setIp(e.target.value)} placeholder="198.51.100.20" aria-label="Новый админский адрес" />
           <button className="btn" disabled={busy || !ip} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/admin-ips`, { ip }); setIp(''); onChange(); })}>Добавить</button>
         </div>
-      </div>
+      </div>}
+      {can('owner') && <>
       <div className="row">
         <div className="row-text"><b>Терминал (shell) в панели</b><span className="k">{s.ssh_mode === 'shell' ? 'Включён: ключ панели без forced command, широкий sudo.' : 'Выключен — ключ панели принудительно идёт через fleet-exec (строгий режим). Всё управление работает и без shell.'}</span></div>
         <Switch label="Терминал" on={s.ssh_mode === 'shell'} disabled={busy || s.sudo_mode !== 'restricted'} onChange={(v) => void run(async () => { await api.post(`/api/v1/servers/${s.id}/ssh-mode`, { mode: v ? 'shell' : 'strict' }); onChange(); })} />
       </div>
       {s.ssh_mode === 'shell' && <Terminal id={s.id} />}
+      </>}
       <MgmtRow d={d} onChange={onChange} />
       <div className="row">
         <div className="row-text"><b>Прямой доступ пользователей <Info>Пользователи подключаются к этому серверу напрямую, а не только через вход: профиль «{s.name} · напрямую» попадает в подписки.</Info></b></div>

@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { isIP } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { Ops } from '../ops.js';
+import { Ops, startJob } from '../ops.js';
 import { botProxyOptions, botProxySetting, saveBotProxy } from '../botproxy.js';
 import { panelReleases, versionInfo } from '../version.js';
 import { cmpVersion } from '../releases.js';
@@ -14,16 +14,17 @@ import { audit, verifyAuditChain } from '../lib/audit.js';
 import { COOKIE } from './auth.js';
 import { publicView, stageOf } from './servers.js';
 import { Vpn, json, period } from '../vpn.js';
-import type { Backups } from '../backup.js';
+import { backupPassword, backupSettings, saveBackupSettings, type Backups } from '../backup.js';
 import type { Bot } from '../bot.js';
 import { attentionOf } from '../attention.js';
 import { listSnapshots, MIN_ROLLBACK_WITH_DATA, requestUpdate, snapshotDb, stageRollbackData, updateHelperInstalled, updateStatus } from '../update.js';
 import { armRestore, decryptBackup, stageRestore } from '../restorelib.js';
 import { config } from '../config.js';
 import { NOTIFY } from '../botadmin.js';
-import { listRoles, PERM_KEYS, PERMS, type Perm } from '../roles.js';
+import { listRoles, PERM_KEYS, PERMS, roleOf, type Perm } from '../roles.js';
 import { blocksOf } from '../blocks.js';
 import type { SubService } from '../subsvc.js';
+import { movedTo, movePanel } from '../migrate.js';
 
 async function detectEgressIp(): Promise<string> {
   const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(8000) });
@@ -112,10 +113,14 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   const scopeBody = z.object({
     templates: z.array(z.string()).nullable(), servers: z.array(z.string()).nullable(),
     modes: z.array(z.enum(['direct', 'via'])).min(1).nullable(), limitGroups: z.array(z.string()).nullable(),
+    // лимиты на администратора роли; null — без лимита
+    maxUsers: z.number().int().min(0).max(100000).nullable().default(null), maxTemplates: z.number().int().min(0).max(1000).nullable().default(null),
+    maxDevices: z.number().int().min(1).max(1000).nullable().default(null),
   });
   const roleBody = z.object({ name: z.string().trim().min(2).max(32).regex(/^[\p{L}0-9 ._-]+$/u), perms: z.array(z.enum(PERM_KEYS as [Perm, ...Perm[]])), scope: scopeBody });
 
-  app.get('/api/v1/roles', async () => rolesView());
+  // роли и администраторы — раздел owner; остальные видят только себя (свой Telegram, свою роль в шапке)
+  app.get('/api/v1/roles', { preHandler: guard(ctx, 'owner') }, async () => rolesView());
 
   /** Новая роль со своими правами и областью; id — из имени (латиница) или случайный. */
   app.post('/api/v1/roles', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
@@ -153,7 +158,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
 
   const adminView = () => db.prepare('SELECT id, username, role, totp_enabled, tg_id, backup_recipient, last_login_at, created_at FROM admins ORDER BY id').all();
 
-  app.get('/api/v1/admins', async () => adminView());
+  app.get('/api/v1/admins', async (req) => (roleOf(db, req.admin!.role).owner ? adminView() : (adminView() as Array<{ id: number }>).filter((a) => a.id === req.admin!.id)));
 
   app.post('/api/v1/admins', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
     const b = z.object({ username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/), role: z.string() }).parse(req.body);
@@ -273,7 +278,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     whitelistOn: !!db.prepare(`SELECT 1 FROM groups WHERE stealth IN ('S3','S4')`).get(),
     failThresholdMin: getSetting(db, 'check.failThresholdMin', 120),
     bot: { configured: !!getSetting(db, 'bot.token', '') },
-    backup: deps.backups.settings(),
+    backup: { ...deps.backups.settings(), hasPassword: !!backupPassword(ctx) },
   }));
 
   // ───── обновление панели из интерфейса (root-помощник eskadra-update.path) ─────
@@ -422,13 +427,52 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
 
   app.put('/api/v1/settings/backup', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
     const b = z.object({
-      recipients: z.array(z.string().trim().regex(/^age1[0-9a-z]{58}$/, 'нужен публичный ключ age1…')).max(8),
+      // Telegram ID человека (число) или группы (с минусом); получатель должен написать боту /start
+      tgIds: z.array(z.string().trim().regex(/^-?\d{5,16}$/, 'Telegram ID — число, например 123456789 (у группы — с минусом)')).max(16),
       time: z.string().regex(/^\d{2}:\d{2}$/),
       enabled: z.boolean(),
+      // новый пароль бэкапа; null — оставить прежний
+      password: z.string().min(10, 'пароль бэкапа — от 10 символов').max(200).nullable().default(null),
     }).parse(req.body);
-    setSetting(db, 'backup', b);
-    audit(db, who(req), 'backup.settings', undefined, { recipients: b.recipients.map((r) => r.slice(0, 12) + '…'), time: b.time });
-    return b;
+    const tgIds = [...new Set(b.tgIds)];
+    if (!b.password && !backupPassword(ctx)) throw new HttpError(400, 'задайте пароль бэкапа — без него копию не зашифровать');
+    saveBackupSettings(ctx, { tgIds, time: b.time, enabled: b.enabled }, b.password);
+    audit(db, who(req), 'backup.settings', undefined, { tgIds, time: b.time, passwordChanged: !!b.password });
+    return { ...backupSettings(db), hasPassword: true };
+  });
+
+  // ───── перенос панели на другой сервер ─────
+  let moving = false;
+  app.post('/api/v1/panel/move', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const b = z.object({
+      host: z.string().trim().min(3).max(253).regex(/^[A-Za-z0-9.:-]+$/, 'адрес сервера: IP или домен'),
+      sshPort: z.number().int().min(1).max(65535).default(22),
+      user: z.string().trim().min(1).max(32).regex(/^[a-z_][a-z0-9_.-]*$/, 'имя пользователя SSH').default('root'),
+      password: z.string().max(512).optional(),
+      privateKey: z.string().max(16384).optional(),
+      tls: z.enum(['ip', 'domain']).default('ip'),
+      domain: z.string().trim().max(253).regex(/^[A-Za-z0-9.-]*$/).optional(),
+    }).parse(req.body);
+    if (!b.password && !b.privateKey) throw new HttpError(400, 'укажите пароль или ключ SSH нового сервера');
+    if (moving) throw new HttpError(409, 'перенос уже идёт');
+    moving = true;
+    const job = startJob(ctx, null, 'panel.move');
+    audit(db, who(req), 'panel.move', b.host, { host: b.host, user: b.user, tls: b.tls, domain: b.domain });
+    // перенос — в фоне (несколько минут); пароль и ключ живут только в памяти задачи
+    void movePanel(ctx, b, job.log, () => deps.bot.stop())
+      .then((url) => { job.finish('ok'); audit(db, 'system', 'panel.moved', url); })
+      .catch((e) => { job.log(`остановлено: ${(e as Error).message}`); job.finish('failed'); })
+      .finally(() => { moving = false; });
+    return { jobId: job.id };
+  });
+
+  /** Вернуть управление сюда (перенос не удался или передумали): фоновые задачи и бот снова работают здесь. */
+  app.post('/api/v1/panel/move/cancel', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const was = movedTo(db);
+    db.prepare(`DELETE FROM settings WHERE key = 'panel.movedTo'`).run();
+    deps.bot.start();
+    audit(db, who(req), 'panel.move_cancel', undefined, { was });
+    return { ok: true };
   });
 
   // ───── бэкапы ─────
@@ -437,9 +481,10 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
 
   // Восстановление из бэкапа в панели: загрузить копию и приватный ключ age → проверить → подтвердить → перезапуск
   app.post('/api/v1/backups/restore/check', { preHandler: guard(ctx, 'owner', { otp: true }), bodyLimit: 400 * 1024 * 1024 }, async (req) => {
-    const b = z.object({ file: z.string().min(10), identity: z.string().min(20).max(4000) }).parse(req.body);
+    // secret — пароль бэкапа (для старых копий .age — приватный ключ age)
+    const b = z.object({ file: z.string().min(10), secret: z.string().min(1).max(4000) }).parse(req.body);
     let r;
-    try { r = await decryptBackup(Buffer.from(b.file, 'base64'), b.identity); } catch (e) { throw new HttpError(400, (e as Error).message); }
+    try { r = await decryptBackup(Buffer.from(b.file, 'base64'), b.secret); } catch (e) { throw new HttpError(400, (e as Error).message); }
     const summary = stageRestore(config.dataDir, r.manifest, r.files);
     audit(db, who(req), 'backup.restore_check', undefined, { created: summary.created });
     return summary;

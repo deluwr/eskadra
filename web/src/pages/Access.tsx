@@ -7,6 +7,32 @@ import { RolesCard, type RolesData } from './Roles';
 interface Admin { id: number; username: string; role: string; totp_enabled: number; tg_id: string | null; backup_recipient: number; last_login_at: string | null }
 
 export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () => void }) {
+  // администраторы и роли — раздел owner; остальным сервер отдаёт только их самих: «Мой аккаунт» со своим Telegram
+  if (!auth.owner) return <MyAccount auth={auth} onChange={onChange} />;
+  return <OwnerAccess auth={auth} onChange={onChange} />;
+}
+
+/** «Мой аккаунт» для не-owner: 2FA, пароль, сессии, уведомления и свой Telegram — без списка администраторов и ролей. */
+function MyAccount({ auth, onChange }: { auth: AuthState; onChange: () => void }) {
+  const { data: admins, reload } = usePoll(() => api.get<Admin[]>('/api/v1/admins'), null);
+  const me = admins?.find((a) => a.username === auth.username);
+  return (
+    <>
+      <div className="page-head"><div><h1>Мой аккаунт</h1><p>Вход, 2FA, сессии и уведомления. Роль: {auth.roleName ?? auth.role}; права роли назначает owner</p></div></div>
+      <MySecurity auth={auth} onChange={onChange} />
+      <MyNotify />
+      {me && (
+        <section className="card pad stack">
+          <h2>Мой Telegram</h2>
+          <p className="small muted">На этот Telegram бот присылает уведомления и принимает команды администратора.</p>
+          <TgBind tgId={me.tg_id} canEdit linkUrl={`/api/v1/admins/${me.id}/tg-link`} onChanged={() => void reload()} onSaveId={(v) => api.patch('/api/v1/me', { tgId: v })} />
+        </section>
+      )}
+    </>
+  );
+}
+
+function OwnerAccess({ auth, onChange }: { auth: AuthState; onChange: () => void }) {
   const { data: admins, setData, reload } = usePoll(() => api.get<Admin[]>('/api/v1/admins'), null);
   const { busy, error, run } = useAsync();
   const [nu, setNu] = useState({ username: '', role: 'admin' });
@@ -27,7 +53,7 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
         <div className="card-head"><h2>Администраторы</h2><span className="k">Личный флот: реселлеров нет</span></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
           <table>
-            <thead><tr><th>Учётная запись</th><th>Роль</th><th>2FA</th><th>Telegram</th><th>Получает бэкапы</th><th>Последний вход</th><th /></tr></thead>
+            <thead><tr><th>Учётная запись</th><th>Роль</th><th>2FA</th><th>Telegram</th><th>Последний вход</th><th /></tr></thead>
             <tbody>{admins?.map((a) => (
               <tr key={a.id}>
                 <td><b>{a.username}</b>{a.username === auth.username && <> <span className="k">(вы)</span></>}</td>
@@ -35,7 +61,6 @@ export function AccessPage({ auth, onChange }: { auth: AuthState; onChange: () =
                 <td>{a.totp_enabled ? <Tag kind="ok">TOTP</Tag> : <Tag kind="warn">не включена</Tag>}</td>
                 <td><TgBind tgId={a.tg_id} canEdit={isOwner || a.username === auth.username} linkUrl={`/api/v1/admins/${a.id}/tg-link`} onChanged={() => void reload()}
                   onSaveId={(v) => (isOwner ? api.patch(`/api/v1/admins/${a.id}`, { tgId: v }) : api.patch('/api/v1/me', { tgId: v }))} /></td>
-                <td><Switch label="Получает бэкапы" on={!!a.backup_recipient} disabled={!isOwner || busy} onChange={(v) => void patch(a.id, { backupRecipient: v }, v ? `${a.username} получает бэкапы` : `${a.username} больше не получает бэкапы`)} /></td>
                 <td className="k">{fmtTime(a.last_login_at)}</td>
                 <td>{isOwner && a.username !== auth.username && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} onClick={async () => { if (await ask(`Удалить ${a.username}?`)) void run(async () => { setData(await api.del<Admin[]>(`/api/v1/admins/${a.id}`)); toast(`${a.username} удалён`); }); }}>Удалить</button>}</td>
               </tr>

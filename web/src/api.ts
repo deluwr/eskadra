@@ -137,10 +137,25 @@ export const ago = (s: string | null | undefined) => {
 // ───── права текущего админа (роль и её область) ─────
 
 /** Область роли: null — все; иначе только эти (roles.ts на сервере). */
-export interface Scope { templates: string[] | null; servers: string[] | null; modes: Array<'direct' | 'via'> | null; limitGroups: string[] | null }
-let me: { owner: boolean; perms: string[]; scope: Scope | null } = { owner: false, perms: [], scope: null };
-export const setMe = (m: { owner: boolean; perms: string[]; scope: Scope | null }) => { me = m; };
+export interface Scope {
+  templates: string[] | null; servers: string[] | null; modes: Array<'direct' | 'via'> | null; limitGroups: string[] | null;
+  /** лимиты на администратора роли; null или нет — без лимита */
+  maxUsers?: number | null; maxTemplates?: number | null; maxDevices?: number | null;
+}
+type ScopeList = 'templates' | 'servers' | 'modes' | 'limitGroups';
+interface Me { owner: boolean; perms: string[]; scope: Scope | null; created?: { users: number; templates: number } | null }
+let me: Me = { owner: false, perms: [], scope: null };
+export const setMe = (m: Me) => { me = m; };
 /** Разрешено ли текущему админу (для интерфейса — сервер проверяет сам). */
 export const can = (perm: string) => me.owner || me.perms.includes(perm);
 /** В области ли роли: kind — конфигурации, серверы, режимы или группы лимитов. */
-export const inScope = (kind: keyof Scope, id: string) => me.owner || !me.scope?.[kind] || (me.scope[kind] as string[]).includes(id);
+export const inScope = (kind: ScopeList, id: string) => me.owner || !me.scope?.[kind] || (me.scope[kind] as string[]).includes(id);
+/** Лимит роли на администратора: сколько можно и сколько уже создано; null — без лимита. */
+export const quota = (kind: 'users' | 'templates'): { max: number; made: number } | null => {
+  const max = me.owner ? null : kind === 'users' ? me.scope?.maxUsers : me.scope?.maxTemplates;
+  return max == null ? null : { max, made: me.created?.[kind] ?? 0 };
+};
+/** Перечитать права и счётчики «создано» после создания пользователя или конфигурации (лимиты роли). */
+export const refreshMe = () => api.get<Me>('/api/v1/auth/state').then(setMe).catch(() => undefined);
+/** Потолок устройств пользователя для роли текущего админа; null — без потолка. */
+export const maxDevices = () => (me.owner ? null : me.scope?.maxDevices ?? null);
