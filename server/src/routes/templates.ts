@@ -323,7 +323,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get<{ Params: { id: string } }>('/api/v1/templates/:id/health', async (req) => {
     const t = vpn.template(req.params.id);
     if (!t) throw new HttpError(404, 'шаблон не найден');
-    const rows = db.prepare(`SELECT h.exit_id, s.name, s.host, h.rtt_ms, h.mbps, h.ok, h.error, h.exit_ip, h.exit_loc, h.checked_at FROM exit_health h JOIN servers s ON s.id = h.exit_id WHERE h.template_id = ? ORDER BY s.name`).all(t.id);
+    const rows = db.prepare(`SELECT h.exit_id, s.name, s.host, h.rtt_ms, h.mbps, h.ok, h.error, h.exit_ip, h.exit_loc, h.checked_at, h.checked_at >= datetime('now', '-30 minutes') AS fresh FROM exit_health h JOIN servers s ON s.id = h.exit_id WHERE h.template_id = ? ORDER BY s.name`).all(t.id);
     const ov = getSetting<string | null>(db, `auto.override.${t.id}`, null);
     const act = getSetting<string | null>(db, `auto.actual.${t.id}`, null);
     const id = (tag: string | null) => (tag ? tag.slice(`to-${t.id}-`.length) : null);

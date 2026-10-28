@@ -47,7 +47,7 @@ test('node config only reaches local SSH; client config maps local port to node'
   assert.equal(n.inbounds[0].port, t.port);
   assert.equal(n.inbounds[0].streamSettings.realitySettings.privateKey, t.privateKey);
   assert.deepEqual(n.inbounds[0].settings.clients, [{ id: t.uuid, flow: 'xtls-rprx-vision' }]);
-  const c = clientConfig([{ id: 'n1', host: '203.0.113.7', sshPort: 3333, creds: t }]) as any;
+  const c = clientConfig([{ id: 'n1', host: '203.0.113.7', sshPort: 3333, localPort: t.localPort, creds: t }]) as any;
   assert.equal(c.inbounds[0].listen, '127.0.0.1');
   assert.equal(c.inbounds[0].port, t.localPort);
   const out = c.outbounds.find((o: any) => o.tag === 'out-n1');
@@ -240,11 +240,11 @@ test('пользователь получает профили только вы
 
 test('туннель через прокси: соединение к узлу идёт через dialerProxy, прокси — отдельный outbound', () => {
   const t = newTunnel([]);
-  const cfg = clientConfig([{ id: 'lv', host: '203.0.113.9', sshPort: 22, creds: t, via: { protocol: 'vless', settings: {} } }]) as any;
+  const cfg = clientConfig([{ id: 'lv', host: '203.0.113.9', sshPort: 22, localPort: t.localPort, creds: t, via: { protocol: 'vless', settings: {} } }]) as any;
   const out = cfg.outbounds.find((o: any) => o.tag === 'out-lv');
   assert.equal(out.streamSettings.sockopt.dialerProxy, 'via-lv');
   assert.equal(cfg.outbounds.find((o: any) => o.tag === 'via-lv').protocol, 'vless');
-  const direct = clientConfig([{ id: 'de', host: '203.0.113.2', sshPort: 22, creds: t }]) as any;
+  const direct = clientConfig([{ id: 'de', host: '203.0.113.2', sshPort: 22, localPort: t.localPort, creds: t }]) as any;
   assert.equal(direct.outbounds.find((o: any) => o.tag === 'out-de').streamSettings.sockopt, undefined);
 });
 

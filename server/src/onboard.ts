@@ -25,7 +25,7 @@ type Log = (line: string) => void;
 
 /** Сниппет под канал узла (прямой или туннель). */
 export async function snippetOf(ctx: Ctx, r: ServerRow): Promise<string> {
-  if (r.mgmt_mode !== 'tunnel') return bootstrapSnippet({ panelIps: ctx.executorIps(), pubkey: r.key_pub });
+  if (r.mgmt_mode !== 'tunnel') return bootstrapSnippet({ panelIps: r.mgmt_mode === 'inbound' ? [r.host, ...ctx.executorIps()] : ctx.executorIps(), pubkey: r.key_pub });
   const creds = credsOf(ctx, r);
   if (!creds) throw new HttpError(409, 'у узла нет данных служебного туннеля — переключите канал заново');
   const xray = await xrayPin(ctx).catch((e: Error) => { throw new HttpError(502, `не удалось получить релиз Xray с GitHub: ${e.message}`); });

@@ -83,7 +83,12 @@ export function RouteMap({ entry, entryOff, exits, ordered, onToggle, onMove, em
 }
 
 /** Подписи выхода по замерам «Авто»: что сейчас с ним и цифры. */
-export function exitView(h: { rtt_ms: number | null; mbps: number | null; ok: number; error: string | null } | null | undefined, opts: { lead: boolean; failSince?: string | null; mode?: string; ago?: (iso: string) => string }): Pick<MapExit, 'state' | 'note' | 'metric'> {
+export function exitView(h: { rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; fresh?: number } | null | undefined, opts: { lead: boolean; failSince?: string | null; mode?: string; ago?: (iso: string) => string }): Pick<MapExit, 'state' | 'note' | 'metric'> {
+  // панель не заходит на сервер, но вход до него недавно дошёл: выход работает — пометка вместо «нет связи»
+  if (opts.failSince && h?.ok && h.fresh) {
+    const v = exitView(h, { ...opts, failSince: null });
+    return { ...v, note: `${v.note} · панель не видит` };
+  }
   let metric = h && (h.rtt_ms !== null || h.mbps !== null) ? `${h.rtt_ms ?? '—'} мс · ${h.mbps ?? '—'} Мбит/с` : undefined;
   if (opts.failSince) return { state: 'fail', note: opts.ago ? `нет связи · ${opts.ago(opts.failSince)}` : 'нет связи', metric };
   if (h && !h.ok) return { state: 'fail', note: h.error === 'выход не отвечает' ? 'неактивен' : h.error ?? 'ниже порога', metric };

@@ -105,7 +105,8 @@ export async function movePanel(ctx: Ctx, t: MoveTarget, log: (l: string) => voi
     // ── 2. новый адрес — на узлах и в executor.ips ──
     setSetting(ctx.db, 'executor.ips', [...new Set([...ctx.executorIps(), ip])]);
     const failed: string[] = [];
-    for (const s of ctx.servers().filter((x) => x.sudo_mode === 'restricted' && x.mgmt_mode !== 'tunnel')) {
+    // туннель и «через конфигурацию» не зависят от адреса панели — им разрешать нечего
+    for (const s of ctx.servers().filter((x) => x.sudo_mode === 'restricted' && (x.mgmt_mode === 'direct' || x.mgmt_mode === 'local'))) {
       try {
         await ctx.onNode(s, async (n) => { const r = await n.op(['allow', ip], { timeoutMs: 60_000 }); if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim()); });
         log(`${s.name}: новый адрес панели ${ip} разрешён`);

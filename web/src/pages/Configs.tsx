@@ -335,8 +335,9 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
       const h = health?.rows.find((r) => r.exit_id === x.id);
       if (ib?.state === 'error') return { id: x.id, name: x.name, state: 'fail', note: 'ошибка выката' };
       if (!ib || ib.state !== 'active') return { id: x.id, name: x.name, state: 'idle', note: ib ? 'выкатывается' : 'после выката' };
-      if (!d.entryId || oneExit || x.fail_since) return { id: x.id, name: x.name, state: x.fail_since ? 'fail' : 'ok', note: x.fail_since ? 'нет связи' : 'работает' };
-      return { id: x.id, name: x.name, ...exitView(h, { lead: lead === x.id, mode: st.autoEnabled ? st.autoMode : 'off' }) };
+      if (!d.entryId || oneExit) return { id: x.id, name: x.name, state: x.fail_since ? 'fail' : 'ok', note: x.fail_since ? 'нет связи' : 'работает' };
+      // через вход: панель может не заходить на выход, а вход до него доходит — это решают замеры входа (exitView)
+      return { id: x.id, name: x.name, ...exitView(h, { lead: lead === x.id, failSince: x.fail_since, mode: st.autoEnabled ? st.autoMode : 'off' }) };
     }),
     ...managed.filter((s) => s.id !== d.entryId && !d.nodeIds.includes(s.id)).map((s): MapExit => ({ id: s.id, name: s.name, state: 'off', note: 'не используется' })),
   ].map((x) => {
@@ -699,7 +700,7 @@ export function JobLog({ id, onDone, title = 'Выкат' }: { id: number; onDon
   );
 }
 
-interface Health { rows: Array<{ exit_id: string; name: string; host: string; exit_ip: string | null; exit_loc: string | null; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string }>; selected: string | null; actual: string | null; checkedAt: string | null; slow: string[]; speedAt: string | null; decideAt: string | null; median: Record<string, number | null>; spread?: SpreadState | null }
+interface Health { rows: Array<{ exit_id: string; name: string; host: string; exit_ip: string | null; exit_loc: string | null; rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; checked_at: string; fresh?: number }>; selected: string | null; actual: string | null; checkedAt: string | null; slow: string[]; speedAt: string | null; decideAt: string | null; median: Record<string, number | null>; spread?: SpreadState | null }
 
 /** Замер канала сервера на нём самом, Мбит/с. */
 interface LinkTest { down: number; up: number; at: string; source?: 'ookla' | 'mirrors'; server?: string; note?: string }

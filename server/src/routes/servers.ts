@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import path from 'node:path';
 import { isIP } from 'node:net';
+import dns from 'node:dns/promises';
 import { config } from '../config.js';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
@@ -34,7 +35,7 @@ export function publicView(ctx: Ctx, r: ServerRow) {
   const { key_priv_sealed: _secret, fw_plan: _plan, xui_pass_sealed: _xp, mgmt_key_sealed: _mk, mgmt_uuid: _mu, mgmt_via: _mv, ...rest } = r;
   return {
     ...rest,
-    mgmt: { via: viaLabel(ctx, mgmtVia(ctx, r)), mode: r.mgmt_mode, port: r.mgmt_port, sni: r.mgmt_sni, localPort: r.mgmt_local_port, client: r.mgmt_mode === 'tunnel' ? ctx.mgmt?.status() ?? null : null },
+    mgmt: { via: viaLabel(ctx, mgmtVia(ctx, r)), mode: r.mgmt_mode, port: r.mgmt_port, sni: r.mgmt_sni, localPort: r.mgmt_local_port, client: r.mgmt_mode === 'tunnel' || r.mgmt_mode === 'inbound' ? ctx.mgmt?.status() ?? null : null },
     external_cores: json(r.external_cores, []),
     coreModeEffective: coreMode(r),
     paidDaysLeft: paidDaysLeft(r.paid_until),
@@ -96,7 +97,9 @@ const patchBody = z.object({
   /** до какого дня оплачен сервер; null — не следить */
   paidUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), 'неверная дата').nullable().optional(),
   paidWarnDays: z.number().int().min(1).max(60).optional(),
-  mgmtMode: z.enum(['direct', 'tunnel']).optional(),
+  mgmtMode: z.enum(['direct', 'tunnel', 'inbound']).optional(),
+  /** «через конфигурацию»: Xray-конфигурация с inbound'ом на этом сервере, внутри которой идёт SSH панели */
+  mgmtTemplate: z.string().max(64).optional(),
   /** прокси для туннеля управления; null — напрямую */
   mgmtVia: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('fleet'), serverId: z.string().max(64), templateId: z.string().max(64) }),
@@ -196,7 +199,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       | { id: number; created_at: string; summary: string } | undefined;
     const jobs = db.prepare('SELECT id, kind, status, started_at, finished_at FROM jobs WHERE server_id = ? ORDER BY id DESC LIMIT 20').all(r.id);
     const inbounds = db.prepare(
-      `SELECT i.id, i.kind, i.port, i.proto, i.state, i.error, i.applied_at, t.name AS template, t.protocol, t.core
+      `SELECT i.id, i.kind, i.port, i.proto, i.state, i.error, i.applied_at, t.name AS template, t.id AS template_id, t.protocol, t.core
        FROM inbounds i JOIN templates t ON t.id = i.template_id WHERE i.server_id = ? ORDER BY i.port`,
     ).all(r.id);
     return {
@@ -229,7 +232,21 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     const b = patchBody.parse(req.body);
     if (b.group) db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(b.group);
     if (b.mgmtMode && r.mgmt_mode === 'local') throw new HttpError(409, 'главный сервер управляется локально — канал не меняется');
-    if (b.mgmtMode && b.mgmtMode !== r.mgmt_mode) {
+    let consoleHint: string | null = null;
+    if (b.mgmtMode === 'inbound') {
+      // через конфигурацию: SSH панели внутри уже открытого inbound'а Xray-конфигурации на этом сервере (svc.mgmt)
+      const tid = b.mgmtTemplate ?? r.mgmt_template;
+      if (!tid) throw new HttpError(400, 'выберите конфигурацию, через которую панель будет заходить на сервер');
+      if (new Vpn(ctx).template(tid)?.core !== 'xray') throw new HttpError(400, 'нужна Xray-конфигурация (VLESS, VMess, Trojan, Shadowsocks) — через Hysteria2 и MTProto SSH не идёт');
+      viaOutbound(ctx, { kind: 'fleet', serverId: r.id, templateId: tid });   // конфигурация выкачена на этот сервер
+      // SSH приходит от Xray узла на его же адрес: этот адрес должен пускаться ключом панели (from=) и firewall'ом —
+      // разрешаем, пока работает прежний канал; сервер недоступен — один раз в консоли хостера
+      const ip = isIP(r.host) ? r.host : (await dns.lookup(r.host, { family: 4 }).catch(() => null))?.address ?? r.host;
+      if (r.fail_since || r.sudo_mode !== 'restricted') consoleHint = `fleetctl allow ${ip}`;
+      else try { await ctx.onNode(r, async (n) => { const x = await n.op(['allow', ip], { timeoutMs: 60_000 }); if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim()); }); }
+      catch { consoleHint = `fleetctl allow ${ip}`; }
+      ctx.updateServer(r.id, { mgmt_mode: 'inbound', mgmt_template: tid, ...(r.mgmt_local_port ? {} : { mgmt_local_port: newTunnel(ctx.servers().map((x) => x.mgmt_local_port ?? 0)).localPort }) });
+    } else if (b.mgmtMode && b.mgmtMode !== r.mgmt_mode) {
       if (b.mgmtMode === 'direct' && !ctx.executorIps().length) throw new HttpError(400, 'для прямого канала задайте адрес исполнителя (executor.ips)');
       // ключи туннеля сохраняются при переключениях: повторный сниппет не меняет конфиг узла
       ctx.updateServer(r.id, { mgmt_mode: b.mgmtMode, ...(b.mgmtMode === 'tunnel' && !credsOf(ctx, r) ? tunnelFields() : {}) });
@@ -252,7 +269,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     // конфиг узла меняется (прямой доступ) — применяем сразу в фоне, а не ждём ближайшего цикла синхронизации
     if (b.directAccess !== undefined && r.sudo_mode === 'restricted')
       void ctx.onNode(r, (n) => ops.applyServer(ctx.server(r.id), n, () => undefined)).catch(() => undefined);
-    return publicView(ctx, ctx.server(r.id));
+    // consoleHint — что выполнить в консоли хостера, если сервер сейчас недоступен (канал «через конфигурацию»)
+    return { ...publicView(ctx, ctx.server(r.id)), consoleHint };
   });
 
   // ───── подключение (шаги 2–5 runbook) ─────

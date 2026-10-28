@@ -358,7 +358,7 @@ export class AdminFlows {
   }
 
   private serverCard(a: AdminRow, s: ServerRow): Screen {
-    const role = (s.mgmt_mode === 'local' ? 'Исполнитель (главный)' : s.role === 'exit' ? 'Выход' : 'Relay') + (s.mgmt_mode === 'tunnel' ? ' · туннель' : '');
+    const role = (s.mgmt_mode === 'local' ? 'Исполнитель (главный)' : s.role === 'exit' ? 'Выход' : 'Relay') + (s.mgmt_mode === 'tunnel' ? ' · туннель' : s.mgmt_mode === 'inbound' ? ' · через конфигурацию' : '');
     const lines = [
       `<b>${esc(s.name)}</b> — ${role}`,
       s.fail_since ? `🔴 нет связи с ${esc(s.fail_since.slice(0, 16).replace('T', ' '))}` : s.last_seen_at ? '🟢 на связи' : '⚪️ ещё не подключён',

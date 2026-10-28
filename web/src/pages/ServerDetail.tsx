@@ -467,8 +467,13 @@ function TunnelVia({ s, onSaved, saveLabel = 'Сохранить' }: { s: Server
 function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
-  const [ask, setAsk] = useState<'direct' | 'tunnel' | null>(null);
+  const [ask, setAsk] = useState<'direct' | 'tunnel' | 'inbound' | null>(null);
   const [switched, setSwitched] = useState(false);
+  // «через конфигурацию»: Xray-конфигурации, уже работающие на этом сервере (их порт открыт), и что выполнить в консоли
+  const xray = d.inbounds.filter((i) => i.core === 'xray' && i.kind === 'direct' && i.state === 'active' && i.template_id);
+  const [tpl, setTpl] = useState(s.mgmt_template ?? xray[0]?.template_id ?? '');
+  const [hint, setHint] = useState<string | null>(null);
+  const cur = xray.find((i) => i.template_id === s.mgmt_template);
   const st = s.mgmt.client;
   if (s.mgmt_mode === 'local') return (
     <div className="row"><div className="row-text"><b>Канал управления</b><span className="k">Локально: это главный сервер, панель ходит на свой же SSH.</span></div></div>
@@ -482,12 +487,40 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
           <span className="k">
             {s.mgmt_mode === 'tunnel'
               ? <>SSH панели идёт внутри VLESS-REALITY: порт узла <code>{s.mgmt.port}/tcp</code>, маскировка под <code>{s.mgmt.sni}</code>{s.mgmt.via ? <>, цепочкой через <b>{s.mgmt.via}</b></> : ''}. {st ? (st.running ? `Клиент туннелей работает (Xray ${st.version ?? '?'}).` : st.error ? `Клиент туннелей: ${st.error}` : 'Клиент туннелей запустится при первом подключении.') : ''}</>
-              : 'SSH напрямую с адреса главного сервера. Если главный сервер в РФ и SSH режется — переключите на туннель.'}
+              : s.mgmt_mode === 'inbound'
+                ? <>SSH панели идёт внутри конфигурации <b>{cur?.template ?? s.mgmt_template}</b>{cur ? <> (порт <code>{cur.port}/tcp</code>, уже открытый)</> : ''} служебным клиентом; на SSH сервер приходит со своего же адреса{s.mgmt.via ? <>, цепочкой через <b>{s.mgmt.via}</b></> : ''}. {st ? (st.running ? `Клиент работает (Xray ${st.version ?? '?'}).` : st.error ? `Клиент: ${st.error}` : 'Клиент запустится при первом подключении.') : ''}</>
+                : 'SSH напрямую с адреса главного сервера. Если SSH режется — переключите на туннель или «через конфигурацию».'}
           </span>
         </div>
-        <Seg value={mode} label="Канал управления" options={[['direct', 'напрямую'], ['tunnel', 'туннель']]} onChange={(v) => setAsk(v === mode ? null : v)} />
+        <Seg value={mode} label="Канал управления" options={[['direct', 'напрямую'], ['tunnel', 'туннель'], ['inbound', 'через конфигурацию']]} onChange={(v) => { setAsk(v === mode ? null : v); setHint(null); }} />
       </div>
-      {ask && (
+      {ask === 'inbound' && (
+        <div className="alert info stack">
+          <span>SSH панели пойдёт внутри уже работающей на сервере Xray-конфигурации: отдельный порт не нужен, firewall хостера не мешает — порт конфигурации и так открыт. На сервере ничего переустанавливать не нужно. Если панель не достаёт до сервера совсем, после переключения пустите канал через другой сервер флота.</span>
+          {xray.length ? (
+            <label className="fld" style={{ maxWidth: 360 }}>Конфигурация
+              <select className="inp" value={tpl} onChange={(e) => setTpl(e.target.value)}>
+                {xray.map((i) => <option key={i.id} value={i.template_id}>{i.template} · порт {i.port}</option>)}
+              </select>
+            </label>
+          ) : <span className="k">На сервере нет работающей Xray-конфигурации (VLESS, VMess, Trojan, Shadowsocks) — сначала выкатите её сюда.</span>}
+          <div className="flex">
+            <button className="btn pri" disabled={busy || !tpl} onClick={() => void run(async () => {
+              const r = await api.patch<{ consoleHint: string | null }>(`/api/v1/servers/${s.id}`, { mgmtMode: 'inbound', mgmtTemplate: tpl });
+              setAsk(null); setHint(r.consoleHint); onChange();
+              if (!r.consoleHint) toast('Канал переключён: SSH идёт через конфигурацию');
+            })}>Переключить</button>
+            <button className="btn ghost" onClick={() => setAsk(null)}>Отмена</button>
+          </div>
+        </div>
+      )}
+      {hint && (
+        <div className="alert warn stack">
+          <span>Сервер сейчас недоступен панели, поэтому разрешить SSH с его собственного адреса панель не смогла. Один раз выполните в консоли хостера (VNC/KVM) под root — после этого панель зайдёт через конфигурацию сама:</span>
+          <CopyBlock text={hint} />
+        </div>
+      )}
+      {ask && ask !== 'inbound' && (
         <div className="alert warn stack">
           <span>После переключения панель перенастроит доступ к серверу — понадобится его логин и пароль (один раз). Пока это не сделано, управление сервером недоступно; VPN пользователей это не затрагивает.</span>
           <div className="flex">
@@ -496,7 +529,7 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
           </div>
         </div>
       )}
-      {mode === 'tunnel' && !ask && <details className="more"><summary>{s.mgmt.via ? 'Изменить прокси туннеля' : 'Сервер недоступен из РФ целиком? Пустить туннель через прокси'}</summary><div style={{ marginTop: 10 }}><TunnelVia s={s} onSaved={onChange} /></div></details>}
+      {(mode === 'tunnel' || mode === 'inbound') && !ask && <details className="more"><summary>{s.mgmt.via ? 'Изменить прокси канала' : 'Панель не достаёт до сервера совсем? Пустить канал через другой сервер'}</summary><div style={{ marginTop: 10 }}><TunnelVia s={s} onSaved={onChange} /></div></details>}
       {switched && (
         <div className="stack">
           <b className="small">Перенастроить доступ</b>

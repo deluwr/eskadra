@@ -4,7 +4,8 @@ import { RouteMap, exitView } from '../RouteMap';
 import { HostStatsPanel } from '../HostStats';
 import { ServerTable } from '../ServerTable';
 
-type Health = { rtt_ms: number | null; mbps: number | null; ok: number; error: string | null };
+// fresh — вход проверял выход за последние 30 минут
+type Health = { rtt_ms: number | null; mbps: number | null; ok: number; error: string | null; fresh?: number };
 interface Route { id: string; name: string; entryId: string; autoMode: string; selected: string | null; exits: Array<{ id: string; health: Health | null }> }
 
 interface Overview {

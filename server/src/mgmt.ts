@@ -1,5 +1,6 @@
 /**
- * Служебный туннель управления (§5.8): SSH панели идёт к узлу внутри VLESS-REALITY.
+ * Служебные каналы управления (§5.8): SSH панели идёт к узлу внутри VLESS — служебного туннеля (свой порт на узле)
+ * или уже открытого inbound'а конфигурации флота (режим «через конфигурацию», служебный клиент svc.mgmt).
  *
  * На узле — отдельный Xray (fleet-mgmt.service): один inbound VLESS-REALITY, единственный outbound
  * freedom с redirect на 127.0.0.1:<ssh>. На главном сервере — Xray-клиент (дочерний процесс панели):
@@ -62,8 +63,16 @@ export function nodeConfig(t: TunnelCreds, sshPort: number): object {
   };
 }
 
-/** via — outbound прокси, через который идёт туннель к узлу (узел недоступен с главного сервера напрямую). */
-export interface TunnelNode { id: string; host: string; sshPort: number; creds: TunnelCreds; via?: Record<string, unknown> | null }
+/**
+ * Узел для клиента на главном сервере. Туннель: creds — служебный Xray узла, SSH на 127.0.0.1 узла. Через конфигурацию:
+ * outbound — VLESS (и т. п.) служебного клиента svc.mgmt к inbound'у конфигурации, SSH на адрес самого узла (dest).
+ * via — outbound прокси, через который идёт соединение к узлу (узел недоступен с главного сервера напрямую).
+ */
+export interface TunnelNode {
+  id: string; host: string; sshPort: number; localPort: number;
+  creds?: TunnelCreds; outbound?: Record<string, unknown>; dest?: string;
+  via?: Record<string, unknown> | null;
+}
 
 export interface ClientExtra { inbound: object; outbound: object; rule: object }
 
@@ -73,24 +82,27 @@ export function clientConfig(nodes: TunnelNode[], extra?: ClientExtra | ClientEx
   return {
     log: { loglevel: 'warning' },
     inbounds: [...extras.map((e) => e.inbound), ...nodes.map((n) => ({
-      tag: `in-${n.id}`, listen: '127.0.0.1', port: n.creds.localPort, protocol: 'dokodemo-door',
-      settings: { address: '127.0.0.1', port: n.sshPort, network: 'tcp' },
+      tag: `in-${n.id}`, listen: '127.0.0.1', port: n.localPort, protocol: 'dokodemo-door',
+      settings: { address: n.dest ?? '127.0.0.1', port: n.sshPort, network: 'tcp' },
     }))],
     outbounds: [
       ...extras.map((e) => e.outbound),
-      ...nodes.flatMap((n) => [
-        {
-          tag: `out-${n.id}`, protocol: 'vless',
-          settings: { vnext: [{ address: n.host, port: n.creds.port, users: [{ id: n.creds.uuid, encryption: 'none', flow: 'xtls-rprx-vision' }] }] },
-          streamSettings: {
-            network: 'tcp', security: 'reality',
-            realitySettings: { serverName: n.creds.sni, fingerprint: 'chrome', publicKey: n.creds.publicKey, shortId: n.creds.shortId },
-            // цепочка: соединение туннеля к узлу идёт через прокси (узел недоступен с главного сервера напрямую)
-            ...(n.via ? { sockopt: { dialerProxy: `via-${n.id}` } } : {}),
-          },
-        },
-        ...(n.via ? [{ ...n.via, tag: `via-${n.id}` }] : []),
-      ]),
+      ...nodes.flatMap((n) => {
+        // цепочка: соединение к узлу идёт через прокси (узел недоступен с главного сервера напрямую)
+        const chain = n.via ? { sockopt: { dialerProxy: `via-${n.id}` } } : {};
+        const out = n.outbound
+          ? { ...n.outbound, tag: `out-${n.id}`, streamSettings: { ...(n.outbound.streamSettings as object | undefined), ...chain } }
+          : {
+            tag: `out-${n.id}`, protocol: 'vless',
+            settings: { vnext: [{ address: n.host, port: n.creds!.port, users: [{ id: n.creds!.uuid, encryption: 'none', flow: 'xtls-rprx-vision' }] }] },
+            streamSettings: {
+              network: 'tcp', security: 'reality',
+              realitySettings: { serverName: n.creds!.sni, fingerprint: 'chrome', publicKey: n.creds!.publicKey, shortId: n.creds!.shortId },
+              ...chain,
+            },
+          };
+        return [out, ...(n.via ? [{ ...n.via, tag: `via-${n.id}` }] : [])];
+      }),
       { tag: 'block', protocol: 'blackhole' },
     ],
     routing: { rules: [...extras.map((e) => e.rule), ...nodes.map((n) => ({ type: 'field', inboundTag: [`in-${n.id}`], outboundTag: `out-${n.id}` }))] },
@@ -192,15 +204,22 @@ export class Mgmt {
   }
 
   private nodes(): TunnelNode[] {
-    return this.ctx.servers()
-      .filter((r) => r.mgmt_mode === 'tunnel')
-      .map((r) => {
-        const v = mgmtVia(this.ctx, r);
-        let via: Record<string, unknown> | null = null;
-        if (v) try { via = viaOutbound(this.ctx, v).outbound; } catch (e) { this.log.warn(`${r.name}: прокси управления недоступен — ${(e as Error).message}`); }
-        return { id: r.id, host: r.host, sshPort: r.ssh_port, creds: credsOf(this.ctx, r)!, via };
-      })
-      .filter((n) => !!n.creds);
+    const out: TunnelNode[] = [];
+    for (const r of this.ctx.servers().filter((x) => (x.mgmt_mode === 'tunnel' || x.mgmt_mode === 'inbound') && x.mgmt_local_port)) {
+      const v = mgmtVia(this.ctx, r);
+      let via: Record<string, unknown> | null = null;
+      if (v) try { via = viaOutbound(this.ctx, v).outbound; } catch (e) { this.log.warn(`${r.name}: прокси управления недоступен — ${(e as Error).message}`); }
+      const base = { id: r.id, host: r.host, sshPort: r.ssh_port, localPort: r.mgmt_local_port!, via };
+      if (r.mgmt_mode === 'inbound') {
+        // через конфигурацию: служебный клиент svc.mgmt к inbound'у конфигурации на самом узле, SSH — на адрес узла
+        try { out.push({ ...base, outbound: viaOutbound(this.ctx, { kind: 'fleet', serverId: r.id, templateId: r.mgmt_template ?? '' }).outbound, dest: r.host }); }
+        catch (e) { this.log.warn(`${r.name}: конфигурация канала управления недоступна — ${(e as Error).message}`); }
+        continue;
+      }
+      const creds = credsOf(this.ctx, r);
+      if (creds) out.push({ ...base, creds });
+    }
+    return out;
   }
 
   /** Поднять (или перезапустить с новым конфигом) клиента туннелей. Вызывается перед каждым SSH к туннельному узлу. */
@@ -239,7 +258,7 @@ export class Mgmt {
       });
       this.child = child;
       this.runningHash = hash;
-      await waitListen(nodes[0]?.creds.localPort ?? (extra[0]!.inbound as { port: number }).port, 5000);
+      await waitListen(nodes[0]?.localPort ?? (extra[0]!.inbound as { port: number }).port, 5000);
       if (child.exitCode !== null) throw new Error(this.lastError ?? 'Xray туннелей не запустился');
       this.lastError = null;
     } catch (e) {

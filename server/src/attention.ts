@@ -4,6 +4,16 @@ import { certProblems } from './certs.js';
 import { coresOff } from './ops.js';
 import { backupPassword, backupSettings } from './backup.js';
 
+/**
+ * Входы, которые за последние 30 минут дошли до выхода serverId (пробы «Авто» через сам выход): по ним видно, что
+ * сервер жив и VPN через вход работает, даже когда панель на него не заходит.
+ */
+export function seenByEntries(ctx: Ctx, serverId: string): string[] {
+  const rows = ctx.db.prepare(`SELECT DISTINCT s.name FROM exit_health h JOIN templates t ON t.id = h.template_id JOIN servers s ON s.id = t.entry_id
+    WHERE h.exit_id = ? AND h.ok = 1 AND h.checked_at >= datetime('now', '-30 minutes') ORDER BY s.name`).all(serverId) as Array<{ name: string }>;
+  return rows.map((r) => r.name);
+}
+
 export interface Attention { level: 'fail' | 'warn' | 'info'; title: string; detail: string; serverId?: string }
 
 /** «Требует внимания»: обзор панели и меню бота. */
@@ -13,7 +23,13 @@ export function attentionOf(ctx: Ctx, vpn: Vpn): Attention[] {
   const attention: Attention[] = [];
   for (const s of servers) {
     const protect = s.protection_target !== 'P1';   // при обычной защите про firewall и проверку не напоминаем
-    if (s.fail_since) attention.push({ level: 'fail', title: `${s.name}: нет связи`, detail: `с ${s.fail_since}`, serverId: s.id });
+    if (s.fail_since) {
+      // панель не заходит на сервер, но вход до него доходит: VPN работает, отрезан путь панель → сервер (SSH)
+      const via = seenByEntries(ctx, s.id);
+      attention.push(via.length
+        ? { level: 'warn', title: `${s.name}: панель не видит сервер, а вход ${via.join(', ')} видит`, detail: `VPN через вход работает; не доходит SSH панели (с ${s.fail_since}) — выкат и статистика на нём недоступны. Похоже на блокировку пути с главного сервера: смените канал управления на вкладке «Доступ и SSH».`, serverId: s.id }
+        : { level: 'fail', title: `${s.name}: нет связи`, detail: `с ${s.fail_since}`, serverId: s.id });
+    }
     if (protect && s.ufw_active) attention.push({ level: 'warn', title: `${s.name}: включён ufw/firewalld`, detail: 'Он мешает защите Эскадры — выключите его на вкладке «Хост».', serverId: s.id });
     if (s.fw_mode === 'pending') attention.push({ level: 'warn', title: `${s.name}: защита ждёт подтверждения`, detail: `до ${s.fw_pending_until}`, serverId: s.id });
     if (protect && s.fw_mode !== 'enforced' && s.sudo_mode === 'restricted' && !s.checklist_passed_at)

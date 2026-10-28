@@ -332,6 +332,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE users ADD COLUMN created_by INTEGER;
   ALTER TABLE templates ADD COLUMN created_by INTEGER;
   `,
+  `
+  -- канал управления «через конфигурацию» (mgmt_mode = 'inbound'): SSH внутри VLESS-inbound'а этой конфигурации на узле
+  ALTER TABLE servers ADD COLUMN mgmt_template TEXT;
+  `,
 ];
 
 export type Db = DatabaseSync;
