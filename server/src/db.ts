@@ -336,6 +336,10 @@ const MIGRATIONS: string[] = [
   -- канал управления «через конфигурацию» (mgmt_mode = 'inbound'): SSH внутри VLESS-inbound'а этой конфигурации на узле
   ALTER TABLE servers ADD COLUMN mgmt_template TEXT;
   `,
+  `
+  -- канал управления «через сервер» (mgmt_mode = 'jump'): SSH панели через узел-посредник mgmt_jump (servers.id)
+  ALTER TABLE servers ADD COLUMN mgmt_jump TEXT;
+  `,
 ];
 
 export type Db = DatabaseSync;

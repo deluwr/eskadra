@@ -23,8 +23,10 @@ export interface ServerRow {
    * Канал управления (§5.8): SSH напрямую, внутри служебного туннеля VLESS-REALITY (свой порт на узле) или «через
    * конфигурацию» (inbound) — внутри уже открытого inbound'а конфигурации mgmt_template, служебным клиентом svc.mgmt.
    */
-  mgmt_mode: 'direct' | 'tunnel' | 'inbound' | 'local'; mgmt_port: number | null; mgmt_uuid: string | null; mgmt_key_sealed: string | null;
+  mgmt_mode: 'direct' | 'tunnel' | 'inbound' | 'jump' | 'local'; mgmt_port: number | null; mgmt_uuid: string | null; mgmt_key_sealed: string | null;
   mgmt_template: string | null;
+  /** «через сервер» (jump): узел-посредник, через который панель открывает SSH к этому узлу (ssh -J) */
+  mgmt_jump: string | null;
   /** прокси, через который идёт туннель управления (JSON BootstrapVia, зашифрован; via.ts) */
   mgmt_via: string | null;
   mgmt_pub: string | null; mgmt_sid: string | null; mgmt_sni: string | null; mgmt_local_port: number | null;
@@ -40,11 +42,12 @@ export function panelPorts(db: Db): number[] {
   return [own, getSetting<number>(db, 'sub.port', 0)].filter((p) => p > 0);
 }
 
-/** С каких адресов узел может видеть панель: executor.ips, а для туннеля — ещё и сам узел (127.0.0.1). */
-export function expectedPanelIps(s: ServerRow, executorIps: string[]): string[] {
-  // через конфигурацию SSH приходит от Xray самого узла на его же адрес
-  if (s.mgmt_mode === 'inbound') return [s.host, ...executorIps];
-  return s.mgmt_mode !== 'direct' ? ['127.0.0.1', '::1', ...executorIps] : executorIps;
+/**
+ * С каких адресов узел может видеть панель: sources — Ctx.panelSources (исполнитель, через конфигурацию — сам узел,
+ * через сервер — посредник), а для туннеля и главного сервера — ещё и 127.0.0.1.
+ */
+export function expectedPanelIps(s: ServerRow, sources: string[]): string[] {
+  return s.mgmt_mode === 'tunnel' || s.mgmt_mode === 'local' ? ['127.0.0.1', '::1', ...sources] : sources;
 }
 
 export interface ExternalCore { name: string; active: string; version: string }
@@ -130,10 +133,26 @@ export class Ctx {
 
   executorIps = () => getSetting<string[]>(this.db, 'executor.ips', []);
 
+  /**
+   * С каких адресов на узел приходит SSH панели (from= у ключа, firewall, проверка «видит панель с …»): адреса
+   * исполнителя, а также — через конфигурацию — сам узел, через сервер — адрес посредника.
+   */
+  panelSources(s: ServerRow): string[] {
+    const extra = s.mgmt_mode === 'inbound' ? [s.host] : s.mgmt_mode === 'jump' ? this.servers().filter((x) => x.id === s.mgmt_jump).map((x) => x.host) : [];
+    return [...extra, ...this.executorIps()];
+  }
+
   target(r: ServerRow): SshTarget {
     const base = { username: r.ssh_user, privateKey: this.sealer.open(r.key_priv_sealed).toString('utf8'), hostKeyFp: r.host_key_fp };
     // главный сервер как узел: панель ходит на свой же SSH через loopback
     if (r.mgmt_mode === 'local') return { ...base, host: '127.0.0.1', port: r.ssh_port };
+    if (r.mgmt_mode === 'jump') {
+      // через сервер: панель заходит на посредника и оттуда открывает соединение до SSH этого узла (одна ступень)
+      const j = this.servers().find((x) => x.id === r.mgmt_jump);
+      if (!j) throw new HttpError(409, `${r.name}: сервер-посредник удалён — выберите другой канал управления`);
+      if (j.mgmt_mode === 'jump') throw new HttpError(409, `${r.name}: посредник ${j.name} сам управляется через посредника — выберите другой`);
+      return { ...base, host: r.host, port: r.ssh_port, jump: this.target(j), via: `сервер ${j.name}` };
+    }
     if (r.mgmt_mode !== 'tunnel' && r.mgmt_mode !== 'inbound') return { ...base, host: r.host, port: r.ssh_port };
     // через туннель или конфигурацию: локальный порт Xray-клиента на главном сервере; host key узла сверяется как обычно
     if (!r.mgmt_local_port) throw new HttpError(409, 'у узла нет данных канала управления — переключите канал заново');

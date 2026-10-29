@@ -48,7 +48,7 @@ export function publicView(ctx: Ctx, r: ServerRow) {
     tls_state: json(r.tls_state, null),
     certProblems: certProblems(r, (id) => (ctx.db.prepare('SELECT name FROM templates WHERE id = ?').get(id) as { name: string } | undefined)?.name),
     stage: stageOf(r),
-    executorOk: !r.seen_from_ip || expectedPanelIps(r, ctx.executorIps()).includes(r.seen_from_ip),
+    executorOk: !r.seen_from_ip || expectedPanelIps(r, ctx.panelSources(r)).includes(r.seen_from_ip),
   };
 }
 
@@ -97,7 +97,9 @@ const patchBody = z.object({
   /** до какого дня оплачен сервер; null — не следить */
   paidUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), 'неверная дата').nullable().optional(),
   paidWarnDays: z.number().int().min(1).max(60).optional(),
-  mgmtMode: z.enum(['direct', 'tunnel', 'inbound']).optional(),
+  mgmtMode: z.enum(['direct', 'tunnel', 'inbound', 'jump']).optional(),
+  /** «через сервер»: сервер-посредник (id), через который панель открывает SSH к этому */
+  mgmtJump: z.string().max(64).optional(),
   /** «через конфигурацию»: Xray-конфигурация с inbound'ом на этом сервере, внутри которой идёт SSH панели */
   mgmtTemplate: z.string().max(64).optional(),
   /** прокси для туннеля управления; null — напрямую */
@@ -246,6 +248,30 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       else try { await ctx.onNode(r, async (n) => { const x = await n.op(['allow', ip], { timeoutMs: 60_000 }); if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim()); }); }
       catch { consoleHint = `fleetctl allow ${ip}`; }
       ctx.updateServer(r.id, { mgmt_mode: 'inbound', mgmt_template: tid, ...(r.mgmt_local_port ? {} : { mgmt_local_port: newTunnel(ctx.servers().map((x) => x.mgmt_local_port ?? 0)).localPort }) });
+    } else if (b.mgmtMode === 'jump') {
+      // через сервер: панель заходит на рабочий сервер-посредник и через него открывает SSH к этому (ssh -J).
+      // Команды выполняет панель своим ключом; посреднику разрешена только пересылка до SSH этого узла
+      const j = ctx.servers().find((x) => x.id === (b.mgmtJump ?? r.mgmt_jump));
+      if (!j || j.id === r.id) throw new HttpError(400, 'выберите сервер-посредник — другой сервер флота, на который панель заходит');
+      if (j.mgmt_mode === 'jump') throw new HttpError(400, `${j.name} сам управляется через посредника — выберите сервер, на который панель заходит без него`);
+      if (j.sudo_mode !== 'restricted' || j.fail_since) throw new HttpError(409, `${j.name}: панель на него сейчас не заходит — выберите доступный сервер`);
+      const target = `${r.host}:${r.ssh_port}`;
+      try {
+        await ctx.onNode(j, async (n) => {
+          await ops.ensureKit(j, n, () => undefined);   // jump-add появился в nodekit вместе с этим режимом
+          const x = await n.op(['jump-add', target], { timeoutMs: 60_000 });
+          if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim());
+        });
+      } catch (e) { throw new HttpError(502, `${j.name}: пересылка до ${target} не разрешена — ${(e as Error).message}`); }
+      // SSH на этот узел придёт с адреса посредника: разрешаем его, пока работает прежний канал; иначе — команда для консоли
+      const ip = isIP(j.host) ? j.host : (await dns.lookup(j.host, { family: 4 }).catch(() => null))?.address ?? j.host;
+      if (r.fail_since || r.sudo_mode !== 'restricted') consoleHint = `fleetctl allow ${ip}`;
+      else try { await ctx.onNode(r, async (n) => { const x = await n.op(['allow', ip], { timeoutMs: 60_000 }); if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim()); }); }
+      catch { consoleHint = `fleetctl allow ${ip}`; }
+      // прежний посредник больше не нужен — снимаем у него пересылку (не вышло — не страшно, она ведёт только к SSH узла)
+      const old = r.mgmt_mode === 'jump' && r.mgmt_jump !== j.id ? ctx.servers().find((x) => x.id === r.mgmt_jump) : undefined;
+      if (old && !old.fail_since) void ctx.onNode(old, (n) => n.op(['jump-del', target])).catch(() => undefined);
+      ctx.updateServer(r.id, { mgmt_mode: 'jump', mgmt_jump: j.id });
     } else if (b.mgmtMode && b.mgmtMode !== r.mgmt_mode) {
       if (b.mgmtMode === 'direct' && !ctx.executorIps().length) throw new HttpError(400, 'для прямого канала задайте адрес исполнителя (executor.ips)');
       // ключи туннеля сохраняются при переключениях: повторный сниппет не меняет конфиг узла
@@ -584,7 +610,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return {
       panel_ssh: !!r.last_seen_at && !r.fail_since && r.sudo_mode === 'restricted',
       mesh: !peerFail,
-      executor: !!r.seen_from_ip && expectedPanelIps(r, ctx.executorIps()).includes(r.seen_from_ip),
+      executor: !!r.seen_from_ip && expectedPanelIps(r, ctx.panelSources(r)).includes(r.seen_from_ip),
     };
   }
 

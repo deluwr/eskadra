@@ -19,12 +19,17 @@ ssh_ports() {    # объединение: sshd -T и порты ssh.socket (п�
   } | sort -un | paste -sd, -
 }
 
-render_ak() {   # переписывает command= и from= у ключей панели (строки с комментарием fleet-panel/)
+JUMP="$ETC/jump-targets"                  # куда этот узел пересылает SSH панели как посредник: host:port, по одному в строке
+
+render_ak() {   # переписывает command=, from= и permitopen= у ключей панели (строки с комментарием fleet-panel/)
   [ -f "$AK" ] || return 0
-  local from="" cmd=""
+  local from="" cmd="" perm='permitopen="127.0.0.1:10085"' t
   if [ ! -f "$ETC/ssh-open" ] && [ -s "$IPS" ]; then from="from=\"$(paste -sd, "$IPS")\","; fi
   if [ -f "$ETC/ssh-strict" ]; then cmd='command="/usr/local/sbin/fleet-gate",'; fi
+  # посредник: ключ панели может открыть соединение только до SSH узлов из списка (и до API Xray, как раньше)
+  if [ -s "$JUMP" ]; then while read -r t; do [ -n "$t" ] && perm+=",permitopen=\"$t\""; done < "$JUMP"; fi
   sed -i -E "\|fleet-panel/|s|^(command=\"[^\"]*\",)?(from=\"[^\"]*\",)?restrict|${cmd}${from}restrict|" "$AK"
+  sed -i -E "\|fleet-panel/|s|,port-forwarding(,permitopen=\"[^\"]*\")*|,port-forwarding,${perm}|" "$AK"
   chown fleet:fleet "$AK" 2>/dev/null || true
   chmod 600 "$AK"
 }
@@ -44,6 +49,19 @@ cmd_allow() {    # fleetctl allow 203.0.113.99   |   fleetctl allow 203 0 113 99
   nft_el add "$(fam panel "$ip")" "$ip"; render_ak
   logger -t fleet "ALLOW $ip (local console)" 2>/dev/null || true
   echo "OK: $ip allowed (firewall + ssh from=). Check: fleetctl status"
+}
+
+cmd_jump() {     # fleetctl jump-add 203.0.113.9:22 | jump-del 203.0.113.9:22 — узел-посредник для SSH панели к другому узлу
+  local op="$1" t="${2:-}" host port
+  host="${t%:*}"; port="${t##*:}"
+  [[ "$t" == *:* && "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "usage: fleetctl jump-add|jump-del HOST:PORT"
+  valid_ip "$host" || [[ "$host" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || die "bad host: $host"
+  mkdir -p "$ETC"; touch "$JUMP"
+  if [ "$op" = jump-add ]; then grep -qxF "$t" "$JUMP" || echo "$t" >> "$JUMP"
+  else grep -vxF "$t" "$JUMP" > "$JUMP.new" || true; mv "$JUMP.new" "$JUMP"; fi
+  render_ak
+  logger -t fleet "${op^^} $t" 2>/dev/null || true
+  echo "OK: $op $t"
 }
 
 cmd_port() {     # fleetctl port-open tcp 8443 | port-close udp 8443
@@ -268,6 +286,7 @@ cmd_status() {
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
 case "${1:-status}" in
   allow)   shift; cmd_allow "$@" ;;
+  jump-add|jump-del) cmd_jump "$1" "${2:-}" ;;
   open)    cmd_open ;;
   relax)   cmd_relax "${2:-}" ;;
   unrelax) cmd_unrelax ;;

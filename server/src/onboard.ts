@@ -25,7 +25,7 @@ type Log = (line: string) => void;
 
 /** Сниппет под канал узла (прямой или туннель). */
 export async function snippetOf(ctx: Ctx, r: ServerRow): Promise<string> {
-  if (r.mgmt_mode !== 'tunnel') return bootstrapSnippet({ panelIps: r.mgmt_mode === 'inbound' ? [r.host, ...ctx.executorIps()] : ctx.executorIps(), pubkey: r.key_pub });
+  if (r.mgmt_mode !== 'tunnel') return bootstrapSnippet({ panelIps: ctx.panelSources(r), pubkey: r.key_pub });
   const creds = credsOf(ctx, r);
   if (!creds) throw new HttpError(409, 'у узла нет данных служебного туннеля — переключите канал заново');
   const xray = await xrayPin(ctx).catch((e: Error) => { throw new HttpError(502, `не удалось получить релиз Xray с GitHub: ${e.message}`); });
@@ -242,7 +242,7 @@ export async function runPreflight(ctx: Ctx, r: ServerRow, job: JobHandle) {
   const base = await rootScript(ctx, r, 'baseline');
   if (pre.code !== 0) throw new Error(`preflight exit ${pre.code}: ${pre.stderr}`);
   job.log(`baseline: ${base.code === 0 ? base.stdout.trim() : 'FAILED ' + base.stderr.trim()}`);
-  const summary = summarize(pre.stdout, expectedPanelIps(r, ctx.executorIps()));
+  const summary = summarize(pre.stdout, expectedPanelIps(r, ctx.panelSources(r)));
   const kernel = (parseSections(pre.stdout).get('kernel') ?? '').split('\n');
   const arch = /aarch64|arm64/.test(kernel[1] ?? '') ? 'arm64' : 'amd64';
   ctx.db.prepare('INSERT INTO preflight_reports (server_id, summary, raw) VALUES (?, ?, ?)').run(

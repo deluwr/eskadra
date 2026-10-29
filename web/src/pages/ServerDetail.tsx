@@ -467,8 +467,13 @@ function TunnelVia({ s, onSaved, saveLabel = 'Сохранить' }: { s: Server
 function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
-  const [ask, setAsk] = useState<'direct' | 'tunnel' | 'inbound' | null>(null);
+  const [ask, setAsk] = useState<'direct' | 'tunnel' | 'inbound' | 'jump' | null>(null);
   const [switched, setSwitched] = useState(false);
+  // «через сервер»: посредник — сервер флота, на который панель заходит сама (не через посредника)
+  const { data: fleet } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
+  const jumps = (fleet ?? []).filter((x) => x.id !== s.id && x.sudo_mode === 'restricted' && !x.fail_since && x.mgmt_mode !== 'jump');
+  const [jump, setJump] = useState(s.mgmt_jump ?? '');
+  const jumpName = fleet?.find((x) => x.id === s.mgmt_jump)?.name ?? s.mgmt_jump;
   // «через конфигурацию»: Xray-конфигурации, уже работающие на этом сервере (их порт открыт), и что выполнить в консоли
   const xray = d.inbounds.filter((i) => i.core === 'xray' && i.kind === 'direct' && i.state === 'active' && i.template_id);
   const [tpl, setTpl] = useState(s.mgmt_template ?? xray[0]?.template_id ?? '');
@@ -489,11 +494,34 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
               ? <>SSH панели идёт внутри VLESS-REALITY: порт узла <code>{s.mgmt.port}/tcp</code>, маскировка под <code>{s.mgmt.sni}</code>{s.mgmt.via ? <>, цепочкой через <b>{s.mgmt.via}</b></> : ''}. {st ? (st.running ? `Клиент туннелей работает (Xray ${st.version ?? '?'}).` : st.error ? `Клиент туннелей: ${st.error}` : 'Клиент туннелей запустится при первом подключении.') : ''}</>
               : s.mgmt_mode === 'inbound'
                 ? <>SSH панели идёт внутри конфигурации <b>{cur?.template ?? s.mgmt_template}</b>{cur ? <> (порт <code>{cur.port}/tcp</code>, уже открытый)</> : ''} служебным клиентом; на SSH сервер приходит со своего же адреса{s.mgmt.via ? <>, цепочкой через <b>{s.mgmt.via}</b></> : ''}. {st ? (st.running ? `Клиент работает (Xray ${st.version ?? '?'}).` : st.error ? `Клиент: ${st.error}` : 'Клиент запустится при первом подключении.') : ''}</>
-                : 'SSH напрямую с адреса главного сервера. Если SSH режется — переключите на туннель или «через конфигурацию».'}
+                : s.mgmt_mode === 'jump'
+                  ? <>Панель заходит на сервер <b>{jumpName}</b> и через него открывает SSH к этому: команды выполняет сама панель, посредник только пересылает зашифрованное соединение.</>
+                  : 'SSH напрямую с адреса главного сервера. Если SSH режется — переключите на туннель, «через конфигурацию» или «через сервер».'}
           </span>
         </div>
-        <Seg value={mode} label="Канал управления" options={[['direct', 'напрямую'], ['tunnel', 'туннель'], ['inbound', 'через конфигурацию']]} onChange={(v) => { setAsk(v === mode ? null : v); setHint(null); }} />
+        <Seg value={mode} label="Канал управления" options={[['direct', 'напрямую'], ['tunnel', 'туннель'], ['inbound', 'через конфигурацию'], ['jump', 'через сервер']]} onChange={(v) => { setAsk(v === mode ? null : v); setHint(null); }} />
       </div>
+      {ask === 'jump' && (
+        <div className="alert info stack">
+          <span>Панель будет заходить на этот сервер через другой сервер флота — посредника, на который она заходит сама. Команды по-прежнему выполняет панель своим ключом: посредник только пересылает зашифрованный SSH и разрешено ему лишь соединение до SSH этого сервера. VLESS не нужен — подходит и серверу только с Hysteria2 или MTProto.</span>
+          {jumps.length ? (
+            <label className="fld" style={{ maxWidth: 360 }}>Сервер-посредник
+              <select className="inp" value={jump} onChange={(e) => setJump(e.target.value)}>
+                <option value="">выберите сервер</option>
+                {jumps.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+              </select>
+            </label>
+          ) : <span className="k">Нет сервера, на который панель сейчас заходит, — посредником может быть только такой.</span>}
+          <div className="flex">
+            <button className="btn pri" disabled={busy || !jump} onClick={() => void run(async () => {
+              const r = await api.patch<{ consoleHint: string | null }>(`/api/v1/servers/${s.id}`, { mgmtMode: 'jump', mgmtJump: jump });
+              setAsk(null); setHint(r.consoleHint); onChange();
+              if (!r.consoleHint) toast('Канал переключён: SSH идёт через сервер-посредник');
+            })}>Переключить</button>
+            <button className="btn ghost" onClick={() => setAsk(null)}>Отмена</button>
+          </div>
+        </div>
+      )}
       {ask === 'inbound' && (
         <div className="alert info stack">
           <span>SSH панели пойдёт внутри уже работающей на сервере Xray-конфигурации: отдельный порт не нужен, firewall хостера не мешает — порт конфигурации и так открыт. На сервере ничего переустанавливать не нужно. Если панель не достаёт до сервера совсем, после переключения пустите канал через другой сервер флота.</span>
@@ -516,11 +544,11 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
       )}
       {hint && (
         <div className="alert warn stack">
-          <span>Сервер сейчас недоступен панели, поэтому разрешить SSH с его собственного адреса панель не смогла. Один раз выполните в консоли хостера (VNC/KVM) под root — после этого панель зайдёт через конфигурацию сама:</span>
+          <span>Сервер сейчас недоступен панели, поэтому разрешить SSH с нового адреса панель не смогла. Один раз выполните в консоли хостера (VNC/KVM) под root — после этого панель зайдёт по новому каналу сама:</span>
           <CopyBlock text={hint} />
         </div>
       )}
-      {ask && ask !== 'inbound' && (
+      {ask && ask !== 'inbound' && ask !== 'jump' && (
         <div className="alert warn stack">
           <span>После переключения панель перенастроит доступ к серверу — понадобится его логин и пароль (один раз). Пока это не сделано, управление сервером недоступно; VPN пользователей это не затрагивает.</span>
           <div className="flex">

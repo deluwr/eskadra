@@ -1,4 +1,4 @@
-import ssh2, { type Client as SshClient } from 'ssh2';
+import ssh2, { type Client as SshClient, type ClientChannel } from 'ssh2';
 const { Client } = ssh2;
 type Client = SshClient;
 import { createHash } from 'node:crypto';
@@ -14,6 +14,11 @@ export interface SshTarget {
   prepare?: () => Promise<void>;
   /** Описание пути для сообщений об ошибках, если подключение идёт не напрямую. */
   via?: string;
+  /**
+   * Узел-посредник (ssh -J): панель заходит на него своим ключом и открывает через него соединение до host:port.
+   * Команды на целевом узле выполняет сама панель — посредник только пересылает зашифрованный SSH.
+   */
+  jump?: SshTarget;
 }
 
 /** Ошибка соединения через туннель — с подсказкой, что проверить. */
@@ -94,15 +99,28 @@ export class SshSession {
   }
 }
 
+/** Соединение до host:port через узел-посредник (direct-tcpip); посредник закрывается вместе с ним. */
+async function jumpSocket(t: SshTarget, timeoutMs: number): Promise<{ sock: ClientChannel; jc: Client }> {
+  const jc = await connect(t.jump!, timeoutMs).catch((e: Error) => { throw new Error(`посредник ${t.jump!.host}: ${e.message}`); });
+  try {
+    const sock = await new Promise<ClientChannel>((resolve, reject) =>
+      jc.forwardOut('127.0.0.1', 0, t.host, t.port, (err, s) => (err ? reject(new Error(`посредник ${t.jump!.host} не открыл соединение до ${t.host}:${t.port}: ${err.message} — разрешите пересылку заново (смените канал управления)`)) : resolve(s))));
+    return { sock, jc };
+  } catch (e) { jc.end(); throw e; }
+}
+
 async function connect(t: SshTarget, timeoutMs: number): Promise<Client> {
   await t.prepare?.();
+  const hop = t.jump ? await jumpSocket(t, timeoutMs) : null;
   return new Promise<Client>((resolve, reject) => {
-    if (!t.hostKeyFp) return reject(new HostKeyError('host key is not pinned yet'));
+    if (!t.hostKeyFp) { hop?.jc.end(); return reject(new HostKeyError('host key is not pinned yet')); }
     const c = new Client();
     let mismatch: string | null = null;
     c.on('ready', () => resolve(c));
-    c.on('error', (e) => reject(mismatch ? new HostKeyError(mismatch) : viaError(t, e)));
+    c.on('error', (e) => { hop?.jc.end(); reject(mismatch ? new HostKeyError(mismatch) : viaError(t, e)); });
+    c.on('close', () => hop?.jc.end());
     c.connect({
+      ...(hop ? { sock: hop.sock } : {}),
       host: t.host,
       port: t.port,
       username: t.username,

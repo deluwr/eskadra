@@ -29,8 +29,8 @@ export function renderPlan(ctx: Ctx, s: ServerRow, level: 'P2' | 'P3'): PlanResu
 
   const sshPorts = json<number[]>(s.ssh_ports, []);
   if (!sshPorts.length) lint.push('неизвестны SSH-порты узла — запустите preflight');
-  // через конфигурацию SSH панели приходит от Xray самого узла на его адрес — адрес узла тоже «панель»
-  const panel = s.mgmt_mode === 'inbound' ? [s.host, ...ctx.executorIps()] : ctx.executorIps();
+  // откуда приходит SSH панели: исполнитель, через конфигурацию — сам узел, через сервер — посредник
+  const panel = ctx.panelSources(s);
   const tunnel = s.mgmt_mode === 'tunnel';
   // через туннель SSH панели приходит через lo: пустой executor.ips панель не отрежет (§5.8)
   if (!panel.length && !tunnel) lint.push('пустой executor.ips — панель отрежет сама себя');

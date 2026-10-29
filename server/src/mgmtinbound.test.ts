@@ -42,7 +42,8 @@ test('через конфигурацию: на узле SSH приходит о
   assert.equal(o.streamSettings.sockopt.dialerProxy, 'via-nl', 'цепочка через другой сервер');
   assert.equal(cfg.outbounds.find((i: any) => i.tag === 'via-nl').settings.vnext[0].address, '198.51.100.3');
   // адрес узла считается адресом панели (firewall и проверка «видит панель с …»)
-  assert.ok(expectedPanelIps({ ...ctx.server('nl'), mgmt_mode: 'inbound' }, ['192.0.2.1']).includes('203.0.113.9'));
+  ctx.db.prepare(`UPDATE servers SET mgmt_mode = 'inbound' WHERE id = 'nl'`).run();
+  assert.ok(expectedPanelIps(ctx.server('nl'), ctx.panelSources(ctx.server('nl'))).includes('203.0.113.9'));
 });
 
 test('через конфигурацию: переключение канала — сервер недоступен, значит подсказка для консоли; Hysteria2 нельзя', async () => {

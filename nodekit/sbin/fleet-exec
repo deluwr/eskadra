@@ -35,6 +35,8 @@ case "${1:-}" in
   ufw-disable)   exec /usr/local/sbin/fleetctl ufw-disable ;;
   # аварийные и данные наборов (§7.10, §7.12): аргументы строго проверяет fleetctl
   allow)         exec /usr/local/sbin/fleetctl allow "${2:?ip}" ;;
+  # посредник: SSH панели к другому узлу через этот (permitopen у ключа панели)
+  jump-add|jump-del) exec /usr/local/sbin/fleetctl "$1" "${2:?host:port}" ;;
   relax)         exec /usr/local/sbin/fleetctl relax "${2:-}" ;;
   unrelax)       exec /usr/local/sbin/fleetctl unrelax ;;
   status)        exec /usr/local/sbin/fleetctl status ;;

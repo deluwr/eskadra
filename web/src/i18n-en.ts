@@ -1430,4 +1430,13 @@ export const EN: Record<string, string> = {
   "Сервер сейчас недоступен панели, поэтому разрешить SSH с его собственного адреса панель не смогла. Один раз выполните в консоли хостера (VNC/KVM) под root — после этого панель зайдёт через конфигурацию сама:": "The server is unreachable for the panel right now, so the panel couldn't allow SSH from the server's own address. Run this once in the hoster's console (VNC/KVM) as root — after that the panel gets in via the configuration by itself:",
   "служебным клиентом; на SSH сервер приходит со своего же адреса": "as a service client; SSH reaches the server from its own address",
   "через конфигурацию": "via configuration",
+  "SSH напрямую с адреса главного сервера. Если SSH режется — переключите на туннель, «через конфигурацию» или «через сервер».": "SSH goes directly from the main server's address. If SSH gets blocked, switch to the tunnel, “via configuration” or “via server”.",
+  "Канал переключён: SSH идёт через сервер-посредник": "Channel switched: SSH goes via the relay server",
+  "Нет сервера, на который панель сейчас заходит, — посредником может быть только такой.": "There's no server the panel can reach right now — only such a server can be a relay.",
+  "Панель будет заходить на этот сервер через другой сервер флота — посредника, на который она заходит сама. Команды по-прежнему выполняет панель своим ключом: посредник только пересылает зашифрованный SSH и разрешено ему лишь соединение до SSH этого сервера. VLESS не нужен — подходит и серверу только с Hysteria2 или MTProto.": "The panel will reach this server through another fleet server — a relay it can reach itself. The panel still runs the commands with its own key: the relay only forwards the encrypted SSH and is allowed nothing but a connection to this server's SSH. No VLESS needed — works for a server with only Hysteria2 or MTProto too.",
+  "Сервер сейчас недоступен панели, поэтому разрешить SSH с нового адреса панель не смогла. Один раз выполните в консоли хостера (VNC/KVM) под root — после этого панель зайдёт по новому каналу сама:": "The server is unreachable for the panel right now, so the panel couldn't allow SSH from the new address. Run this once in the hoster's console (VNC/KVM) as root — after that the panel gets in over the new channel by itself:",
+  "Сервер-посредник": "Relay server",
+  "выберите сервер": "pick a server",
+  "и через него открывает SSH к этому: команды выполняет сама панель, посредник только пересылает зашифрованное соединение.": "and opens SSH to this one through it: the panel runs the commands itself, the relay only forwards the encrypted connection.",
+  "через сервер": "via server",
 };

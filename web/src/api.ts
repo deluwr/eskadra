@@ -79,7 +79,7 @@ export interface Server {
   tls_state: { checkedAt: string; certs: Array<{ name: string; notAfter: string | null; le: boolean }>; renew: { at: string; code: number; err: string } | null; timer: boolean } | null;
   certProblems: Array<{ key: string; level: 'fail' | 'warn'; title: string; detail: string }>;
   external_cores: Array<{ name: string; active: string; version: string }>;
-  mgmt_mode: 'direct' | 'tunnel' | 'inbound' | 'local'; mgmt_template?: string | null; config_dirty: number;
+  mgmt_mode: 'direct' | 'tunnel' | 'inbound' | 'jump' | 'local'; mgmt_template?: string | null; mgmt_jump?: string | null; config_dirty: number;
   mgmt: { via: string | null; mode: 'direct' | 'tunnel' | 'local'; port: number | null; sni: string | null; localPort: number | null; client: { running: boolean; version: string | null; error: string | null } | null };
 }
 

@@ -16,6 +16,12 @@ export function pruneServerRefs(ctx: Ctx): string[] {
   const gone = (id: unknown) => typeof id === 'string' && id.startsWith('srv-') && !alive.has(id);
   const changed: string[] = [];
 
+  // канал «через сервер»: посредник удалён — узел снова управляется напрямую (сменить канал можно в его карточке)
+  for (const s of ctx.servers().filter((x) => x.mgmt_mode === 'jump' && gone(x.mgmt_jump))) {
+    ctx.updateServer(s.id, { mgmt_mode: 'direct', mgmt_jump: null });
+    changed.push(`канал управления ${s.name}`);
+  }
+
   // конфигурации: серверы, вход, порядок «Авто», домены
   for (const t of db.prepare('SELECT id, name, node_ids, entry_id, settings FROM templates').all() as Array<{ id: string; name: string; node_ids: string; entry_id: string | null; settings: string }>) {
     const nodes = parse<string[]>(t.node_ids, []);
