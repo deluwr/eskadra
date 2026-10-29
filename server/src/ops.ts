@@ -844,8 +844,7 @@ export class Ops {
           }
         });
         if (proto === 'tcp') {
-          const ok = await tcpProbe(s.host, port);
-          log(`внешняя проба ${s.host}:${port}/tcp — ${ok ? 'ок' : 'НЕТ ОТВЕТА'}`);
+          const ok = await this.outsideProbe(s, port, log);
           if (!ok) throw new Error(`порт ${port} не отвечает снаружи (firewall провайдера, ufw или firewalld?)`);
         }
         this.ctx.db.prepare(`UPDATE inbounds SET state = 'active', applied_at = datetime('now') WHERE id = ?`).run(ib!.id);
@@ -868,6 +867,27 @@ export class Ops {
     this.ctx.db.prepare('UPDATE templates SET applied_revision = revision WHERE id = ?').run(t.id);
     // входы других шаблонов могли получить новые цели — переприменим их
     this.vpn.markDirty();
+  }
+
+  /** Порт отвечает снаружи. Узел, к которому панель ходит не напрямую (через сервер, конфигурацию, туннель),
+   *  с панели может быть не виден вовсе — тогда проверяем с посредника или другого сервера флота. */
+  async outsideProbe(s: ServerRow, port: number, log: (l: string) => void): Promise<boolean> {
+    const ok = await tcpProbe(s.host, port);
+    log(`внешняя проба ${s.host}:${port}/tcp — ${ok ? 'ок' : 'НЕТ ОТВЕТА'}`);
+    if (ok || s.mgmt_mode === 'direct' || s.mgmt_mode === 'local') return ok;
+    const others = this.ctx.servers().filter((x) => x.id !== s.id && x.sudo_mode === 'restricted' && !x.fail_since);
+    const by = (s.mgmt_mode === 'jump' && others.find((x) => x.id === s.mgmt_jump))
+      || others.find((x) => x.mgmt_mode === 'direct' || x.mgmt_mode === 'local');
+    if (!by) return false;
+    try {
+      const r = await this.ctx.onNode(by, (n) => n.op(['peer-check', s.host, port], { timeoutMs: 15_000 }));
+      const viaOk = r.stdout.trim() === 'ok';
+      log(`проба с ${by.name} ${s.host}:${port}/tcp — ${viaOk ? 'ок (панель узел не видит, это не мешает)' : 'НЕТ ОТВЕТА'}`);
+      return viaOk;
+    } catch (e) {
+      log(`проба с ${by.name} не удалась: ${(e as Error).message}`);
+      return false;
+    }
   }
 
   portUsed(serverId: string, port: number, proto: string): boolean {
