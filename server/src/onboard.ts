@@ -8,7 +8,7 @@ import { HttpError, type Ctx, type ServerRow, expectedPanelIps } from './ctx.js'
 import { audit } from './lib/audit.js';
 import { bootstrapSnippet } from './bootstrap.js';
 import { credsOf, MGMT_SNIS, xrayPin } from './mgmt.js';
-import { fetchHostKey, fingerprintOf, HostKeyError, jumpSocket, mask, withNodeLock, withSession } from './ssh/executor.js';
+import { fetchHostKey, fingerprintOf, HostKeyError, jumpSocket, mask, noEd25519, withNodeLock, withSession } from './ssh/executor.js';
 import { parseSections, summarize } from './preflight.js';
 import { buildInstallScript, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from './nodekit.js';
 import { Ops, startJob, type JobHandle } from './ops.js';
@@ -200,6 +200,8 @@ async function checkTunnelPort(ctx: Ctx, r: ServerRow, auth: BootstrapAuth, root
 
 function explainConnect(e: Error & { level?: string; code?: string }, r: ServerRow, viaProxy = false): Error {
   if (e.level === 'client-authentication') return new Error('сервер не принял логин/пароль или ключ');
+  const hk = noEd25519(e);
+  if (hk) return hk;
   if (viaProxy && (e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT' || /Timed out|handshake|closed/i.test(e.message)))
     return new Error(`через прокси ${r.host}:${r.ssh_port} не ответил. Проверьте, что прокси рабочий (подключитесь им с телефона) и что порт SSH ${r.ssh_port} на сервере открыт`);
   if (e.code === 'ECONNREFUSED') return new Error(`порт SSH ${r.ssh_port} закрыт на ${r.host}`);

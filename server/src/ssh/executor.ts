@@ -22,7 +22,17 @@ export interface SshTarget {
 }
 
 /** Ошибка соединения через туннель — с подсказкой, что проверить. */
+/** ssh2 «no matching host key format»: sshd узла не предлагает ed25519, а панель принимает только его. */
+export function noEd25519(e: Error): Error | null {
+  if (!/no matching host key/i.test(e.message)) return null;
+  return new Error('SSH-сервер не предлагает ключ хоста ed25519, а панель принимает только его. На сервере под root: '
+    + '«ssh-keygen -A», проверьте, что в /etc/ssh/sshd_config нет строк HostKey/HostKeyAlgorithms без ed25519 '
+    + '(или добавьте «HostKey /etc/ssh/ssh_host_ed25519_key»), и перезапустите sshd: «systemctl restart sshd || systemctl restart ssh»');
+}
+
 function viaError(t: { via?: string }, e: Error): Error {
+  const hk = noEd25519(e);
+  if (hk) return hk;
   if (!t.via || e instanceof HostKeyError || (e as Error & { level?: string }).level === 'client-authentication') return e;
   return new Error(`SSH через ${t.via}: ${e.message}. Проверьте, что bootstrap-сниппет выполнен на узле (служба fleet-mgmt работает) и порт туннеля открыт в firewall хостера`);
 }
