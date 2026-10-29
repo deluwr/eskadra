@@ -76,7 +76,7 @@ export interface Server {
   ufw_active: number; ssh_ports: number[]; admin_ips: string[]; cores: Record<string, { version: string }>;
   checklist_passed_at: string | null; kit_version: string | null; stage: number; executorOk: boolean; created_at: string;
   core_mode: 'auto' | 'own' | 'xui'; coreModeEffective: 'own' | 'xui'; xuiConfigured: boolean; xui_user: string | null;
-  tls_state: { checkedAt: string; certs: Array<{ name: string; notAfter: string | null; le: boolean }>; renew: { at: string; code: number; err: string } | null; timer: boolean } | null;
+  tls_state: { checkedAt: string; certs: Array<{ name: string; notAfter: string | null; le: boolean }>; renew: { at: string; code: number; err: string; holder?: { name: string; pid: string; unit: string } | null } | null; timer: boolean; port80Units?: string[] } | null;
   certProblems: Array<{ key: string; level: 'fail' | 'warn'; title: string; detail: string }>;
   external_cores: Array<{ name: string; active: string; version: string }>;
   mgmt_mode: 'direct' | 'tunnel' | 'inbound' | 'jump' | 'local'; mgmt_template?: string | null; mgmt_jump?: string | null; config_dirty: number;

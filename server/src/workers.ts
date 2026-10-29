@@ -27,6 +27,8 @@ export class Workers {
   start() {
     this.every('heartbeat', 60_000, () => this.heartbeat());
     this.every('peers', 10 * 60_000, () => this.peerChecks());
+    // адреса флота на узлах заранее — чтобы недоступный узел можно было перевести на «через сервер» без консоли
+    this.every('peerAccess', 10 * 60_000, () => this.ops.syncPeerAccess((l) => this.log.warn(l)));
     this.every('stats', 5 * 60_000, () => this.stats());
     this.every('sync', 20_000, () => this.syncDirty());
     this.every('exits', 60_000, () => this.exitChecks());

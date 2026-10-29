@@ -87,6 +87,9 @@ case "${1:-}" in
   tls-deploy)    name_ok "${2:?name}"; exec /usr/local/sbin/fleet-core cert-deploy "$2" ;;
   tls-status)    exec /usr/local/sbin/fleet-core cert-status ;;
   tls-renew)     exec /usr/local/sbin/fleet-core cert-renew ;;
+  # порт 80 занят чужой службой — останавливать её на время выпуска/продления (Let's Encrypt), по кнопке в панели
+  tls-port80-yield) exec /usr/local/sbin/fleet-core port80-yield ;;
+  tls-port80-keep)  [[ "${2:?unit}" =~ ^[A-Za-z0-9@._-]+\.service$ ]] || deny unit; exec /usr/local/sbin/fleet-core port80-keep "$2" ;;
   # уже установленный 3x-ui: inbounds Эскадры живут в его Xray (stdin — JSON с действием)
   xui)           exec python3 /usr/local/sbin/fleet-xui ;;
   xui-remove)    exec /usr/local/sbin/fleetctl xui-remove ;;

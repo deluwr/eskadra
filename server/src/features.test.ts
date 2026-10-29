@@ -120,7 +120,8 @@ test('firewall plan: P3 restricts SSH to panel/admin, P2 opens it; lint catches 
   assert.deepEqual(p3.lint, []);
   assert.match(p3.text, /policy drop;/);
   assert.match(p3.text, /ip  saddr @panel4 tcp dport \{ 3333 \} accept/);
-  assert.match(p3.text, /set panel4  \{ type ipv4_addr; elements = \{ 198.51.100.65 \} \}/);
+  // панель и — заранее — серверы флота (переход на «через сервер» без консоли хостера)
+  assert.match(p3.text, /set panel4  \{ type ipv4_addr; elements = \{ 198\.51\.100\.65, 203\.0\.113\.1, 203\.0\.113\.2 \} \}/);
   assert.match(p3.text, /set admin4  \{ type ipv4_addr; elements = \{ 198\.51\.100\.20 \} \}/);
   assert.match(p3.text, /set fleet4  \{ type ipv4_addr; elements = \{ 203\.0\.113\.2 \} \}/);
   assert.match(p3.text, /set svc_tcp \{ type inet_service; elements = \{ 9443 \} \}/);

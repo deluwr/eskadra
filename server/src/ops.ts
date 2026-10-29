@@ -12,6 +12,9 @@ import { parseAutoUserStats, counterDeltas, planSpread, SPREAD_COOLDOWN_MIN, spr
 /** Ядра узла, остановленные вручную на вкладке «Хост». */
 export const coresOff = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx.db, `core.off.${serverId}`, []);
 
+/** Адреса, с которых вход ключом панели на узле уже разрешён заранее (Ops.syncPeerAccess). */
+export const peersAllowed = (ctx: Ctx, serverId: string) => getSetting<string[]>(ctx.db, `peers.allowed.${serverId}`, []);
+
 /**
  * Отпечаток конфигов ядер, которые панель сейчас сформировала бы для узла. Хранится после выката; при запуске
  * панели (в т. ч. после обновления) узлы с другим отпечатком переприменяются сами — новая версия Эскадры
@@ -885,6 +888,29 @@ export class Ops {
       log(`${s.name}: снято`);
     }
     this.ctx.db.prepare('DELETE FROM templates WHERE id = ?').run(t.id);
+  }
+
+  /**
+   * Заранее разрешить на узлах вход ключом панели с адресов всех серверов флота (fleetctl allow: from= и firewall).
+   * Пока узел доступен, это делается само; когда станет недоступен — его можно перевести на «через сервер» или
+   * «через конфигурацию» без команд в консоли хостера. Что уже разрешено — в peers.allowed.<узел>, повторно не шлём.
+   */
+  async syncPeerAccess(log: (l: string) => void) {
+    for (const s of this.ctx.servers().filter((x) => x.sudo_mode === 'restricted' && x.host_key_fp && !x.fail_since)) {
+      const done = peersAllowed(this.ctx, s.id);
+      const todo = this.ctx.panelSources(s).filter((ip) => net.isIP(ip) && !done.includes(ip));
+      if (!todo.length) continue;
+      try {
+        await this.ctx.onNode(s, async (n) => {
+          for (const ip of todo) {
+            const r = await n.op(['allow', ip], { timeoutMs: 60_000 });
+            if (r.code === 0) done.push(ip);
+            else log(`${s.name}: не удалось разрешить ${ip} — ${(r.stderr || r.stdout).trim()}`);
+          }
+        });
+      } catch (e) { log(`${s.name}: адреса флота не разрешены — ${(e as Error).message}`); }
+      setSetting(this.ctx.db, `peers.allowed.${s.id}`, done);
+    }
   }
 
   /** Раздать адрес ноды соседям (fleet4/6) — §7.12.1. */

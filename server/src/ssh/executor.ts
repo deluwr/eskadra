@@ -47,18 +47,22 @@ export function fingerprintOf(key: Buffer): { fp: string; algo: string } {
 }
 
 /** Получить host key без аутентификации — для ручной сверки при добавлении сервера (шаг 2 runbook). */
-export async function fetchHostKey(host: string, port: number, timeoutMs = 10000, path: { prepare?: () => Promise<void>; via?: string } = {}): Promise<{ fp: string; algo: string }> {
+export async function fetchHostKey(host: string, port: number, timeoutMs = 10000, path: { prepare?: () => Promise<void>; via?: string; jump?: SshTarget } = {}): Promise<{ fp: string; algo: string }> {
   await path.prepare?.();
+  // через сервер-посредник: ключ узла читается через пересланное посредником соединение
+  const hop = path.jump ? await jumpSocket({ host, port, username: 'fleet', privateKey: '', hostKeyFp: null, jump: path.jump }, timeoutMs) : null;
   return new Promise<{ fp: string; algo: string }>((resolve, reject) => {
     const c = new Client();
     let got: { fp: string; algo: string } | null = null;
     const done = () => {
       c.end();
+      hop?.jc.end();
       if (got) resolve(got);
     };
-    c.on('error', (e) => (got ? done() : reject(viaError(path, e))));
+    c.on('error', (e) => { if (got) done(); else { hop?.jc.end(); reject(viaError(path, e)); } });
     c.on('ready', done);
     c.connect({
+      ...(hop ? { sock: hop.sock } : {}),
       host,
       port,
       username: 'fleet',
@@ -100,7 +104,7 @@ export class SshSession {
 }
 
 /** Соединение до host:port через узел-посредник (direct-tcpip); посредник закрывается вместе с ним. */
-async function jumpSocket(t: SshTarget, timeoutMs: number): Promise<{ sock: ClientChannel; jc: Client }> {
+export async function jumpSocket(t: SshTarget, timeoutMs: number): Promise<{ sock: ClientChannel; jc: Client }> {
   const jc = await connect(t.jump!, timeoutMs).catch((e: Error) => { throw new Error(`посредник ${t.jump!.host}: ${e.message}`); });
   try {
     const sock = await new Promise<ClientChannel>((resolve, reject) =>

@@ -634,10 +634,17 @@ ensure_certbot() {  # certbot ≥ 5.4 (сертификаты на IP) в сво
   "$LIB/certbot/bin/pip" install -q --disable-pip-version-check 'certbot>=5.4' >/dev/null 2>&1 || die "certbot не установился"
 }
 
-cert_hooks() {  # порт 80 на время выпуска/продления: правило в нашей таблице nft и в ufw/firewalld, если они включены
+cert_hooks() {  # порт 80 на время выпуска/продления: правило в нашей таблице nft и в ufw/firewalld, если они включены;
+  # службы из port80-units (nginx и т. п., отмеченные в панели) на это время останавливаются и сразу запускаются обратно
   install -d -m 755 "$ETC/tls/hooks"
-  cat > "$ETC/tls/hooks/pre.sh" <<'EOF'
+  cat > "$ETC/tls/hooks/pre.sh" <<EOF
 #!/bin/sh
+: > "$ETC/tls/port80-stopped"
+for u in \$(cat "$ETC/tls/port80-units" 2>/dev/null); do
+  systemctl is-active --quiet "\$u" && systemctl stop "\$u" && echo "\$u" >> "$ETC/tls/port80-stopped"
+done
+EOF
+  cat >> "$ETC/tls/hooks/pre.sh" <<'EOF'
 nft list table inet fleet >/dev/null 2>&1 && nft insert rule inet fleet input tcp dport 80 accept comment '"eskadra-acme"' 2>/dev/null
 if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw allow 80/tcp comment "eskadra acme" >/dev/null; fi
 if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --add-port=80/tcp; fi
@@ -648,9 +655,37 @@ EOF
 for h in $(nft -a list chain inet fleet input 2>/dev/null | sed -n 's/.*eskadra-acme.*# handle \([0-9]*\).*/\1/p'); do nft delete rule inet fleet input handle "$h"; done
 if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw delete allow 80/tcp >/dev/null 2>&1 || true; fi
 if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --remove-port=80/tcp || true; fi
+EOF
+  cat >> "$ETC/tls/hooks/post.sh" <<EOF
+# службы, остановленные на время проверки Let's Encrypt, — обратно (даже если выпуск не удался)
+for u in \$(cat "$ETC/tls/port80-stopped" 2>/dev/null); do systemctl start "\$u" || true; done
+rm -f "$ETC/tls/port80-stopped"
 exit 0
 EOF
   chmod 755 "$ETC/tls/hooks/pre.sh" "$ETC/tls/hooks/post.sh"
+}
+
+port80_units() { cat "$ETC/tls/port80-units" 2>/dev/null || true; }
+
+cmd_port80_yield() {  # port80-yield [служба]: служба, которая держит порт 80, освобождает его на время выпуска/продления
+  local h unit="${1:-}"
+  if [ -z "$unit" ]; then
+    h="$(port80_holder)" || { echo "port80 free"; return 0; }
+    unit="$(echo "$h" | cut -d'|' -f3)"
+    [ -n "$unit" ] || die "порт 80 держит $(echo "$h" | cut -d'|' -f1) (pid $(echo "$h" | cut -d'|' -f2)) не как служба systemd — остановите его на сервере вручную"
+  fi
+  [[ "$unit" =~ ^[A-Za-z0-9@._-]+\.service$ ]] || die "bad unit"
+  case "$unit" in eskadra*|fleet*|ssh.service|sshd.service|systemd-*|dbus*) die "порт 80 держит $unit — системная служба или служба Эскадры, её не останавливаю" ;; esac
+  install -d -m 755 "$ETC/tls"
+  port80_units | grep -qxF "$unit" || echo "$unit" >> "$ETC/tls/port80-units"
+  cert_hooks   # хуки старых установок не знали про port80-units
+  echo "yield $unit"
+}
+
+cmd_port80_keep() {  # port80-keep <служба>: больше не останавливать её на время продления
+  local unit="${1:?unit}"
+  [ -f "$ETC/tls/port80-units" ] && { grep -vxF "$unit" "$ETC/tls/port80-units" > "$ETC/tls/port80-units.new" || true; mv "$ETC/tls/port80-units.new" "$ETC/tls/port80-units"; }
+  echo "keep $unit"
 }
 
 cert_timer() {  # продление дважды в сутки; новый сертификат — в каталог tls и перезапуск ядер, которые его используют
@@ -675,14 +710,27 @@ EOF
   systemctl enable --now eskadra-certbot.timer >/dev/null 2>&1 || true
 }
 
+port80_holder() {  # кто держит порт 80: «программа|pid|служба systemd» (служба — пусто, если не служба); порт свободен — код 1
+  local l name pid unit
+  l="$(ss -ltnpH 'sport = :80' 2>/dev/null | head -1)"
+  [ -n "$l" ] || return 1
+  name="$(echo "$l" | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2)"
+  pid="$(echo "$l" | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)"
+  unit=""; [ -n "$pid" ] && unit="$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [[ "$unit" == *.service ]] || unit=""
+  echo "${name:-?}|${pid}|${unit}"
+}
+
 cmd_cert_renew() {  # продление (таймер и кнопка в панели): результат — в renew.status, его читает панель
-  local out code=0
+  local out code=0 h
   [ -x "$CB" ] || { echo "certbot не установлен"; return 0; }
   [ -f "$UNITS/eskadra-certbot.timer" ] && ! systemctl is-active --quiet eskadra-certbot.timer && systemctl enable --now eskadra-certbot.timer >/dev/null 2>&1 || true
   out="$("$CB" --config-dir "$LEDIR" --work-dir "$LEDIR/work" --logs-dir /var/log/eskadra-letsencrypt renew -q 2>&1)" || code=$?
   install -d -m 755 "$ETC/tls"
   { echo "at=$(date +%s)"; echo "code=$code"
-    echo "err=$(printf '%s' "$out" | grep -v '^\s*$' | tail -n 3 | tr '\n' ' ' | tr -d '\r' | cut -c1-400)"; } > "$ETC/tls/renew.status.new"
+    echo "err=$(printf '%s' "$out" | grep -v '^\s*$' | tail -n 3 | tr '\n' ' ' | tr -d '\r' | cut -c1-400)"
+    # не продлилось и порт 80 занят не отмеченной службой — кто именно (панель покажет и предложит освобождать порт)
+    if [ "$code" != 0 ] && h="$(port80_holder)" && ! port80_units | grep -qxF "$(echo "$h" | cut -d"|" -f3)"; then echo "holder=$h"; fi; } > "$ETC/tls/renew.status.new"
   mv "$ETC/tls/renew.status.new" "$ETC/tls/renew.status"
   [ "$code" = 0 ] && echo "renew ok" || { echo "renew failed: $out" >&2; return "$code"; }
 }
@@ -699,6 +747,7 @@ cmd_cert_status() {  # сертификаты узла для панели: им
     echo "cert $name $end $le"
   done
   [ -f "$ETC/tls/renew.status" ] && sed 's/^/renew_/' "$ETC/tls/renew.status"
+  [ -s "$ETC/tls/port80-units" ] && echo "port80_units=$(paste -sd, "$ETC/tls/port80-units")"
   systemctl is-active --quiet eskadra-certbot.timer 2>/dev/null && echo "timer=active" || echo "timer=inactive"
 }
 
@@ -724,8 +773,10 @@ cmd_cert_issue() {  # cert-issue <имя> ip|domain <значение>: выпу
   if [ -s "$ETC/tls/$name/fullchain.pem" ] && openssl x509 -in "$ETC/tls/$name/fullchain.pem" -noout -checkend 172800 >/dev/null 2>&1; then
     echo "cert $name: действует до $(openssl x509 -in "$ETC/tls/$name/fullchain.pem" -noout -enddate | cut -d= -f2)"; return 0
   fi
-  holder="$(ss -ltnpH 'sport = :80' 2>/dev/null | head -1)"
-  [ -z "$holder" ] || die "порт 80 занят ($(echo "$holder" | grep -o 'users:(("[^"]*"' | cut -d'"' -f2)) — Let's Encrypt не сможет проверить сервер; освободите порт 80 или используйте загруженный сертификат"
+  # порт 80 держит служба, отмеченная «освобождать на время продления», — её остановит pre-hook; иначе выпуск не пройдёт
+  if holder="$(port80_holder)" && ! port80_units | grep -qxF "$(echo "$holder" | cut -d"|" -f3)"; then
+    die "порт 80 занят: $(echo "$holder" | cut -d'|' -f1)$( [ -n "$(echo "$holder" | cut -d'|' -f3)" ] && echo " (служба $(echo "$holder" | cut -d'|' -f3))") — Let's Encrypt не сможет проверить сервер; остановите его (кнопка на вкладке «Хост» сервера) или используйте загруженный сертификат"
+  fi
   ensure_certbot
   cert_hooks
   args=(certonly -q --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$name" --key-type ecdsa
@@ -986,6 +1037,8 @@ case "${1:-}" in
   cert-set)    cmd_cert_set "${2:?}" "${3:?}" "${4:?}" ;;
   cert-deploy) cmd_cert_deploy "${2:?}" ;;
   cert-renew)  cmd_cert_renew ;;
+  port80-yield) cmd_port80_yield "${2:-}" ;;
+  port80-keep)  cmd_port80_keep "${2:?unit}" ;;
   cert-status) cmd_cert_status ;;
   *) die "usage: fleet-core install|apply|status|stop|x25519|stats|tls" ;;
 esac

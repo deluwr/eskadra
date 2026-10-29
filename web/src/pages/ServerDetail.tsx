@@ -181,16 +181,46 @@ function ConnectButton({ id, label, onStarted }: { id: string; label: string; on
 function AuthForm({ id, mgmtMode, onStarted }: { id: string; mgmtMode: string; onStarted: () => void }) {
   const [f, setF] = useState({ user: 'root', method: 'password', password: '', privateKey: '' });
   const [via, setVia] = useState<Via>({ kind: 'direct' });
-  const [channel, setChannel] = useState<'direct' | 'tunnel'>(mgmtMode === 'tunnel' ? 'tunnel' : 'direct');
+  const [channel, setChannel] = useState<'direct' | 'tunnel' | 'jump'>(mgmtMode === 'tunnel' || mgmtMode === 'jump' ? mgmtMode : 'direct');
+  // через сервер: посредник — сервер флота, на который панель заходит сама; allow — команда для консоли узла
+  const { data: fleet } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
+  const jumps = (fleet ?? []).filter((x) => x.id !== id && x.sudo_mode === 'restricted' && !x.fail_since && x.mgmt_mode !== 'jump');
+  const [jump, setJump] = useState(fleet?.find((x) => x.id === id)?.mgmt_jump ?? '');
+  // служебные скрипты уже стоят — можно без пароля (fleetctl allow в консоли); новому серверу нужен первичный доступ
+  const configured = fleet?.find((x) => x.id === id)?.sudo_mode === 'restricted';
+  const [allow, setAllow] = useState<string | null>(null);
   const { busy, error, run } = useAsync();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+  const hasSecret = !!(f.method === 'password' ? f.password : f.privateKey.trim());
+  const start = (withAuth: boolean) => api.post(`/api/v1/servers/${id}/onboard`, withAuth
+    ? { auth: { ...(f.method === 'password' ? { user: f.user, password: f.password } : { user: f.user, privateKey: f.privateKey }), ...(channel === 'jump' ? {} : viaBody(via)) } }
+    : {});
+  // «Доступ добавлен»: адрес посредника разрешён на сервере в консоли — подключение продолжается без пароля
+  if (allow) return (
+    <div className="alert warn stack">
+      <span>Сервер сейчас недоступен панели, поэтому разрешить вход с адреса посредника она не смогла. Выполните один раз в консоли хостера (VNC/KVM) под root на этом сервере и нажмите «Доступ добавлен» — панель продолжит подключение через посредника.</span>
+      <CopyBlock text={allow} />
+      <div className="flex">
+        <button className="btn pri" disabled={busy} onClick={() => void run(async () => { await start(false); setAllow(null); onStarted(); })}>Доступ добавлен</button>
+        <button className="btn ghost" disabled={busy} onClick={() => setAllow(null)}>Назад</button>
+      </div>
+      <ErrorBox error={error} />
+    </div>
+  );
   return (
     <form className="stack" autoComplete="off" onSubmit={(e) => {
       e.preventDefault();
       void run(async () => {
+        if (channel === 'jump') {
+          const r = await api.patch<{ consoleHint: string | null }>(`/api/v1/servers/${id}`, { mgmtMode: 'jump', mgmtJump: jump });
+          // с паролем первичный доступ идёт через посредника и сам разрешает его адрес; без пароля — команда в консоли
+          if (!hasSecret && r.consoleHint) { setAllow(r.consoleHint); return; }
+          await start(hasSecret);
+          onStarted();
+          return;
+        }
         if (mgmtMode !== 'local' && channel !== mgmtMode) await api.patch(`/api/v1/servers/${id}`, { mgmtMode: channel });
-        const auth = { ...(f.method === 'password' ? { user: f.user, password: f.password } : { user: f.user, privateKey: f.privateKey }), ...viaBody(via) };
-        await api.post(`/api/v1/servers/${id}/onboard`, { auth });
+        await start(true);
         onStarted();
       });
     }}>
@@ -202,12 +232,24 @@ function AuthForm({ id, mgmtMode, onStarted }: { id: string; mgmtMode: string; o
       {f.method === 'key' && <label className="fld">Приватный ключ<textarea className="inp mono" rows={4} value={f.privateKey} onChange={set('privateKey')} spellCheck={false} /></label>}
       {mgmtMode !== 'local' && (
         <div className="stack" style={{ gap: 8 }}>
-          <span className="k">Канал управления <Info>Как панель будет ходить на сервер после настройки. Туннель — если главный сервер в РФ: SSH идёт внутри VLESS-REALITY.</Info></span>
-          <Seg value={channel} label="Канал управления" onChange={setChannel} options={[['direct', 'напрямую по SSH'], ['tunnel', 'через туннель']]} />
+          <span className="k">Канал управления <Info>Как панель будет ходить на сервер после настройки. Туннель — если главный сервер в РФ: SSH идёт внутри VLESS-REALITY. Через сервер — панель заходит на другой сервер флота и через него открывает SSH к этому (команды выполняет сама панель).</Info></span>
+          <Seg value={channel} label="Канал управления" onChange={setChannel} options={[['direct', 'напрямую по SSH'], ['tunnel', 'через туннель'], ['jump', 'через сервер']]} />
         </div>
       )}
-      <ViaPicker value={via} onChange={(v) => { setVia(v); if (v.kind !== 'direct' && mgmtMode !== 'local') setChannel('tunnel'); }} exclude={id} mgmtMode={channel} />
-      <div><button className="btn pri" disabled={busy || !(f.method === 'password' ? f.password : f.privateKey.trim()) || !viaReady(via)}>Подключить</button></div>
+      {channel === 'jump' ? (
+        <div className="stack" style={{ gap: 8 }}>
+          {jumps.length ? (
+            <label className="fld" style={{ maxWidth: 360 }}>Сервер-посредник
+              <select className="inp" value={jump} onChange={(e) => setJump(e.target.value)}>
+                <option value="">выберите сервер</option>
+                {jumps.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+              </select>
+            </label>
+          ) : <span className="k">Нет сервера, на который панель сейчас заходит, — посредником может быть только такой.</span>}
+          <span className="k">{configured ? 'Сервер уже подключался к панели — пароль не нужен: панель попросит один раз разрешить адрес посредника в консоли хостера. С паролем вход пройдёт через посредника и всё настроится само.' : 'Новый сервер: нужен логин и пароль (или ключ) — первичный доступ пройдёт через посредника.'}</span>
+        </div>
+      ) : <ViaPicker value={via} onChange={(v) => { setVia(v); if (v.kind !== 'direct' && mgmtMode !== 'local') setChannel('tunnel'); }} exclude={id} mgmtMode={channel} />}
+      <div><button className="btn pri" disabled={busy || (channel === 'jump' ? !jump || (!configured && !hasSecret) : !hasSecret || !viaReady(via))}>Подключить</button></div>
       <ErrorBox error={error} />
     </form>
   );
@@ -672,6 +714,24 @@ function CertsCard({ s, onChange }: { s: Server; onChange: () => void }) {
             ))}</tbody>
           </table>
         </div>
+      )}
+      {/* продление не прошло, потому что порт 80 держит чужая служба: кто именно и кнопка её остановить */}
+      {st?.renew && st.renew.code !== 0 && st.renew.holder && (
+        <div className="alert warn stack">
+          <span>Порт 80 занят: <b>{st.renew.holder.name}</b>{st.renew.holder.unit ? <> (служба <code>{st.renew.holder.unit}</code>)</> : ''}{st.renew.holder.pid ? `, pid ${st.renew.holder.pid}` : ''}. Пока порт занят, сертификат не продлевается: проверка Let’s Encrypt идёт через порт 80.</span>
+          {st.renew.holder.unit && can('servers.manage') ? (
+            <span><button className="btn sm" disabled={busy} onClick={async () => {
+              if (!(await ask(`На время выпуска и продления сертификатов останавливать ${st.renew!.holder!.unit} на ${s.name}? Перед проверкой Let’s Encrypt служба останавливается (обычно на 10–30 секунд) и сразу запускается обратно — в остальное время работает как обычно. Панель сразу продлит сертификат.`))) return;
+              void run(async () => { const r = await api.post<{ renew: { code: number } | null }>(`/api/v1/servers/${s.id}/certs/free80`); toast(r.renew?.code === 0 ? 'Сертификат продлён; служба снова работает' : 'Продление — результат ниже'); onChange(); });
+            }}>Останавливать {st.renew.holder.unit} на время продления</button></span>
+          ) : <span className="k">Это не служба systemd — остановите программу на сервере вручную, затем нажмите «Продлить сейчас».</span>}
+        </div>
+      )}
+      {/* службы, которые освобождают порт 80 на время выпуска и продления */}
+      {!!st?.port80Units?.length && (
+        <span className="k">На время продления останавливается и сразу запускается обратно: {st.port80Units.map((u) => (
+          <span key={u}><code>{u}</code>{can('servers.manage') && <> <button className="link" disabled={busy} onClick={() => void run(async () => { await api.del(`/api/v1/servers/${s.id}/certs/free80/${u}`); toast(`${u} больше не останавливается`); onChange(); })}>не останавливать</button></>} </span>
+        ))}</span>
       )}
       {st?.renew && <span className="k">{`Последнее продление: ${fmtTime(st.renew.at)}`} · {st.renew.code === 0 ? 'успешно' : `ошибка: ${st.renew.err || 'certbot завершился с ошибкой'}`} · {`проверено ${ago(st.checkedAt)}`}</span>}
       <ErrorBox error={error} />

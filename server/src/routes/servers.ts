@@ -15,7 +15,7 @@ import { credsFields, credsOf, newTunnel } from '../mgmt.js';
 import { checkLogin, installNodekit, onboardingRunning, runPreflight, snippetOf, startOnboarding } from '../onboard.js';
 import { fetchHostKey, withNodeLock, withSession } from '../ssh/executor.js';
 import { kitVersion } from '../nodekit.js';
-import { Ops, startJob, XUI_TOKEN } from '../ops.js';
+import { Ops, peersAllowed, startJob, XUI_TOKEN } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
 import { CHECKLIST, renderPlan } from '../firewall.js';
 import { certProblems } from '../certs.js';
@@ -68,7 +68,9 @@ export const createBody = z.object({
   role: z.enum(['entry', 'exit']).default('entry'),
   group: z.string().trim().min(1).max(32).default('default'),
   /** Канал управления (§5.8): напрямую по SSH или через служебный туннель VLESS-REALITY. */
-  mgmtMode: z.enum(['direct', 'tunnel']).default('direct'),
+  mgmtMode: z.enum(['direct', 'tunnel', 'jump']).default('direct'),
+  /** «через сервер»: сервер-посредник (id), через который панель заходит на новый сервер — и при подключении тоже */
+  mgmtJump: z.string().max(64).optional(),
   /** Одноразовый доступ для автоматической настройки; без него — ручной сниппет. Нигде не сохраняется. */
   auth: z.object({
     user: z.string().trim().min(1).max(64).regex(/^[a-z_][a-z0-9_.-]*$/i).default('root'),
@@ -117,6 +119,13 @@ export function createServer(ctx: Ctx, body: z.infer<typeof createBody>, actor: 
   const { db } = ctx;
   // для туннеля адрес исполнителя не обязателен: узел пускает панель по ключу туннеля (§5.8)
   if (!ctx.executorIps().length && body.mgmtMode === 'direct') throw new HttpError(400, 'Сначала задайте адрес исполнителя в настройках (executor.ips)');
+  // через сервер: посредник — сервер флота, на который панель заходит сама; пересылку на нём разрешает подключение
+  const jump = body.mgmtMode === 'jump' ? ctx.servers().find((x) => x.id === body.mgmtJump) : undefined;
+  if (body.mgmtMode === 'jump') {
+    if (!jump) throw new HttpError(400, 'выберите сервер-посредник — сервер флота, на который панель заходит');
+    if (jump.mgmt_mode === 'jump') throw new HttpError(400, `${jump.name} сам управляется через посредника — выберите сервер, на который панель заходит без него`);
+    if (jump.sudo_mode !== 'restricted' || jump.fail_since) throw new HttpError(409, `${jump.name}: панель на него сейчас не заходит — выберите доступный сервер`);
+  }
   if (db.prepare('SELECT 1 FROM servers WHERE host = ? AND ssh_port = ?').get(body.host, body.sshPort))
     throw new HttpError(409, 'сервер с таким адресом и портом уже есть');
   db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(body.group);
@@ -128,6 +137,7 @@ export function createServer(ctx: Ctx, body: z.infer<typeof createBody>, actor: 
      VALUES (?, ?, ?, ?, ?, ?, 'P1', 1, ?, ?)`,
   ).run(id, body.name, body.host, body.sshPort, body.role, body.group, keys.public.trim(), ctx.seal(keys.private));
   if (body.mgmtMode === 'tunnel') ctx.updateServer(id, { mgmt_mode: 'tunnel', ...credsFields(ctx, newTunnel(ctx.servers().map((x) => x.mgmt_local_port ?? 0))) });
+  if (jump) ctx.updateServer(id, { mgmt_mode: 'jump', mgmt_jump: jump.id });
   audit(db, actor, 'server.create', id, { host: body.host, port: body.sshPort, role: body.role, mgmt: body.mgmtMode, auto: !!body.auth });
   return { id, jobId: body.auth ? startOnboarding(ctx, id, actor, body.auth) : null };
 }
@@ -244,7 +254,9 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       // SSH приходит от Xray узла на его же адрес: этот адрес должен пускаться ключом панели (from=) и firewall'ом —
       // разрешаем, пока работает прежний канал; сервер недоступен — один раз в консоли хостера
       const ip = isIP(r.host) ? r.host : (await dns.lookup(r.host, { family: 4 }).catch(() => null))?.address ?? r.host;
-      if (r.fail_since || r.sudo_mode !== 'restricted') consoleHint = `fleetctl allow ${ip}`;
+      // адрес уже разрешён заранее (адреса флота, Ops.syncPeerAccess) — ни команд, ни консоли не нужно
+      if (peersAllowed(ctx, r.id).includes(ip)) { /* уже разрешён */ }
+      else if (r.fail_since || r.sudo_mode !== 'restricted') consoleHint = `fleetctl allow ${ip}`;
       else try { await ctx.onNode(r, async (n) => { const x = await n.op(['allow', ip], { timeoutMs: 60_000 }); if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim()); }); }
       catch { consoleHint = `fleetctl allow ${ip}`; }
       ctx.updateServer(r.id, { mgmt_mode: 'inbound', mgmt_template: tid, ...(r.mgmt_local_port ? {} : { mgmt_local_port: newTunnel(ctx.servers().map((x) => x.mgmt_local_port ?? 0)).localPort }) });
@@ -265,7 +277,9 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       } catch (e) { throw new HttpError(502, `${j.name}: пересылка до ${target} не разрешена — ${(e as Error).message}`); }
       // SSH на этот узел придёт с адреса посредника: разрешаем его, пока работает прежний канал; иначе — команда для консоли
       const ip = isIP(j.host) ? j.host : (await dns.lookup(j.host, { family: 4 }).catch(() => null))?.address ?? j.host;
-      if (r.fail_since || r.sudo_mode !== 'restricted') consoleHint = `fleetctl allow ${ip}`;
+      // адрес уже разрешён заранее (адреса флота, Ops.syncPeerAccess) — ни команд, ни консоли не нужно
+      if (peersAllowed(ctx, r.id).includes(ip)) { /* уже разрешён */ }
+      else if (r.fail_since || r.sudo_mode !== 'restricted') consoleHint = `fleetctl allow ${ip}`;
       else try { await ctx.onNode(r, async (n) => { const x = await n.op(['allow', ip], { timeoutMs: 60_000 }); if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim()); }); }
       catch { consoleHint = `fleetctl allow ${ip}`; }
       // прежний посредник больше не нужен — снимаем у него пересылку (не вышло — не страшно, она ведёт только к SSH узла)
@@ -385,6 +399,35 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     if (r.sudo_mode !== 'restricted') throw new HttpError(409, 'сервер ещё не настроен');
     const st = await new Ops(ctx).checkCerts(r, req.params.act === 'renew');
     if (req.params.act === 'renew') audit(db, who(req), 'server.certs_renew', r.id, { renew: st.renew });
+    return publicView(ctx, ctx.server(r.id));
+  });
+
+  /**
+   * Порт 80 занят чужой службой (nginx, apache…) — Let's Encrypt не может проверить сервер. Служба отмечается
+   * «освобождать порт 80 на время продления» (fleet-core port80-yield): хуки certbot останавливают её перед проверкой
+   * и сразу запускают обратно, в остальное время она работает как обычно. Затем — продление сразу.
+   * DELETE — больше не останавливать (port80-keep). Системные службы и службы Эскадры не трогаются.
+   */
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/certs/free80', { preHandler: guard(ctx, 'servers.manage', { otp: true }) }, async (req) => {
+    const r = ctx.server(req.params.id);
+    if (r.sudo_mode !== 'restricted') throw new HttpError(409, 'сервер ещё не настроен');
+    const out = await ctx.onNode(r, async (n) => {
+      await new Ops(ctx).ensureKit(r, n, () => undefined);   // port80-yield появился в nodekit вместе с этой кнопкой
+      const x = await n.op(['tls-port80-yield'], { timeoutMs: 60_000 });
+      if (x.code !== 0) throw new HttpError(409, (x.stderr || x.stdout).trim() || 'не удалось освободить порт 80');
+      return x.stdout.trim();
+    });
+    audit(db, who(req), 'server.port80_yield', r.id, { out });
+    const st = await new Ops(ctx).checkCerts(r, true);
+    return { ...publicView(ctx, ctx.server(r.id)), yielded: out.replace(/^yield /, ''), renew: st.renew };
+  });
+
+  app.delete<{ Params: { id: string; unit: string } }>('/api/v1/servers/:id/certs/free80/:unit', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
+    const r = ctx.server(req.params.id);
+    if (!/^[A-Za-z0-9@._-]+\.service$/.test(req.params.unit)) throw new HttpError(400, 'неверное имя службы');
+    await ctx.onNode(r, (n) => n.must(['tls-port80-keep', req.params.unit]));
+    audit(db, who(req), 'server.port80_keep', r.id, { unit: req.params.unit });
+    await new Ops(ctx).checkCerts(r);
     return publicView(ctx, ctx.server(r.id));
   });
 

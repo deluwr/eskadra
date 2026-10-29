@@ -55,18 +55,22 @@ function SelfNodeCard({ onDone }: { onDone: (id: string) => void }) {
 }
 
 function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => void; onCancel: () => void }) {
-  const [f, setF] = useState({ name: '', host: '', sshPort: '22', role: 'exit', group: 'default', mgmtMode: 'direct', user: 'root', method: 'password', password: '', privateKey: '', passphrase: '' });
+  const [f, setF] = useState({ name: '', host: '', sshPort: '22', role: 'exit', group: 'default', mgmtMode: 'direct', mgmtJump: '', user: 'root', method: 'password', password: '', privateKey: '', passphrase: '' });
   const { busy, error, run } = useAsync();
   const { data: groups } = usePoll(() => api.get<Array<{ name: string }>>('/api/v1/groups'), null);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
   const [via, setVia] = useState<Via>({ kind: 'direct' });
+  // через сервер: посредник — сервер флота, на который панель заходит сама (не через посредника)
+  const { data: fleet } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
+  const jumps = (fleet ?? []).filter((x) => x.sudo_mode === 'restricted' && !x.fail_since && x.mgmt_mode !== 'jump');
+  const jump = f.mgmtMode === 'jump';
   const create = (manual: boolean) => run(async () => {
     const auth = manual ? undefined : {
       ...(f.method === 'password' ? { user: f.user, password: f.password } : { user: f.user, privateKey: f.privateKey, ...(f.passphrase ? { passphrase: f.passphrase } : {}) }),
-      ...viaBody(via),
+      ...(jump ? {} : viaBody(via)),
     };
     const r = await api.post<{ server: Server }>('/api/v1/servers', {
-      name: f.name, host: f.host, sshPort: Number(f.sshPort), role: f.role, group: f.group, mgmtMode: f.mgmtMode, ...(auth ? { auth } : {}),
+      name: f.name, host: f.host, sshPort: Number(f.sshPort), role: f.role, group: f.group, mgmtMode: f.mgmtMode, ...(jump ? { mgmtJump: f.mgmtJump } : {}), ...(auth ? { auth } : {}),
     });
     onCreated(r.server.id);
   });
@@ -107,7 +111,7 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
       )}
 
       <fieldset className="stack" style={{ border: 0, padding: 0, margin: 0 }}>
-        <legend className="k" style={{ marginBottom: 6 }}>Канал управления <Info>Как панель будет ходить на сервер после настройки. Если главный сервер в РФ — выбирайте туннель: прямой SSH через границу может резаться.</Info></legend>
+        <legend className="k" style={{ marginBottom: 6 }}>Канал управления <Info>Как панель будет ходить на сервер после настройки. Если главный сервер в РФ — выбирайте туннель: прямой SSH через границу может резаться. Через сервер — панель заходит на другой сервер флота и через него открывает SSH к новому (и первичная настройка тоже идёт через него); команды выполняет сама панель.</Info></legend>
         <div className="choice">
           <label>
             <input type="radio" name="mgmt" value="direct" checked={f.mgmtMode === 'direct'} onChange={set('mgmtMode')} />
@@ -117,18 +121,32 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
             <input type="radio" name="mgmt" value="tunnel" checked={f.mgmtMode === 'tunnel'} onChange={set('mgmtMode')} />
             <span><b>Через туннель</b></span>
           </label>
+          <label>
+            <input type="radio" name="mgmt" value="jump" checked={jump} onChange={set('mgmtMode')} />
+            <span><b>Через сервер</b></span>
+          </label>
         </div>
       </fieldset>
+      {jump && (
+        jumps.length ? (
+          <label className="fld" style={{ maxWidth: 360 }}><span>Сервер-посредник <Info>Сервер флота, на который панель заходит сейчас. Ему разрешается только пересылать соединение до SSH нового сервера.</Info></span>
+            <select className="inp" value={f.mgmtJump} onChange={set('mgmtJump')}>
+              <option value="">выберите сервер</option>
+              {jumps.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          </label>
+        ) : <span className="k">Нет сервера, на который панель сейчас заходит, — посредником может быть только такой.</span>
+      )}
 
       {/* через прокси — значит SSH напрямую режется: и дальше управлять сервером лучше через туннель */}
-      <ViaPicker value={via} onChange={(v) => { setVia(v); if (v.kind !== 'direct') setF((x) => ({ ...x, mgmtMode: 'tunnel' })); }} mgmtMode={f.mgmtMode} />
+      {!jump && <ViaPicker value={via} onChange={(v) => { setVia(v); if (v.kind !== 'direct') setF((x) => ({ ...x, mgmtMode: 'tunnel' })); }} mgmtMode={f.mgmtMode} />}
 
       <ErrorBox error={error} />
       <div className="flex">
-        <button className="btn pri" disabled={busy || !hasSecret || !viaReady(via)}>{busy ? 'Добавляю…' : 'Добавить и настроить'}</button>
+        <button className="btn pri" disabled={busy || !hasSecret || (jump ? !f.mgmtJump : !viaReady(via))}>{busy ? 'Добавляю…' : 'Добавить и настроить'}</button>
         <button type="button" className="btn ghost" onClick={onCancel}>Отмена</button>
         <span style={{ flex: 1 }} />
-        <button type="button" className="link" disabled={busy || !f.name || !f.host} onClick={() => void create(true)}>Без пароля: выполню команду на сервере сам</button>
+        <button type="button" className="link" disabled={busy || !f.name || !f.host || (jump && !f.mgmtJump)} onClick={() => void create(true)}>Без пароля: выполню команду на сервере сам</button>
       </div>
     </form>
   );

@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Db } from './db.js';
 import { getSetting } from './db.js';
@@ -135,11 +136,13 @@ export class Ctx {
 
   /**
    * С каких адресов на узел приходит SSH панели (from= у ключа, firewall, проверка «видит панель с …»): адреса
-   * исполнителя, а также — через конфигурацию — сам узел, через сервер — адрес посредника.
+   * исполнителя и — заранее — адреса всех серверов флота, включая сам узел. Так переключиться на «через сервер»
+   * (SSH с адреса соседа) или «через конфигурацию» (с адреса самого узла) можно и тогда, когда узел уже недоступен
+   * панели: разрешать адрес в консоли хостера не нужно. Посредник с доменом вместо IP — тоже в списке.
    */
   panelSources(s: ServerRow): string[] {
-    const extra = s.mgmt_mode === 'inbound' ? [s.host] : s.mgmt_mode === 'jump' ? this.servers().filter((x) => x.id === s.mgmt_jump).map((x) => x.host) : [];
-    return [...extra, ...this.executorIps()];
+    const fleet = this.servers().filter((x) => isIP(x.host) || (s.mgmt_mode === 'jump' && x.id === s.mgmt_jump)).map((x) => x.host);
+    return [...new Set([...this.executorIps(), ...fleet])];
   }
 
   target(r: ServerRow): SshTarget {

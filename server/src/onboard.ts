@@ -8,7 +8,7 @@ import { HttpError, type Ctx, type ServerRow, expectedPanelIps } from './ctx.js'
 import { audit } from './lib/audit.js';
 import { bootstrapSnippet } from './bootstrap.js';
 import { credsOf, MGMT_SNIS, xrayPin } from './mgmt.js';
-import { fetchHostKey, fingerprintOf, HostKeyError, mask, withNodeLock, withSession } from './ssh/executor.js';
+import { fetchHostKey, fingerprintOf, HostKeyError, jumpSocket, mask, withNodeLock, withSession } from './ssh/executor.js';
 import { parseSections, summarize } from './preflight.js';
 import { buildInstallScript, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE } from './nodekit.js';
 import { Ops, startJob, type JobHandle } from './ops.js';
@@ -29,7 +29,7 @@ export async function snippetOf(ctx: Ctx, r: ServerRow): Promise<string> {
   const creds = credsOf(ctx, r);
   if (!creds) throw new HttpError(409, 'у узла нет данных служебного туннеля — переключите канал заново');
   const xray = await xrayPin(ctx).catch((e: Error) => { throw new HttpError(502, `не удалось получить релиз Xray с GitHub: ${e.message}`); });
-  return bootstrapSnippet({ panelIps: ctx.executorIps(), pubkey: r.key_pub, mgmt: { creds, sshPort: r.ssh_port, xray } });
+  return bootstrapSnippet({ panelIps: ctx.panelSources(r), pubkey: r.key_pub, mgmt: { creds, sshPort: r.ssh_port, xray } });
 }
 
 /**
@@ -49,15 +49,20 @@ export async function bootstrapWithAuth(ctx: Ctx, r: ServerRow, auth: BootstrapA
     via = v;
     log(`первичный доступ через прокси (${o.label}): 127.0.0.1:${v.port} → ${r.host}:${r.ssh_port}`);
   }
+  // через сервер-посредник: первичный доступ идёт по соединению, которое пересылает посредник (как и дальнейший SSH панели)
+  const hop = !via && r.mgmt_mode === 'jump' ? await jumpSocket({ host: r.host, port: r.ssh_port, username: auth.user, privateKey: '', hostKeyFp: null, jump: ctx.target(r).jump }, 20_000) : null;
+  if (hop) log(`первичный доступ через сервер-посредник ${ctx.target(r).via?.replace(/^сервер /, '') ?? ''}`);
   try {
     const client: SshClient = await new Promise((resolve, reject) => {
       const c = new Client();
       let mismatch: string | null = null;
       c.on('ready', () => resolve(c));
-      c.on('error', (e) => reject(mismatch ? new HostKeyError(mismatch) : explainConnect(e, r, !!via)));
+      c.on('close', () => hop?.jc.end());
+      c.on('error', (e) => { hop?.jc.end(); reject(mismatch ? new HostKeyError(mismatch) : explainConnect(e, r, !!via)); });
       // часть серверов спрашивает пароль через keyboard-interactive
       c.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => finish(prompts.map(() => auth.password ?? '')));
       c.connect({
+        ...(hop ? { sock: hop.sock } : {}),
         host: via ? '127.0.0.1' : r.host, port: via ? via.port : r.ssh_port, username: auth.user,
         ...(auth.privateKey ? { privateKey: auth.privateKey, passphrase: auth.passphrase || undefined } : { password: auth.password }),
         tryKeyboard: !auth.privateKey,
@@ -311,6 +316,22 @@ export const onboardingRunning = (id: string) => running.has(id);
  * Полный цикл подключения в фоне: bootstrap (если дан доступ) → вход ключом панели → preflight → nodekit.
  * Шаги, уже пройденные раньше, пропускаются, поэтому «Повторить» продолжает с места остановки.
  */
+/**
+ * Через сервер: посредник должен пускать пересылку до SSH этого узла (fleetctl jump-add → permitopen у ключа панели).
+ * Делается перед подключением — первичный доступ, ключ сервера и всё дальше идут через посредника.
+ */
+export async function prepareJump(ctx: Ctx, r: ServerRow, log: Log) {
+  const j = ctx.servers().find((x) => x.id === r.mgmt_jump);
+  if (!j) throw new Error('сервер-посредник удалён — выберите другой канал управления');
+  const target = `${r.host}:${r.ssh_port}`;
+  await ctx.onNode(j, async (n) => {
+    await new Ops(ctx).ensureKit(j, n, () => undefined);   // jump-add появился в nodekit вместе с этим режимом
+    const x = await n.op(['jump-add', target], { timeoutMs: 60_000 });
+    if (x.code !== 0) throw new Error(`${j.name}: пересылка до ${target} не разрешена — ${(x.stderr || x.stdout).trim()}`);
+  });
+  log(`посредник ${j.name}: пересылка до ${target} разрешена`);
+}
+
 export function startOnboarding(ctx: Ctx, id: string, who: string, auth?: BootstrapAuth): number {
   if (running.has(id)) throw new HttpError(409, 'подключение уже идёт');
   const job = startJob(ctx, id, 'onboard');
@@ -318,6 +339,7 @@ export function startOnboarding(ctx: Ctx, id: string, who: string, auth?: Bootst
   void (async () => {
     try {
       let r = ctx.server(id);
+      if (r.mgmt_mode === 'jump') await prepareJump(ctx, r, job.log);
       if (auth) {
         job.log('шаг 1/5: первичный доступ (одноразовые данные не сохраняются)');
         await bootstrapWithAuth(ctx, r, auth, job.log);
