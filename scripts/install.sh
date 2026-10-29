@@ -8,6 +8,7 @@
 #   ESKADRA_VERSION=v0.4.0       конкретная версия (по умолчанию — последняя)
 #   ESKADRA_PORT=…               порт панели (по умолчанию — случайный)
 #   ESKADRA_NODE_MAJOR=24        мажорная версия Node.js
+#   ESKADRA_NODE_MIRROR=https://…/dist  своё зеркало Node.js (пробуется первым)
 #   ESKADRA_TLS=ip|domain        сертификат Let's Encrypt без вопроса (это согласие с условиями Let's Encrypt)
 #   ESKADRA_DOMAIN=panel.example  домен для ESKADRA_TLS=domain
 #   ESKADRA_XUI=keep|remove      что делать с найденным 3x-ui без вопроса
@@ -90,19 +91,37 @@ say "Пакеты ($PM)"
 pkg_install curl:curl:curl openssl:openssl:openssl xz:xz-utils:xz tar:tar:tar ss:iproute2:iproute:iproute2 \
   python3:python3:python3:python sha256sum:coreutils:coreutils useradd:passwd:shadow-utils:shadow
 
-fetch() { curl -fsSL --retry 3 --max-time 600 "$@"; }
+# обрыв TLS (curl 35) обычный --retry не повторяет: --retry-all-errors есть с curl 7.71
+RETRY_ALL=""; curl --help all 2>/dev/null | grep -q -- --retry-all-errors && RETRY_ALL=--retry-all-errors
+fetch() { curl -fsSL --retry 3 --retry-delay 2 $RETRY_ALL --connect-timeout 20 --max-time 600 "$@"; }
 
 # ── Node.js из официальных сборок, с проверкой SHA256 ───────────────────────
+# nodejs.org из части сетей (в т. ч. в РФ) рвёт TLS. При первой установке тогда берём зеркало npmmirror
+# (его latest-v* отстаёт на несколько версий — при обновлении оно не нужно: установленный Node.js остаётся)
+NODE_MIRRORS="${ESKADRA_NODE_MIRROR:+$ESKADRA_NODE_MIRROR }https://nodejs.org/dist"
+[ -x "$PREFIX/node/bin/node" ] || NODE_MIRRORS="$NODE_MIRRORS https://npmmirror.com/mirrors/node"
 install_node() {
-  local shas file sum tmp
-  shas="$(fetch "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/SHASUMS256.txt")" || die "не удалось получить список Node.js"
+  local shas="" file sum tmp base=""
+  for base in $NODE_MIRRORS; do
+    shas="$(fetch "$base/latest-v${NODE_MAJOR}.x/SHASUMS256.txt" 2>/dev/null)" && [ -n "$shas" ] && break
+    warn "Node.js: $base недоступен"; shas=""
+  done
+  if [ -z "$shas" ]; then
+    # обновление: установленный Node.js рабочий — не повод оставлять панель на старой версии
+    [ -x "$PREFIX/node/bin/node" ] && { warn "список Node.js не получен — оставляю установленный $("$PREFIX/node/bin/node" -v)"; return; }
+    die "не удалось получить список Node.js (nodejs.org и зеркала недоступны; своё зеркало — ESKADRA_NODE_MIRROR=https://…/dist)"
+  fi
   file="$(printf '%s\n' "$shas" | awk -v a="linux-$ARCH.tar.xz" '$2 ~ a"$" {print $2; exit}')"
   sum="$(printf '%s\n' "$shas" | awk -v f="$file" '$2==f {print $1}')"
   [ -n "$file" ] && [ -n "$sum" ] || die "нет сборки Node.js для linux-$ARCH"
   if [ -x "$PREFIX/node/bin/node" ] && [ "$(cat "$PREFIX/node/.release" 2>/dev/null)" = "$file" ]; then return; fi
   say "Node.js ${file%%-linux*}"
   tmp="$(mktemp -d)"
-  fetch -o "$tmp/$file" "https://nodejs.org/dist/latest-v${NODE_MAJOR}.x/$file"
+  if ! fetch -o "$tmp/$file" "$base/latest-v${NODE_MAJOR}.x/$file"; then
+    rm -rf "$tmp"
+    [ -x "$PREFIX/node/bin/node" ] && { warn "Node.js не скачался — оставляю установленный $("$PREFIX/node/bin/node" -v)"; return; }
+    die "не удалось скачать Node.js с $base"
+  fi
   echo "$sum  $tmp/$file" | sha256sum -c --quiet - || die "SHA256 Node.js не совпал"
   rm -rf "$PREFIX/node.new"; mkdir -p "$PREFIX/node.new"
   tar -xJf "$tmp/$file" -C "$PREFIX/node.new" --strip-components=1
