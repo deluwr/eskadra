@@ -5,15 +5,22 @@
  * Xray: VLESS, VMess, Trojan, Shadowsocks-2022 — транспорты TCP/WS/gRPC/XHTTP/HTTPUpgrade, защита REALITY/TLS/нет.
  * sing-box: Hysteria2. telemt: MTProto (fake-TLS).
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { InboundRow, TemplateRow } from './ctx.js';
 
 export type Protocol = 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'hysteria2' | 'mtproto';
 export type Core = 'xray' | 'sing-box' | 'telemt';
 export type Security = 'reality' | 'tls' | 'none';
 export type Transport = 'tcp' | 'ws' | 'grpc' | 'xhttp' | 'httpupgrade';
-/** Откуда сертификат TLS: Let's Encrypt на IP узла, свой домен на каждом узле, загруженный (общий домен/wildcard), самоподписанный (Hysteria2). */
-export type CertMode = 'ip' | 'domain' | 'custom' | 'self';
+/**
+ * Откуда сертификат TLS: Let's Encrypt на IP узла, свой домен на каждом узле, загруженный (общий домен/wildcard),
+ * самоподписанный (Hysteria2). cdn — служебный: самоподписанный под домен CDN у входа за CDN (entrySpec), его
+ * принимает CDN в режиме «Full»; в настройках шаблона не выбирается.
+ */
+export type CertMode = 'ip' | 'domain' | 'custom' | 'self' | 'cdn';
+
+/** Порты HTTPS, которые проксирует Cloudflare (у других CDN список обычно шире). */
+export const CDN_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
 
 export interface ProtocolInfo {
   core: Core; name: string; securities: Security[]; transports: Transport[]; udp?: boolean; relay: boolean; certModes: CertMode[];
@@ -34,7 +41,47 @@ export const PROTOCOLS: Record<Protocol, ProtocolInfo> = {
   mtproto: { core: 'telemt', name: 'MTProto (Telegram)', securities: ['none'], transports: [], relay: false, certModes: [] },
 };
 
-export const SS_METHODS = ['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305'] as const;
+/**
+ * Параметры XHTTP сверх host/path/mode (поле extra у Xray). Числа и диапазоны — строкой «30» или «16-32»: из диапазона
+ * Xray берёт случайное значение. Пусто — по умолчанию Xray. Сервер и клиент должны совпадать в xPaddingBytes и
+ * scMaxEachPostBytes — поэтому настройки одни на конфигурацию, панель раскладывает их по сторонам сама.
+ */
+export interface XhttpExtra {
+  xPaddingBytes?: string;        // оба: длина случайной добавки к запросам и ответам (Xray: 100-1000)
+  noGRPCHeader?: boolean;        // клиент, stream-up/one: не притворяться gRPC
+  noSSEHeader?: boolean;         // сервер: не отдавать заголовок text/event-stream
+  scMaxEachPostBytes?: string;   // оба, packet-up: наибольший POST (Xray: 1000000)
+  scMinPostsIntervalMs?: string; // клиент, packet-up: пауза между POST (Xray: 30)
+  scMaxBufferedPosts?: string;   // сервер, packet-up: сколько POST держать в очереди (Xray: 30)
+  scStreamUpServerSecs?: string; // сервер, stream-up: раз в столько секунд слать «пустышку», чтобы CDN не рвал (Xray: 20-80)
+  xmux?: {                       // клиент: мультиплексирование в h2/h3-соединениях
+    maxConcurrency?: string; maxConnections?: string; cMaxReuseTimes?: string;
+    hMaxRequestTimes?: string; hMaxReusableSecs?: string; hKeepAlivePeriod?: string;
+  };
+}
+const XMUX_KEYS = ['maxConcurrency', 'maxConnections', 'cMaxReuseTimes', 'hMaxRequestTimes', 'hMaxReusableSecs', 'hKeepAlivePeriod'] as const;
+
+/** «30» → 30, «16-32» → «16-32»: так Xray принимает и число, и диапазон. */
+const rangeVal = (v: string) => (/^\d+$/.test(v) ? Number(v) : v);
+const pick = (e: XhttpExtra, keys: Array<'xPaddingBytes' | 'scMaxEachPostBytes' | 'scMinPostsIntervalMs' | 'scMaxBufferedPosts' | 'scStreamUpServerSecs'>) =>
+  Object.fromEntries(keys.filter((k) => e[k]).map((k) => [k, rangeVal(e[k]!)]));
+
+/** extra XHTTP для inbound'а (сервер). */
+export function xhttpServerExtra(e: XhttpExtra): Record<string, unknown> {
+  return { ...pick(e, ['xPaddingBytes', 'scMaxEachPostBytes', 'scMaxBufferedPosts', 'scStreamUpServerSecs']), ...(e.noSSEHeader ? { noSSEHeader: true } : {}) };
+}
+
+/** extra XHTTP для клиента: outbound плеча и ссылка (параметр extra). */
+export function xhttpClientExtra(e: XhttpExtra): Record<string, unknown> {
+  const xmux = Object.fromEntries(XMUX_KEYS.filter((k) => e.xmux?.[k]).map((k) => [k, rangeVal(e.xmux![k]!)]));
+  return {
+    ...pick(e, ['xPaddingBytes', 'scMaxEachPostBytes', 'scMinPostsIntervalMs']),
+    ...(e.noGRPCHeader ? { noGRPCHeader: true } : {}),
+    ...(Object.keys(xmux).length ? { xmux } : {}),
+  };
+}
+
+export const SS_METHODS =['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305'] as const;
 
 /** Настройки шаблона (столбец settings, JSON) — всё, что зависит от протокола. */
 export interface Spec {
@@ -44,7 +91,25 @@ export interface Spec {
   /** REALITY: сайты маскировки (serverNames); TLS: имя сертификата для клиентов при общем домене */
   sni: string[];
   fingerprint: string;
-  flow: string;              // vless: xtls-rprx-vision или ''
+  flow: string;              // vless: xtls-rprx-vision или '' (у XHTTP и прочих не-TCP — всегда '')
+  /** vless: выбор Vision для звеньев по TCP — у входа и выходов транспорт может быть разный (entryTransport) */
+  tcpFlow: string;
+  /**
+   * VLESS через вход: транспорт inbound'а входа (к нему подключаются клиенты); '' — как у выходов (transport).
+   * transport — у выходов и плеча вход → выход. Так XHTTP включается только для клиентов, только между серверами или везде.
+   */
+  entryTransport: '' | 'tcp' | 'xhttp';
+  /**
+   * VLESS через вход: домен на CDN (запись проксируется CDN на адрес входа). Клиенты подключаются к CDN по XHTTP+TLS,
+   * CDN — ко входу по TLS с самоподписанным сертификатом под этот домен; выходы и плечо не меняются. Пусто — без CDN.
+   */
+  cdn: string;
+  /** Вход за CDN: режим XHTTP в ссылках (packet-up проходит через любой CDN, stream-up — через Cloudflare с gRPC) */
+  cdnMode: 'packet-up' | 'stream-up' | 'stream-one';
+  /** Вход за CDN: клиент идёт до CDN по HTTP/3 (QUIC); вход по-прежнему принимает CDN по TLS/TCP */
+  cdnH3: boolean;
+  /** Тонкая настройка XHTTP (extra Xray); пустое поле — значение Xray по умолчанию */
+  xhttpExtra: XhttpExtra;
   path: string;              // ws / httpupgrade / xhttp
   host: string;              // заголовок Host (ws/httpupgrade/xhttp), необязательно
   serviceName: string;       // grpc
@@ -142,10 +207,19 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
   const security = raw.security && info.securities.includes(raw.security) ? raw.security : info.securities[0]!;
   const transport = raw.transport && info.transports.includes(raw.transport) ? raw.transport : 'tcp';
   const sni = (() => { try { return JSON.parse(t.sni) as string[]; } catch { return []; } })();
+  // Vision — только VLESS по TCP с REALITY/TLS: с XHTTP Xray его не принимает
+  const tcpFlow = protocol === 'vless' && security !== 'none' ? raw.flow ?? 'xtls-rprx-vision' : '';
+  const chain = protocol === 'vless' && !(raw.bundle && raw.entryProto === 'hysteria2');
   return {
     protocol, security, transport, sni,
     fingerprint: t.fingerprint || 'chrome',
-    flow: raw.flow ?? (protocol === 'vless' && transport === 'tcp' && security !== 'none' ? 'xtls-rprx-vision' : ''),
+    flow: transport === 'tcp' ? tcpFlow : '',
+    tcpFlow,
+    entryTransport: chain && (raw.entryTransport === 'tcp' || raw.entryTransport === 'xhttp') && raw.entryTransport !== transport ? raw.entryTransport : '',
+    cdn: chain ? raw.cdn ?? '' : '',
+    cdnMode: raw.cdnMode === 'stream-up' || raw.cdnMode === 'stream-one' ? raw.cdnMode : 'packet-up',
+    cdnH3: !!raw.cdnH3,
+    xhttpExtra: raw.xhttpExtra ?? {},
     path: raw.path || (transport === 'grpc' ? '' : '/'),
     host: raw.host ?? '',
     serviceName: raw.serviceName || 'grpc',
@@ -207,9 +281,18 @@ export const hy2Entry = (sp: Pick<Spec, 'bundle' | 'entryProto'>) => sp.bundle &
  * сайт маскировки VLESS и её настройками Hysteria2 (obfs, смена портов, полоса, маскировка); у остальных — как есть.
  */
 export function entrySpec(sp: Spec): Spec {
-  if (!hy2Entry(sp)) return sp;
-  return { ...sp, protocol: 'hysteria2', security: 'tls', certMode: 'self', sni: [sp.sni[0] || 'www.bing.com'], bundle: false, hy2Relay: 'core' };
+  if (hy2Entry(sp)) return { ...sp, protocol: 'hysteria2', security: 'tls', certMode: 'self', sni: [sp.sni[0] || 'www.bing.com'], bundle: false, hy2Relay: 'core' };
+  // вход за CDN: XHTTP + TLS с самоподписанным сертификатом под домен CDN (CDN проверяет его в режиме «Full» без строгой проверки)
+  if (sp.cdn) return { ...sp, transport: 'xhttp', security: 'tls', certMode: 'cdn', host: sp.cdn, alpn: ['h2', 'http/1.1'], flow: '' };
+  if (sp.entryTransport) return { ...sp, transport: sp.entryTransport, flow: sp.entryTransport === 'tcp' ? sp.tcpFlow : '' };
+  return sp;
 }
+
+/** Случайный путь XHTTP: «/» сканеры проверяют первым. */
+export const xhttpPath = () => '/' + randomBytes(6).toString('hex');
+
+/** XHTTP у этой конфигурации — у входа или у выходов (нужен свой путь). */
+export const usesXhttp = (sp: Spec) => sp.transport === 'xhttp' || sp.entryTransport === 'xhttp' || !!sp.cdn;
 
 /** Пересылка через вход ядром ОС (nft DNAT, один выход) — Hysteria2 в режиме nat. */
 export const natRelayOf = (sp: Pick<Spec, 'protocol' | 'hy2Relay'>) => !!PROTOCOLS[sp.protocol].natRelay && sp.hy2Relay !== 'core';
@@ -259,6 +342,7 @@ export function certName(sp: Spec, templateId: string, serverId: string, host: s
     case 'ip': return /^[0-9.]+$|:/.test(host) ? 'ip' : null;
     case 'domain': { const d = sp.domains[serverId]; return d ? 'dom-' + d.replace(/[^A-Za-z0-9.-]/g, '') : null; }
     case 'custom': return 'tpl-' + templateId;
+    case 'cdn': return 'cdn-' + templateId;
     default: return null; // self — у Hysteria2 свой самоподписанный
   }
 }
@@ -269,6 +353,7 @@ export function tlsServerName(sp: Spec, serverId: string): string {
   if (sp.certMode === 'domain') return sp.domains[serverId] ?? '';
   if (sp.certMode === 'custom') return sp.domain || sp.sni[0] || '';
   if (sp.certMode === 'self') return sp.sni[0] ?? 'localhost';
+  if (sp.certMode === 'cdn') return sp.cdn;
   return '';
 }
 
@@ -287,12 +372,13 @@ export function xrayClient(sp: Spec, secret: string, email: string): XrayClient 
   }
 }
 
-function transportSettings(sp: Spec): Record<string, unknown> {
+function transportSettings(sp: Spec, side: 'server' | 'client'): Record<string, unknown> {
   const h = sp.host ? { host: sp.host } : {};
+  const extra = sp.transport === 'xhttp' ? (side === 'server' ? xhttpServerExtra : xhttpClientExtra)(sp.xhttpExtra) : {};
   switch (sp.transport) {
     case 'ws': return { wsSettings: { path: sp.path, ...h } };
     case 'grpc': return { grpcSettings: { serviceName: sp.serviceName } };
-    case 'xhttp': return { xhttpSettings: { path: sp.path, mode: sp.xhttpMode, ...h } };
+    case 'xhttp': return { xhttpSettings: { path: sp.path, mode: sp.xhttpMode, ...h, ...(Object.keys(extra).length ? { extra } : {}) } };
     case 'httpupgrade': return { httpupgradeSettings: { path: sp.path, ...h } };
     default: return {};
   }
@@ -308,7 +394,7 @@ export function xrayInbound(sp: Spec, ib: InboundRow, tag: string, clients: Xray
   else if (sp.protocol === 'vmess') settings = { clients };
   else if (sp.protocol === 'trojan') settings = { clients };
   else settings = { clients, decryption: 'none' };
-  const stream: Record<string, unknown> = { network: sp.transport, security: sp.security, ...transportSettings(sp) };
+  const stream: Record<string, unknown> = { network: sp.transport, security: sp.security, ...transportSettings(sp, 'server') };
   if (sp.security === 'reality') {
     stream.realitySettings = { show: false, target: `${sp.sni[0] ?? 'www.apple.com'}:443`, serverNames: sp.sni, privateKey: opts.privateKey ?? '', shortIds: [ib.short_id ?? ''] };
   } else if (sp.security === 'tls') {
@@ -326,7 +412,7 @@ export function xrayInbound(sp: Spec, ib: InboundRow, tag: string, clients: Xray
 
 /** Outbound Xray к inbound'у узла (пересылка со входа на выход). */
 export function xrayOutbound(sp: Spec, ib: InboundRow, tag: string, address: string, secret: string, serverId: string): Record<string, unknown> {
-  const stream: Record<string, unknown> = { network: sp.transport, security: sp.security, ...transportSettings(sp) };
+  const stream: Record<string, unknown> = { network: sp.transport, security: sp.security, ...transportSettings(sp, 'client') };
   if (sp.security === 'reality') stream.realitySettings = { serverName: sp.sni[0] ?? '', fingerprint: sp.fingerprint, publicKey: ib.public_key ?? '', shortId: ib.short_id ?? '' };
   if (sp.security === 'tls') stream.tlsSettings = { serverName: tlsServerName(sp, serverId) || address, fingerprint: sp.fingerprint, alpn: sp.alpn };
   let settings: Record<string, unknown>;
@@ -355,7 +441,8 @@ export interface LinkTarget { host: string; port: number; name: string; serverId
 
 export function link(sp: Spec, secret: string, to: LinkTarget): string {
   const tag = encodeURIComponent(to.name);
-  const at = `${hostForUri(to.host)}:${to.port}`;
+  // вход за CDN: клиент подключается к домену на CDN, а не к адресу входа
+  const at = `${hostForUri(sp.certMode === 'cdn' ? sp.cdn : to.host)}:${to.port}`;
   const ib = to.inbound;
   if (sp.protocol === 'hysteria2') {
     const sni = hy2Sni(sp, to);
@@ -379,10 +466,16 @@ export function link(sp: Spec, secret: string, to: LinkTarget): string {
   // общие параметры транспорта и защиты (формат v2rayN / Xray share link)
   const q: Record<string, string> = { type: sp.transport, security: sp.security };
   if (sp.transport === 'ws' || sp.transport === 'httpupgrade' || sp.transport === 'xhttp') { q.path = sp.path; if (sp.host) q.host = sp.host; }
-  if (sp.transport === 'xhttp') q.mode = sp.xhttpMode;
+  // через CDN — свой режим (по умолчанию packet-up: auto у клиента с TLS выбрал бы stream-up, а его пропускают не все CDN);
+  // тонкая настройка — параметром extra (JSON, формат Xray share link)
+  if (sp.transport === 'xhttp') {
+    q.mode = sp.certMode === 'cdn' ? sp.cdnMode : sp.xhttpMode;
+    const extra = xhttpClientExtra(sp.xhttpExtra);
+    if (Object.keys(extra).length) q.extra = JSON.stringify(extra);
+  }
   if (sp.transport === 'grpc') { q.serviceName = sp.serviceName; q.mode = 'gun'; }
   if (sp.security === 'reality') Object.assign(q, { sni: sp.sni[0] ?? '', fp: sp.fingerprint, pbk: ib.public_key ?? '', sid: ib.short_id ?? '' });
-  if (sp.security === 'tls') { const sni = tlsServerName(sp, to.serverId); Object.assign(q, { fp: sp.fingerprint, alpn: sp.alpn.join(','), ...(sni ? { sni } : {}) }); }
+  if (sp.security === 'tls') { const sni = tlsServerName(sp, to.serverId); Object.assign(q, { fp: sp.fingerprint, alpn: sp.certMode === 'cdn' && sp.cdnH3 ? 'h3' : sp.alpn.join(','), ...(sni ? { sni } : {}) }); }
   if (sp.protocol === 'vless') {
     if (sp.flow) q.flow = sp.flow;
     return `vless://${secret}@${at}?${new URLSearchParams({ encryption: 'none', ...q })}#${tag}`;

@@ -7,7 +7,10 @@ import { audit } from '../lib/audit.js';
 import { medianSpeed, Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
 import { checkTemplateQuota, checkTemplateServers, roleOf, ScopeError } from '../roles.js';
-import { hopRange, hy2Entry, natRelayOf, PROTOCOLS, SS_METHODS, specOf, type Protocol } from '../protocols.js';
+import { hopRange, hy2Entry, natRelayOf, PROTOCOLS, SS_METHODS, specOf, usesXhttp, xhttpPath, type Protocol } from '../protocols.js';
+
+/** Число или диапазон «16-32» для тонкой настройки XHTTP; пусто — по умолчанию Xray. */
+const xRange = z.string().max(24).regex(/^(\d{1,9}(-\d{1,9})?)?$/, 'XHTTP: число или диапазон вида 16-32').optional();
 
 const settingsBody = z.object({
   security: z.enum(['reality', 'tls', 'none']).optional(),
@@ -52,6 +55,15 @@ const settingsBody = z.object({
   bundle: z.boolean().optional(),
   hy2Port: z.number().int().min(0).max(65535).optional(),
   entryProto: z.enum(['vless', 'hysteria2']).optional(),
+  entryTransport: z.enum(['', 'tcp', 'xhttp']).optional(),
+  cdnMode: z.enum(['packet-up', 'stream-up', 'stream-one']).optional(),
+  cdnH3: z.boolean().optional(),
+  xhttpExtra: z.object({
+    xPaddingBytes: xRange, noGRPCHeader: z.boolean().optional(), noSSEHeader: z.boolean().optional(),
+    scMaxEachPostBytes: xRange, scMinPostsIntervalMs: xRange, scMaxBufferedPosts: xRange, scStreamUpServerSecs: xRange,
+    xmux: z.object({ maxConcurrency: xRange, maxConnections: xRange, cMaxReuseTimes: xRange, hMaxRequestTimes: xRange, hMaxReusableSecs: xRange, hKeepAlivePeriod: xRange }).optional(),
+  }).optional(),
+  cdn: z.union([z.literal(''), z.string().max(253).regex(/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/, 'домен CDN: вида cdn.example.com')]).optional(),
 }).default({});
 
 const TRANSLIT: Record<string, string> = { а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya' };
@@ -187,8 +199,24 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     }
     if (sp.security === 'reality' && !b.sni.length) throw new HttpError(400, 'для REALITY укажите сайт маскировки (SNI)');
     if (sp.transport === 'xhttp' && sp.protocol !== 'vless') throw new HttpError(400, 'XHTTP — только для VLESS');
-    // у пересылки ядром ОС сертификат только на выходе
-    const certIds = [...b.nodeIds, ...(b.entryId && !nat ? [b.entryId] : [])];
+    // свой транспорт входа и CDN — у VLESS через вход (вход eskadra по Hysteria2 принимает не VLESS)
+    const entryOnly = (what: string) => {
+      if (b.protocol !== 'vless' || !b.entryId) throw new HttpError(400, `${what} — только для VLESS через вход`);
+      if (b.settings.bundle && b.settings.entryProto === 'hysteria2') throw new HttpError(400, `${what}: вход принимает Hysteria2 — выберите вход по VLESS`);
+    };
+    if (b.settings.entryTransport) {
+      entryOnly('XHTTP только для клиентов или только между серверами');
+      if (!['tcp', 'xhttp'].includes(sp.transport)) throw new HttpError(400, 'разный транспорт у входа и выходов — только TCP и XHTTP');
+    }
+    if (b.settings.cdn) entryOnly('вход за CDN');
+    const xe = b.settings.xhttpExtra;
+    if (xe?.xmux?.maxConcurrency && xe.xmux.maxConnections) throw new HttpError(400, 'XMUX: «потоков на соединение» и «соединений» вместе не задаются — Xray принимает одно из двух');
+    for (const v of [xe?.xPaddingBytes, xe?.scMaxEachPostBytes, xe?.scMinPostsIntervalMs, xe?.scMaxBufferedPosts, xe?.scStreamUpServerSecs, ...Object.values(xe?.xmux ?? {})]) {
+      const [lo, hi] = String(v ?? '').split('-').map(Number);
+      if (hi !== undefined && hi < lo!) throw new HttpError(400, `XHTTP: в диапазоне ${v} начало больше конца`);
+    }
+    // у пересылки ядром ОС сертификат только на выходе; у входа за CDN — свой самоподписанный под домен CDN
+    const certIds = [...b.nodeIds, ...(b.entryId && !nat && !sp.cdn ? [b.entryId] : [])];
     if ((sp.security === 'tls' || sp.protocol === 'hysteria2') && sp.certMode === 'domain')
       for (const id of certIds)
         if (!sp.domains[id]) throw new HttpError(400, `укажите домен для сервера ${ctx.server(id).name}`);
@@ -218,6 +246,17 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
         }
       }
     }
+  };
+
+  /**
+   * XHTTP одной опцией: путь панель подставляет сама — прежний у этой конфигурации или случайный, «/» сканеры
+   * проверяют первым. Режим (auto) и выключение Vision у XHTTP — в specOf, порт CDN — в интерфейсе.
+   */
+  const autoFill = (b: z.infer<typeof body>, old?: TemplateRow) => {
+    const sp = specOf({ protocol: b.protocol, sni: JSON.stringify(b.sni), fingerprint: b.fingerprint, settings: JSON.stringify(b.settings) });
+    if (!usesXhttp(sp) || (b.settings.path && b.settings.path !== '/')) return;
+    const prev = old && specOf(old).path;
+    b.settings.path = prev && prev !== '/' ? prev : xhttpPath();
   };
 
   /** Служебную Hysteria2 «eskadra» меняют, выкатывают и снимают только вместе с её конфигурацией. */
@@ -283,6 +322,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     if (!role.owner && role.scope.templates) throw new HttpError(403, `роль «${role.name}» работает только со своими конфигурациями — новую создаёт owner или роль без ограничения`);
     scoped(() => checkTemplateServers(role, [], [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]));
     validate(b);
+    autoFill(b);
     // лимит роли на число конфигураций, которые создаёт её администратор
     scoped(() => checkTemplateQuota(db, role, req.admin!.id));
     const id = 'tpl-' + randomBytes(3).toString('hex');
@@ -303,6 +343,7 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     notCompanion(t);
     const b = body.parse(req.body);
     validate(b, t.id);
+    autoFill(b, t);
     if (b.protocol !== specOf(t).protocol) throw new HttpError(400, 'протокол шаблона менять нельзя — создайте новый');
     scoped(() => checkTemplateServers(roleOf(db, req.admin!.role), [...json<string[]>(t.node_ids, []), ...(t.entry_id ? [t.entry_id] : [])], [...b.nodeIds, ...(b.entryId ? [b.entryId] : [])]));
     db.prepare(

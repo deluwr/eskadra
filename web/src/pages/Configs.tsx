@@ -28,6 +28,49 @@ const PROTO: Record<Protocol, { name: string; hint: string; core: string; sec: S
 const STATE_LABEL: Record<string, string> = { active: 'работает', error: 'ошибка', pending: 'выкатывается', deploying: 'выкатывается' };
 const SEC_LABEL: Record<Security, string> = { reality: 'REALITY', tls: 'TLS', none: 'без шифрования' };
 const TR_LABEL: Record<Transport, string> = { tcp: 'TCP', ws: 'WebSocket', grpc: 'gRPC', xhttp: 'XHTTP', httpupgrade: 'HTTPUpgrade' };
+/** Где включён XHTTP: on — у конфигурации без входа; clients — у входа; leg — между серверами; all — везде; cdn — вход за CDN. */
+type XMode = 'off' | 'on' | 'clients' | 'leg' | 'all' | 'cdn';
+const X_HINT: Record<XMode, string> = {
+  off: 'Транспорт TCP (или выбранный в «Дополнительно»).',
+  on: 'Клиенты подключаются по XHTTP. Путь и режим (auto) панель подставит сама, Vision у XHTTP не используется.',
+  clients: 'XHTTP — от клиентов до входа: так соединение к входу похоже на обычный HTTPS-сайт. Между входом и выходами — TCP с Vision, быстрее всего.',
+  leg: 'XHTTP — между входом и выходами: трафик через границу разбит на HTTP-запросы. Клиенты подключаются к входу как раньше.',
+  all: 'XHTTP — и от клиентов до входа, и между входом и выходами.',
+  cdn: 'Клиенты подключаются к домену на CDN (например, Cloudflare), CDN — к входу. Адрес входа клиенту не виден, а заблокировать CDN целиком дорого. Между входом и выходами — без изменений.',
+};
+/** Тонкая настройка XHTTP (extra Xray): число или диапазон «a-b» строкой; пусто — по умолчанию Xray. */
+type XRange = 'xPaddingBytes' | 'scMaxEachPostBytes' | 'scMinPostsIntervalMs' | 'scMaxBufferedPosts' | 'scStreamUpServerSecs';
+type XmuxKey = 'maxConcurrency' | 'maxConnections' | 'cMaxReuseTimes' | 'hMaxRequestTimes' | 'hMaxReusableSecs' | 'hKeepAlivePeriod';
+type XhttpExtra = Partial<Record<XRange, string>> & { noGRPCHeader?: boolean; noSSEHeader?: boolean; xmux?: Partial<Record<XmuxKey, string>> };
+/** Без пустых полей: сервер пишет в конфиг только заданное. */
+const cleanExtra = (e: XhttpExtra): XhttpExtra => {
+  const xmux = Object.fromEntries(Object.entries(e.xmux ?? {}).filter(([, v]) => v));
+  return { ...Object.fromEntries(Object.entries(e).filter(([k, v]) => k !== 'xmux' && v)), ...(Object.keys(xmux).length ? { xmux } : {}) };
+};
+/** Поля тонкой настройки: ключ, подпись, значение Xray по умолчанию, подсказка. */
+const X_FIELDS: Array<{ group: string; fields: Array<[XRange, string, string, string]> }> = [
+  { group: 'Маскировка', fields: [
+    ['xPaddingBytes', 'Добавка к запросам, байт', '100-1000', 'Случайная добавка к каждому запросу и ответу — прячет размеры пакетов. Сервер проверяет её длину у клиента, поэтому панель ставит одно значение на обе стороны.'],
+  ] },
+  { group: 'Режим packet-up', fields: [
+    ['scMaxEachPostBytes', 'Наибольший POST, байт', '1000000', 'Наибольший размер одного POST от клиента. Уменьшите, если CDN ограничивает размер запроса. Действует на обе стороны.'],
+    ['scMinPostsIntervalMs', 'Пауза между POST, мс', '30', 'Наименьшая пауза между POST клиента. Больше — меньше запросов в секунду (CDN не примет их за атаку), но медленнее отдача от клиента.'],
+    ['scMaxBufferedPosts', 'Очередь POST на сервере', '30', 'Сколько POST сервер держит, пока ждёт пропущенный. Больше — терпимее к перестановке запросов в CDN, но больше памяти.'],
+  ] },
+  { group: 'Режим stream-up', fields: [
+    ['scStreamUpServerSecs', 'Пустой ответ раз в, с', '20-80', 'Сервер раз в столько секунд шлёт пустой ответ в поток от клиента, чтобы CDN не закрыл его как молчащий.'],
+  ] },
+];
+const XMUX_FIELDS: Array<[XmuxKey, string, string, string]> = [
+  ['maxConcurrency', 'Потоков на соединение', '16-32', 'Сколько соединений пользователя идёт внутри одного HTTP-соединения; заполнено — открывается новое. Не задаётся вместе с «Соединений».'],
+  ['maxConnections', 'Соединений', '0', 'Сколько HTTP-соединений держать сразу; соединения пользователя раскладываются по ним. 0 — без ограничения. Не задаётся вместе с «Потоков на соединение».'],
+  ['cMaxReuseTimes', 'Повторных занятий', '0', 'Сколько раз одно HTTP-соединение можно занять заново, потом оно закрывается. 0 — без ограничения.'],
+  ['hMaxRequestTimes', 'Запросов на соединение', '600-900', 'Сколько HTTP-запросов отправить по одному соединению, потом открыть новое. По умолчанию меньше, чем терпит nginx (1000).'],
+  ['hMaxReusableSecs', 'Срок соединения, с', '1800-3000', 'Сколько секунд соединение можно брать для новых запросов.'],
+  ['hKeepAlivePeriod', 'Keep-alive раз в, с', '0', 'Раз в столько секунд клиент проверяет простаивающее соединение. 0 — по умолчанию Xray (HTTP/2 — 45 с, HTTP/3 — 10 с).'],
+];
+/** Порты HTTPS, которые проксирует Cloudflare. */
+const CDN_PORTS = ['443', '2053', '2083', '2087', '2096', '8443'];
 const CERT_LABEL: Record<CertMode, string> = {
   ip: 'Let\'s Encrypt на IP сервера (рекомендуется)', domain: 'Свой домен на каждом сервере', custom: 'Загрузить свой (общий домен или wildcard)', self: 'Самоподписанный (без домена, с привязкой отпечатка)',
 };
@@ -47,6 +90,8 @@ interface Settings {
   autoEnabled: boolean; autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
   spreadGroups: number; exitCapMbps: Record<string, number>; spreadHighPct: number; spreadFair: boolean;
   hy2Relay: 'nat' | 'core'; hy2Leg: string; hy2Port: number; entryProto: 'vless' | 'hysteria2';
+  // XHTTP через вход: транспорт входа ('' — как у выходов) и домен CDN перед входом
+  entryTransport: '' | 'tcp' | 'xhttp'; cdn: string; cdnMode: 'packet-up' | 'stream-up' | 'stream-one'; cdnH3: boolean; xhttpExtra: XhttpExtra;
 }
 
 interface Draft {
@@ -65,6 +110,7 @@ const defaults = (p: Protocol): Settings => ({
   hy2UpMbps: 0, hy2DownMbps: 0, hy2ServerUpMbps: 0, hy2ServerDownMbps: 0, hy2IgnoreClientBw: false, hy2Masquerade: '', hy2Hop: '', hy2HopInterval: 30,
   autoEnabled: !PROTO[p].natRelay, autoMode: p === 'eskadra' ? 'order' : 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
   spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '', hy2Port: 0, entryProto: 'vless',
+  entryTransport: '', cdn: '', cdnMode: 'packet-up', cdnH3: false, xhttpExtra: {},
 });
 
 const empty = (p: Protocol = 'vless'): Draft => ({
@@ -77,7 +123,8 @@ const protoOf = (t: Template): Protocol => (t.spec.bundle ? 'eskadra' : t.spec.p
 const toDraft = (t: Template): Draft => ({
   id: t.id, name: t.name, protocol: protoOf(t), port: String(t.port), sni: t.sni.join(' '), fingerprint: t.fingerprint, ech: t.ech,
   nodeIds: t.node_ids, entryId: t.entry_id ?? '', entryPort: String(t.entry_port ?? 9443),
-  st: { ...defaults(protoOf(t)), ...t.spec } as Settings, certPem: '', keyPem: '',
+  // flow в форме — выбор Vision для звеньев по TCP (у XHTTP сервер его снимает сам)
+  st: { ...defaults(protoOf(t)), ...t.spec, flow: String(t.spec.tcpFlow ?? t.spec.flow ?? '') } as Settings, certPem: '', keyPem: '',
 });
 
 /** Краткое описание шаблона для списка: «VLESS · REALITY · TCP». */
@@ -233,6 +280,28 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   const st = d.st;
   const setSt = (patch: Partial<Settings>) => setD({ ...d, st: { ...st, ...patch } });
   const tls = st.security === 'tls' || d.protocol === 'hysteria2';
+  // XHTTP одной опцией: у входа (для клиентов), у плеча вход → выход, везде или вход за CDN; путь и режим панель ставит сама
+  const hyIn = esk && st.entryProto === 'hysteria2';
+  const chainX = vless && !!d.entryId;
+  const [wantCdn, setWantCdn] = useState(false);
+  useEffect(() => setWantCdn(false), [draft]);
+  const xMode: XMode = !vless ? 'off'
+    : chainX && !hyIn && (st.cdn || wantCdn) ? 'cdn'
+    : !chainX ? (st.transport === 'xhttp' ? 'on' : 'off')
+    : hyIn ? (st.transport === 'xhttp' ? 'leg' : 'off')
+    : (st.entryTransport || st.transport) === 'xhttp' ? (st.transport === 'xhttp' ? 'all' : 'clients')
+    : st.transport === 'xhttp' ? 'leg' : 'off';
+  const setX = (m: XMode) => {
+    setWantCdn(m === 'cdn');
+    const path = st.path && st.path !== '/' ? st.path : '/' + randomHex(6);
+    if (m === 'off') return setSt({ transport: st.transport === 'xhttp' ? 'tcp' : st.transport, entryTransport: '', cdn: '' });
+    if (m === 'clients') return setSt({ transport: 'tcp', entryTransport: 'xhttp', cdn: '', path });
+    if (m === 'leg') return setSt({ transport: 'xhttp', entryTransport: hyIn ? '' : 'tcp', cdn: '', path });
+    if (m === 'cdn') return setSt({ entryTransport: '', path });
+    setSt({ transport: 'xhttp', entryTransport: '', cdn: '', path });
+  };
+  const xUsed = xMode !== 'off';
+  const entryHost = servers.find((s) => s.id === d.entryId)?.host ?? '';
   const usedIds = [...d.nodeIds, ...(d.entryId ? [d.entryId] : [])];
   // выходы «Авто»: серверы конфигурации кроме входа — в заданном порядке (новые — в конце)
   const rank = (id: string) => (st.exitOrder.includes(id) ? st.exitOrder.indexOf(id) : st.exitOrder.length);
@@ -291,7 +360,10 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
     // серверы, которых уже нет в панели (удалены), не отправляем — иначе конфигурацию не сохранить
     nodeIds: d.nodeIds.filter((id) => servers.some((s) => s.id === id)), entryId: d.entryId && servers.some((s) => s.id === d.entryId) ? d.entryId : null, entryPort: d.entryId ? Number(d.entryPort) : null,
     settings: {
-      security: st.security, transport: st.transport, flow: st.transport === 'tcp' && st.security !== 'none' && vless ? st.flow : '',
+      // flow — выбор Vision для звеньев по TCP: у XHTTP сервер его снимает сам
+      security: st.security, transport: st.transport, flow: st.security !== 'none' && vless ? st.flow : '',
+      entryTransport: chainX && !hyIn ? st.entryTransport : '', cdn: chainX && !hyIn ? st.cdn.trim() : '', cdnMode: st.cdnMode, cdnH3: st.cdnH3,
+      xhttpExtra: xUsed ? cleanExtra(st.xhttpExtra) : {},
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
       ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
@@ -603,6 +675,86 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
         </div>
       )}
 
+      {vless && info.tr.includes('xhttp') && (
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="k">XHTTP <Info>Транспорт Xray поверх обычных HTTP-запросов: хуже распознаётся и проходит через CDN. Работают клиенты на Xray (v2rayN, v2rayNG, Happ); клиенты на sing-box XHTTP не умеют — в подписке sing-box такие профили не появятся. Версии Xray на сервере и у клиента лучше держать свежими.</Info></span>
+          <Seg value={xMode} label="XHTTP" onChange={setX}
+            options={!chainX ? [['off', 'выкл'], ['on', 'вкл']]
+              : hyIn ? [['off', 'выкл'], ['leg', 'между серверами']]
+              : [['off', 'выкл'], ['clients', 'для клиентов'], ['leg', 'между серверами'], ['all', 'везде'], ['cdn', 'через CDN']]} />
+          <span className="small muted">{hyIn && xMode === 'leg' ? 'XHTTP — у резервного плеча VLESS между входом и выходами. Клиенты подключаются к входу по Hysteria2, основное плечо — Hysteria2.' : X_HINT[xMode]}</span>
+          {xMode === 'cdn' && (
+            <div className="stack" style={{ gap: 8 }}>
+              <label className="fld"><span>Домен на CDN <Info>Поддомен вашего домена, который CDN проксирует на адрес входа, например vpn.example.com. Клиенты получат его в ссылках и подписке вместо адреса входа.</Info></span>
+                <input className="inp mono" value={st.cdn} onChange={(e) => setSt({ cdn: e.target.value.trim().toLowerCase() })} placeholder="vpn.example.com" aria-label="Домен на CDN" /></label>
+              {!st.cdn && <span className="k" style={{ color: 'var(--warn)' }}>Укажите домен — без него вход за CDN не включится.</span>}
+              {!CDN_PORTS.includes(d.entryPort) && (
+                <span className="k" style={{ color: 'var(--warn)' }}>Cloudflare проксирует только порты {CDN_PORTS.join(', ')} — сейчас у входа {d.entryPort}.{' '}
+                  <button type="button" className="btn sm" onClick={() => setD({ ...d, entryPort: '443' })}>Порт входа 443</button>{' '}
+                  <button type="button" className="btn sm" onClick={() => setD({ ...d, entryPort: '8443' })}>8443</button></span>
+              )}
+              <details className="stack">
+                <summary className="k" style={{ cursor: 'pointer' }}>Как настроить Cloudflare (5 минут)</summary>
+                <ol className="small" style={{ margin: '8px 0 0', paddingLeft: 20, lineHeight: 1.6 }}>
+                  <li>Добавьте свой домен в Cloudflare (бесплатный тариф подходит) и смените у регистратора NS-серверы на выданные Cloudflare.</li>
+                  <li>DNS → Add record: тип A, имя — поддомен (например, vpn), адрес — IP входа <b className="mono">{entryHost || '—'}</b>, Proxy status — Proxied (оранжевое облако).</li>
+                  <li>SSL/TLS → Overview: режим Full (не «Full (strict)») — вход отдаёт свой самоподписанный сертификат, панель выпустит его сама.</li>
+                  <li>Порт входа — один из {CDN_PORTS.join(', ')}. Network → gRPC включать не нужно: по умолчанию ссылки используют режим packet-up, он проходит через любой CDN. Выбрали в тонкой настройке stream-up или stream-one — включите gRPC.</li>
+                  <li>Сохраните и выкатите конфигурацию, затем обновите подписку у клиентов. Проверить: домен с портом входа, открытый в браузере по HTTPS, не должен давать ошибку Cloudflare 52x (521, 525, 526) — она значит, что CDN не достучался до входа.</li>
+                </ol>
+              </details>
+            </div>
+          )}
+          {xUsed && (
+            <details className="stack">
+              <summary className="k" style={{ cursor: 'pointer' }}>Тонкая настройка XHTTP</summary>
+              <div className="stack" style={{ gap: 14, paddingTop: 12 }}>
+                <span className="small muted">Менять не обязательно: пустое поле — значение Xray по умолчанию (показано серым). Число или диапазон «16-32» — из диапазона Xray берёт случайное значение для каждого соединения. Настройки одни на конфигурацию: панель раскладывает их по серверу, плечу вход → выход и ссылкам сама.</span>
+                <div className="grid g3">
+                  <label className="fld"><span>Путь <Info>Путь HTTP-запросов XHTTP — один у сервера и клиентов, в ссылки панель его вписывает сама. Случайный путь не даёт сканерам найти прокси запросом на «/».</Info></span>
+                    <span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ flex: 1 }} value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" aria-label="Путь XHTTP" /><button type="button" className="btn sm" title="Случайный путь" onClick={() => setSt({ path: '/' + randomHex(6) })}>Случайный</button></span></label>
+                  <label className="fld"><span>Host <Info>Заголовок Host запросов. Обычно пусто. У входа за CDN панель ставит домен CDN сама. Нужен, если перед сервером стоит обратный прокси с несколькими сайтами.</Info></span><input className="inp mono" value={st.host} onChange={(e) => setSt({ host: e.target.value.trim() })} placeholder="—" aria-label="Host XHTTP" /></label>
+                  <label className="fld"><span>Режим <Info>auto — сервер принимает все режимы, клиент выбирает сам: с REALITY — stream-one, с TLS — stream-up. packet-up — много коротких POST к серверу и один поток обратно: медленнее, зато проходит где угодно. stream-up — по долгому потоку в каждую сторону. stream-one — один поток в обе стороны. Сервер с конкретным режимом принимает только его (stream-up — ещё и stream-one).</Info></span><select className="inp" value={st.xhttpMode} onChange={(e) => setSt({ xhttpMode: e.target.value })} aria-label="Режим XHTTP">{['auto', 'packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>
+                  {xMode === 'cdn' && <>
+                    <label className="fld"><span>Режим через CDN <Info>Режим в ссылках через CDN. packet-up проходит через любой CDN. stream-up быстрее отдаёт данные от клиента, через Cloudflare — только с включённым Network → gRPC. stream-one через Cloudflare тоже требует gRPC, а у некоторых CDN режется по скорости.</Info></span><select className="inp" value={st.cdnMode} onChange={(e) => setSt({ cdnMode: e.target.value as Settings['cdnMode'] })} aria-label="Режим через CDN">{['packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>
+                    <div className="flex" style={{ justifyContent: 'space-between' }}><span className="small">HTTP/3 до CDN <Info>Клиент подключается к CDN по QUIC (ALPN h3): помогает, если HTTPS к CDN режут или душат, а UDP — нет. В Cloudflare должно быть включено Network → HTTP/3 (with QUIC), обычно оно включено. Вход по-прежнему принимает CDN по TCP.</Info></span><Switch label="HTTP/3 до CDN" on={st.cdnH3} onChange={(v) => setSt({ cdnH3: v })} /></div>
+                  </>}
+                </div>
+                {X_FIELDS.map(({ group, fields }) => (
+                  <div key={group} className="stack" style={{ gap: 8 }}>
+                    <span className="k">{group}</span>
+                    <div className="grid g3">
+                      {fields.map(([k, label, def, hint]) => (
+                        <label key={k} className="fld"><span>{label} <Info>{hint}</Info></span>
+                          <input className="inp mono" value={st.xhttpExtra[k] ?? ''} onChange={(e) => setSt({ xhttpExtra: { ...st.xhttpExtra, [k]: e.target.value.replace(/[^\d-]/g, '') } })} placeholder={def} aria-label={label} /></label>
+                      ))}
+                    </div>
+                    {group === 'Маскировка' && (
+                      <div className="grid g2">
+                        <div className="flex" style={{ justifyContent: 'space-between' }}><span className="small">Без заголовка gRPC <Info>В режимах stream-up и stream-one клиент по умолчанию выдаёт себя за gRPC — так Cloudflare и nginx не задерживают поток. Включите, если CDN или прокси не пропускает такой заголовок.</Info></span><Switch label="Без заголовка gRPC" on={!!st.xhttpExtra.noGRPCHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noGRPCHeader: v } })} /></div>
+                        <div className="flex" style={{ justifyContent: 'space-between' }}><span className="small">Без заголовка SSE <Info>Сервер по умолчанию помечает поток к клиенту как text/event-stream — так CDN его не задерживают. Включите, если этот заголовок мешает.</Info></span><Switch label="Без заголовка SSE" on={!!st.xhttpExtra.noSSEHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noSSEHeader: v } })} /></div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div className="stack" style={{ gap: 8 }}>
+                  <span className="k">XMUX <Info>Клиент держит несколько HTTP/2- или HTTP/3-соединений и раскладывает по ним соединения пользователя — анализировать трафик по одному соединению труднее. Действует на клиентов и на плечо вход → выход.</Info></span>
+                  <div className="grid g3">
+                    {XMUX_FIELDS.map(([k, label, def, hint]) => (
+                      <label key={k} className="fld"><span>{label} <Info>{hint}</Info></span>
+                        <input className="inp mono" value={st.xhttpExtra.xmux?.[k] ?? ''} onChange={(e) => setSt({ xhttpExtra: { ...st.xhttpExtra, xmux: { ...st.xhttpExtra.xmux, [k]: e.target.value.replace(/[^\d-]/g, '') } } })} placeholder={def} aria-label={label} /></label>
+                    ))}
+                  </div>
+                  {st.xhttpExtra.xmux?.maxConcurrency && st.xhttpExtra.xmux?.maxConnections && <span className="k" style={{ color: 'var(--warn)' }}>«Потоков на соединение» и «Соединений» вместе не задаются — оставьте одно.</span>}
+                </div>
+                <span className="small muted">Раздельные пути для загрузки и отдачи (downloadSettings) и свои заголовки панель не настраивает: их нужно вписывать в клиент вручную.</span>
+                {Object.keys(cleanExtra(st.xhttpExtra)).length > 0 && <span><button type="button" className="btn sm" onClick={() => setSt({ xhttpExtra: {} })}>Сбросить к умолчаниям Xray</button></span>}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
       {(info.tr.length > 0 || d.protocol === 'hysteria2') && (
         <details className="stack">
           <summary className="k" style={{ cursor: 'pointer' }}>Дополнительно</summary>
@@ -610,20 +762,20 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
             {info.tr.length > 1 && (
               <div className="stack" style={{ gap: 8 }}>
                 <span className="k">Транспорт <Info>TCP — по умолчанию и быстрее всего. WebSocket, gRPC, HTTPUpgrade — если сервер за CDN или прокси. XHTTP — новый транспорт Xray (только VLESS, в sing-box-подписке не поддерживается).</Info></span>
-                <Seg value={st.transport} label="Транспорт" onChange={(v) => setSt({ transport: v })}
+                <Seg value={st.transport} label="Транспорт" onChange={(v) => setSt({ transport: v, ...(v === 'tcp' || v === 'xhttp' ? {} : { entryTransport: '' as const }), ...(v === 'xhttp' && (!st.path || st.path === '/') ? { path: '/' + randomHex(6) } : {}) })}
                   options={info.tr.filter((x) => st.security !== 'reality' || ['tcp', 'grpc', 'xhttp'].includes(x)).map((x) => [x, TR_LABEL[x]] as [Transport, string])} />
+                {chainX && (st.entryTransport || st.cdn) && <span className="small muted">Это транспорт выходов и плеча вход → выход; у входа — {st.cdn ? 'XHTTP через CDN' : TR_LABEL[st.entryTransport as Transport]} (опция XHTTP выше).</span>}
               </div>
             )}
-            {['ws', 'httpupgrade', 'xhttp'].includes(st.transport) && (
+            {['ws', 'httpupgrade'].includes(st.transport) && !xUsed && (
               <div className="grid g3">
                 <label className="fld">Путь<input className="inp mono" value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" /></label>
                 <label className="fld">Host (необязательно)<input className="inp mono" value={st.host} onChange={(e) => setSt({ host: e.target.value.trim() })} /></label>
-                {st.transport === 'xhttp' && <label className="fld">Режим XHTTP<select className="inp" value={st.xhttpMode} onChange={(e) => setSt({ xhttpMode: e.target.value })}>{['auto', 'packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>}
               </div>
             )}
             {st.transport === 'grpc' && <label className="fld">Имя сервиса gRPC<input className="inp mono" value={st.serviceName} onChange={(e) => setSt({ serviceName: e.target.value.trim() })} /></label>}
             <div className="grid g3">
-              {vless && st.transport === 'tcp' && st.security !== 'none' && (
+              {vless && st.security !== 'none' && (st.transport === 'tcp' || (chainX && st.entryTransport === 'tcp')) && (
                 <label className="fld">Flow<select className="inp" value={st.flow} onChange={(e) => setSt({ flow: e.target.value })}><option value="xtls-rprx-vision">xtls-rprx-vision</option><option value="">нет</option></select></label>
               )}
               {st.security !== 'none' && d.protocol !== 'hysteria2' && (

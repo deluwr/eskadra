@@ -255,6 +255,8 @@ export class Vpn {
     for (const ib of ibs) {
       const t = this.template(ib.template_id)!;
       const sp = this.spec(t);
+      // inbound входа: свой транспорт (XHTTP только для клиентов или только между серверами) или вход за CDN
+      const isp = ib.kind === 'relay' ? entrySpec(sp) : sp;
       // Hysteria2 через вход (core): sing-box входа отдаёт трафик сюда по локальным SOCKS — порт на выход и на «авто»;
       // пользователей различает sing-box, плечи к выходам — Hysteria2 через sing-box входа (entryLegs)
       // то же у eskadra со входом по Hysteria2
@@ -301,7 +303,7 @@ export class Vpn {
           const us = via.perExit.get(x.id)!;
           if (hy) { if (us.length) rules.push({ type: 'field', inboundTag: [hin(x.id)], outboundTag: outTag }); continue; }
           const emails = us.map((u) => `${u.id}.v-${x.id}`);
-          us.forEach((u, k) => clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:${x.id}`), emails[k]!)));
+          us.forEach((u, k) => clients.push(xrayClient(isp, this.cred(u.id, `v:${t.id}:${x.id}`), emails[k]!)));
           if (emails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: emails, outboundTag: outTag });
         }
         // основное плечо проверяется часто: не отвечает — трафик выхода за ~10 с уходит на резервное и возвращается сам
@@ -310,7 +312,7 @@ export class Vpn {
         if (ready.length && sp.autoEnabled) {
           const autoUsers = via.auto.map((u) => u.id);
           const autoEmails = hy ? [] : autoUsers.map((id) => `${id}.a-${t.id}`);
-          via.auto.forEach((u, k) => { if (!hy) clients.push(xrayClient(sp, this.cred(u.id, `v:${t.id}:auto`), autoEmails[k]!)); });
+          via.auto.forEach((u, k) => { if (!hy) clients.push(xrayClient(isp, this.cred(u.id, `v:${t.id}:auto`), autoEmails[k]!)); });
           const autoMatch = hy ? (autoUsers.length ? { inboundTag: [hin('auto')] } : null) : autoEmails.length ? { inboundTag: [`in-${ib.id}`], user: autoEmails } : null;
           if (sp.autoMode === 'spread') {
             // по нагрузке (spread.ts): у каждой группы пользователей своя цепочка уровней — домашний выход, затем остальные.
@@ -375,9 +377,9 @@ export class Vpn {
         // всё прочее с входа, не попавшее в правила, не выпускаем наружу с самого входа
         rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], outboundTag: 'block' });
       }
-      inbounds.push(xrayInbound(sp, ib, `in-${ib.id}`, clients, {
+      inbounds.push(xrayInbound(isp, ib, `in-${ib.id}`, clients, {
         privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : undefined,
-        cert: certName(sp, t.id, server.id, server.host),
+        cert: certName(isp, t.id, server.id, server.host),
         ssServerKey: ib.public_key ?? undefined,
         forceSniff: needsSniff(blocks),
       }));

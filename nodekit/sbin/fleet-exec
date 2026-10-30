@@ -84,6 +84,8 @@ case "${1:-}" in
   tls-issue)     name_ok "${2:?name}"; exec /usr/local/sbin/fleet-core cert-issue "$2" "${3:?ip|domain}" "${4:?value}" ;;
   tls-set)       name_ok "${2:?name}"; name_ok "${3:?crt}"; name_ok "${4:?key}"; staged "$STAGING/$3"; staged "$STAGING/$4"
                  exec /usr/local/sbin/fleet-core cert-set "$2" "$STAGING/$3" "$STAGING/$4" ;;
+  tls-self)      name_ok "${2:?name}"; [[ "${3:?domain}" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || deny domain
+                 exec /usr/local/sbin/fleet-core cert-self "$2" "$3" ;;
   tls-deploy)    name_ok "${2:?name}"; exec /usr/local/sbin/fleet-core cert-deploy "$2" ;;
   tls-status)    exec /usr/local/sbin/fleet-core cert-status ;;
   tls-renew)     exec /usr/local/sbin/fleet-core cert-renew ;;

@@ -792,6 +792,21 @@ cmd_cert_issue() {  # cert-issue <имя> ip|domain <значение>: выпу
   echo "cert $name: выпущен Let's Encrypt для $value"
 }
 
+cmd_cert_self() {  # cert-self <имя> <домен>: самоподписанный сертификат входа за CDN (CDN в режиме «Full» его принимает)
+  local name="$1" cn="$2" d="$ETC/tls/$1"
+  [[ "$cn" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || die "bad domain"
+  install -d -m 750 "$d"
+  # домен сменился — выпускаем заново
+  if [ -s "$d/fullchain.pem" ] && openssl x509 -in "$d/fullchain.pem" -noout -subject -nameopt RFC2253 2>/dev/null | grep -qxF "subject=CN=$cn"; then
+    echo "cert $name: уже есть"; return 0
+  fi
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+    -subj "/CN=$cn" -addext "subjectAltName=DNS:$cn" -keyout "$d/privkey.pem.new" -out "$d/fullchain.pem.new" >/dev/null 2>&1 || die "openssl не выпустил сертификат"
+  chmod 600 "$d/privkey.pem.new"; chmod 644 "$d/fullchain.pem.new"
+  mv "$d/privkey.pem.new" "$d/privkey.pem"; mv "$d/fullchain.pem.new" "$d/fullchain.pem"
+  echo "cert $name: самоподписанный для $cn"
+}
+
 cmd_cert_set() {  # cert-set <имя> <fullchain> <privkey>: загруженный сертификат
   local name="$1" crt="$2" key="$3" d="$ETC/tls/$1" a b
   openssl x509 -in "$crt" -noout >/dev/null 2>&1 || die "это не сертификат PEM"
@@ -1035,6 +1050,7 @@ case "${1:-}" in
   singbox-net) if [ "${2:?}" = boot ]; then cmd_singbox_net boot boot; else cmd_singbox_net "$2"; fi ;;
   cert-issue)  cmd_cert_issue "${2:?}" "${3:?}" "${4:?}" ;;
   cert-set)    cmd_cert_set "${2:?}" "${3:?}" "${4:?}" ;;
+  cert-self)   cmd_cert_self "${2:?}" "${3:?}" ;;
   cert-deploy) cmd_cert_deploy "${2:?}" ;;
   cert-renew)  cmd_cert_renew ;;
   port80-yield) cmd_port80_yield "${2:-}" ;;

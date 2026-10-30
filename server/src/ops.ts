@@ -296,7 +296,10 @@ export class Ops {
     if ((sp.security === 'tls' || sp.protocol === 'hysteria2') && sp.certMode !== 'self') {
       const name = certName(sp, t.id, s.id, s.host);
       if (!name) throw new Error(`${s.name}: нет сертификата для TLS — ${sp.certMode === 'ip' ? 'адрес сервера не IP' : 'не указан домен сервера'}`);
-      if (sp.certMode === 'custom') {
+      if (sp.certMode === 'cdn') {
+        // вход за CDN: самоподписанный под домен CDN, выпускается один раз на узле
+        await n.must(['tls-self', name, sp.cdn]);
+      } else if (sp.certMode === 'custom') {
         const c = getSetting<{ fullchain: string; privkey: string } | null>(this.ctx.db, `cert.${t.id}`, null);
         if (!c) throw new Error('загрузите сертификат и ключ в настройках конфигурации');
         await n.stage(`${name}.crt`, c.fullchain);
