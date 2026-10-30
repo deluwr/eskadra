@@ -59,6 +59,9 @@ An interactive numbered menu: **fleet** — overview, servers, users, configurat
 | `eskadra fleet [section]` | interactive fleet management (servers, users, configs, cores…) |
 | `eskadra url` | panel address (or the one-time owner-creation link) |
 | `eskadra status` | state, ports, number of servers and users |
+| `eskadra start \| stop \| restart` | start, stop or restart the panel |
+| `eskadra logs [N]` | the last N lines of the panel log (100 by default) |
+| `eskadra admins` | list administrators |
 | `eskadra port [N\|random]` | change the panel port (ufw is updated) |
 | `eskadra path [name]` | change the panel's secret path |
 | `eskadra sub-port [N\|random]` | change the subscription port |
@@ -72,12 +75,16 @@ An interactive numbered menu: **fleet** — overview, servers, users, configurat
 
 ## Connecting nodes
 
-**Servers → Add server**: address, role (entry or exit), login (usually root), and a password or your SSH key. The panel does the rest: it connects, adds its key, pins the server's host key, checks the system and installs the helper scripts (sudo is narrowed to a single wrapper). The password is used once and is never stored. If the main server has no direct SSH access, the same setup can be run as a command on the server itself — it is shown in the server card.
+**Servers → Add server**: address, role (entry or exit), login (usually root), and a password or your SSH key. The panel does the rest: it connects, adds its key, pins the server's host key (an ed25519 host key is required — any modern OpenSSH has one), checks the system and installs the helper scripts (sudo is narrowed to a single wrapper). The password is used once and is never stored. If the main server has no direct SSH access, the same setup can be run as a command on the server itself — it is shown in the server card.
 
-The **management channel** is chosen when adding a node:
+The **management channel** is chosen when adding a node and can be changed in the server card:
 
 - **direct over SSH** — the main server is outside Russia;
-- **through a tunnel** — the main server is in Russia: the panel's SSH runs inside VLESS-REALITY (ordinary HTTPS to the DPI), and a separate Xray `fleet-mgmt` is installed on the node on a random TCP port; if your hosting provider has its own firewall, open this port. The node lets the panel in by the tunnel key, not by IP.
+- **through a tunnel** — the main server is in Russia: the panel's SSH runs inside VLESS-REALITY (ordinary HTTPS to the DPI), and a separate Xray `fleet-mgmt` is installed on the node on a random TCP port; if your hosting provider has its own firewall, open this port. The node lets the panel in by the tunnel key, not by IP;
+- **through a configuration** — SSH to the node is blocked, but its VLESS configuration works: the panel's SSH runs inside it, no extra port is needed;
+- **through a server** — the panel cannot reach the node, but another fleet server can: SSH goes through it (like `ssh -J`), and the jump server holds no keys to the node.
+
+Fleet servers allow each other in advance, so a node the panel can no longer reach can be switched to "through a server" or "through a configuration" without the hosting provider's console.
 
 **Initial access through a proxy.** To set up the tunnel, the panel has to reach the server once. If SSH from Russia to the server is blocked, choose "Initial access" in the connect form: through a fleet configuration (for example, an exit abroad — the panel goes in via the service client `svc.mgmt`) or through your own `vless://` / `trojan://` / `vmess://` / `ss://` link or JSON outbound. The panel starts a separate Xray process that forwards `127.0.0.1 → proxy → server:SSH` only for the duration of the connection; the link is not stored. The same is available in the bot (`/addserver`).
 
@@ -100,26 +107,35 @@ Roles and the order of actions are described in the "Help" section of the panel 
 
 **TLS certificate:** Let's Encrypt for the server's IP (the default; issued and renewed on the server itself — a timer twice a day; port 80 is needed while issuing and renewing; the panel checks expiry dates and the renewal result every 3 hours, warns in "Needs attention" and in the bot on failure, and there is a "Renew now" button on the "Host" tab), your own domain on each server, or an uploaded certificate — for example, a wildcard for a shared domain. Transport, path, ALPN, fingerprint and the rest are under "Advanced". MTProto is issued as a separate `tg://` link (it is not included in the VPN subscription).
 
+**XHTTP** for VLESS is turned on with a single option: for clients, between servers, everywhere, or through a CDN. The panel fills in the path, mode and the rest itself; fine-tuning is optional.
+
+**The "eskadra" protocol** is a ready-made bundle in one configuration: clients connect to the entry over VLESS or Hysteria2, and from the entry to each exit runs VLESS with a Hysteria2 fallback. **Hysteria2 through an entry** works either by forwarding UDP in the OS kernel to a single exit, or with cores on the entry — then there can be several exits and "Auto" is available.
+
 **Entry and "Auto".** If a configuration has an entry, the subscription gets an "entry → auto" profile. How it picks the exit is set per configuration:
 
 - **by quality** — an exit that passes the latency and speed thresholds (100 ms and 10 Mbit/s by default); it is kept while it passes, otherwise the fastest suitable one is chosen;
 - **in order** — a list of exits that you set: traffic goes through the first one that passes the thresholds, and returns to it when it recovers;
+- **by load** — users are split into groups, each with its own exit; an overloaded exit (above 80% of its link by default) hands a group over to a less loaded one, and the group returns once the load drops. The link capacity is set manually or measured on the server (Ookla speedtest);
 - **random** — any exit for each connection.
 
-The entry checks latency itself once a minute, and the panel measures speed on a schedule; switching does not drop connections, and the bot notifies admins about every switch.
+"Auto" can be turned off; then the subscription keeps only explicit "entry → exit" profiles. The entry checks latency itself once a minute, and the panel measures speed on a schedule; switching does not drop connections, and the bot notifies admins about every switch.
 
 ## Telegram bot
 
 The bot answers only linked people and only in private chats; to a stranger on `/start` it shows only their own Telegram ID — no panel name, no logins, no servers. Linking is done with the "Link" button in "Access and roles" and in the user card: the panel issues a one-time bot link (valid for 15 minutes), and the person presses "Start". All management is done with buttons under the message:
 
-- owner, admin and operator: users — add by Telegram ID (`/adduser name 123456789`), subscription and individual links, which configurations go into the subscription, enable/disable; deleting is for admin and owner;
-- servers: state, protection level, enable/disable cores; connect a new one by login and password or key (`/addserver`, admin and owner) — the bot deletes the message with the password right after reading it;
+- owner, admin and operator: users (`/users`) — add by Telegram ID (`/adduser name 123456789`), subscription and individual links, which configurations go into the subscription, enable/disable; deleting is for admin and owner;
+- servers (`/servers`): state, protection level, enable/disable cores; connect a new one by login and password or key (`/addserver`, admin and owner) — the bot deletes the message with the password right after reading it;
 - "Needs attention", "Auto" exits with a check, backup (owner and admin);
 - notifications: each admin chooses their own (`/notify` or "Access and roles" → "My notifications"); VPN users do not receive such messages;
 - user: `/sub` — subscription, `/links` — profile links, traffic for the month, opening access from a new address (if the allowlist is on);
 - `/help` — commands for your role.
 
 **Subscription page.** A subscription link opened in a browser shows a page: a QR code and buttons for apps, expiry, traffic and limits, available nodes, individual links with QR codes. Apps get the subscription from the same link as before.
+
+**Server payment dates.** The server card records the date the server is paid until. Ahead of time (5 days by default) the panel shows a banner, and the bot reminds admins once a day.
+
+**Analytics.** Server load for the last 48 hours and a "Download" button — a text diagnostic report (configurations, "Auto", load, compressed server logs with client addresses masked) to review yourself or with an AI model.
 
 **Updating and restoring from the panel.** The "Update" button at the bottom of the menu (owner) runs `eskadra update` through a root helper and shows the log; the helper is installed by an update from the console, so the first time after v0.15 update with the `eskadra update` command. "Backups" has a restore: the backup file and the backup password → check and summary → data swap and panel restart (the previous files stay on the server). "Settings" → "Move the panel to another server" moves the panel with all data to a new host over SSH (same version, port and URL path).
 
@@ -139,7 +155,7 @@ The bot answers only linked people and only in private chats; to a stranger on `
 
 ## Security (in brief)
 
-- A key per server, manual host-key verification (no trust on first use), `from=` and a strict mode for the panel's key.
+- A separate panel key per server, `from=` and a strict mode for the key (`fleet-exec` only). The server's host key is pinned on the first connection; if it changes, the panel will not connect until you verify and confirm the new fingerprint.
 - Firewall blocks are applied only after a manual checklist — first in shadow mode, then under a rollback timer that runs on the node itself.
 - Emergency access: "temporarily open SSH", emergency lifting of blocks, a short command for the hosting provider's KVM console (`sudo fleetctl allow 1 2 3 4`).
 - Secrets in the database are encrypted with a master key; backups are encrypted with a backup password and sent by the bot to the Telegram IDs from the settings.
@@ -149,9 +165,10 @@ Detailed architecture (in Russian) — [`eskadra-architecture.md`](eskadra-archi
 
 ## Current limitations
 
-- The management channel is fixed per node: there is no automatic switching between the tunnel and direct SSH yet (see the architecture, §4.3).
-- No integration with hosting providers' firewall APIs; no interactive terminal (only individual commands under audit).
-- The device limit is displayed but is not enforced on 3x-ui nodes; sing-box traffic statistics are not collected.
+- The management channel is changed only manually: if it goes down, the panel does not switch to another one by itself (see the architecture, §4.3).
+- No integration with hosting providers' firewall APIs.
+- No interactive terminal: the terminal in the server card (owner, shell mode) runs one command at a time, and each one is written to the audit log.
+- The device limit is not enforced on 3x-ui nodes; sing-box traffic statistics are not collected.
 - The "universal entry" (relay) is not available on nodes in 3x-ui mode.
 
 ## Development
@@ -172,11 +189,11 @@ Layout: `server/` — API, SSH executor, workers (TypeScript, Fastify, built-in 
 A release is built by GitHub Actions on a tag:
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
-The workflow `.github/workflows/release.yml` runs the tests, builds `eskadra.tar.gz` with a checksum and publishes them to Releases — that is where the installer fetches them from.
+The workflow `.github/workflows/release.yml` runs the tests and the translation check (`i18n:check`), builds `eskadra.tar.gz` with a checksum and publishes them to Releases — that is where the installer fetches them from.
 
 ## License
 
