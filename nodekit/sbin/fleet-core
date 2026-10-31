@@ -635,13 +635,22 @@ ensure_certbot() {  # certbot ≥ 5.4 (сертификаты на IP) в сво
 }
 
 cert_hooks() {  # порт 80 на время выпуска/продления: правило в нашей таблице nft и в ufw/firewalld, если они включены;
-  # службы из port80-units (nginx и т. п., отмеченные в панели) на это время останавливаются и сразу запускаются обратно
+  # службы из port80-units (отмеченные в панели) и служба, которая держит порт 80 в момент проверки (nginx и т. п.),
+  # на это время останавливаются и сразу запускаются обратно. Системные службы и службы Эскадры не трогаются.
   install -d -m 755 "$ETC/tls/hooks"
   cat > "$ETC/tls/hooks/pre.sh" <<EOF
 #!/bin/sh
 : > "$ETC/tls/port80-stopped"
 for u in \$(cat "$ETC/tls/port80-units" 2>/dev/null); do
   systemctl is-active --quiet "\$u" && systemctl stop "\$u" && echo "\$u" >> "$ETC/tls/port80-stopped"
+done
+for i in 1 2 3; do
+  pid="\$(ss -ltnpH 'sport = :80' 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)"
+  [ -n "\$pid" ] || break
+  u="\$(ps -o unit= -p "\$pid" 2>/dev/null | tr -d ' ')"
+  case "\$u" in *.service) ;; *) break ;; esac
+  case "\$u" in eskadra*|fleet*|ssh.service|sshd.service|systemd-*|dbus*) break ;; esac
+  systemctl stop "\$u" && echo "\$u" >> "$ETC/tls/port80-stopped" || break
 done
 EOF
   cat >> "$ETC/tls/hooks/pre.sh" <<'EOF'
@@ -666,6 +675,8 @@ EOF
 }
 
 port80_units() { cat "$ETC/tls/port80-units" 2>/dev/null || true; }
+# службу можно останавливать на время проверки Let's Encrypt: служба systemd, не системная и не Эскадры
+port80_stoppable() { [[ "$1" == *.service ]] && ! [[ "$1" =~ ^(eskadra|fleet|ssh\.service$|sshd\.service$|systemd-|dbus) ]]; }
 
 cmd_port80_yield() {  # port80-yield [служба]: служба, которая держит порт 80, освобождает его на время выпуска/продления
   local h unit="${1:-}"
@@ -724,13 +735,14 @@ port80_holder() {  # кто держит порт 80: «программа|pid|�
 cmd_cert_renew() {  # продление (таймер и кнопка в панели): результат — в renew.status, его читает панель
   local out code=0 h
   [ -x "$CB" ] || { echo "certbot не установлен"; return 0; }
+  cert_hooks   # хуки старых nodekit останавливали только отмеченные службы — обновляем перед продлением
   [ -f "$UNITS/eskadra-certbot.timer" ] && ! systemctl is-active --quiet eskadra-certbot.timer && systemctl enable --now eskadra-certbot.timer >/dev/null 2>&1 || true
   out="$("$CB" --config-dir "$LEDIR" --work-dir "$LEDIR/work" --logs-dir /var/log/eskadra-letsencrypt renew -q 2>&1)" || code=$?
   install -d -m 755 "$ETC/tls"
   { echo "at=$(date +%s)"; echo "code=$code"
     echo "err=$(printf '%s' "$out" | grep -v '^\s*$' | tail -n 3 | tr '\n' ' ' | tr -d '\r' | cut -c1-400)"
-    # не продлилось и порт 80 занят не отмеченной службой — кто именно (панель покажет и предложит освобождать порт)
-    if [ "$code" != 0 ] && h="$(port80_holder)" && ! port80_units | grep -qxF "$(echo "$h" | cut -d"|" -f3)"; then echo "holder=$h"; fi; } > "$ETC/tls/renew.status.new"
+    # не продлилось и порт 80 держит то, что хук остановить не может (не служба, системная) — кто именно
+    if [ "$code" != 0 ] && h="$(port80_holder)" && ! port80_stoppable "$(echo "$h" | cut -d"|" -f3)"; then echo "holder=$h"; fi; } > "$ETC/tls/renew.status.new"
   mv "$ETC/tls/renew.status.new" "$ETC/tls/renew.status"
   [ "$code" = 0 ] && echo "renew ok" || { echo "renew failed: $out" >&2; return "$code"; }
 }
@@ -773,9 +785,13 @@ cmd_cert_issue() {  # cert-issue <имя> ip|domain <значение>: выпу
   if [ -s "$ETC/tls/$name/fullchain.pem" ] && openssl x509 -in "$ETC/tls/$name/fullchain.pem" -noout -checkend 172800 >/dev/null 2>&1; then
     echo "cert $name: действует до $(openssl x509 -in "$ETC/tls/$name/fullchain.pem" -noout -enddate | cut -d= -f2)"; return 0
   fi
-  # порт 80 держит служба, отмеченная «освобождать на время продления», — её остановит pre-hook; иначе выпуск не пройдёт
-  if holder="$(port80_holder)" && ! port80_units | grep -qxF "$(echo "$holder" | cut -d"|" -f3)"; then
-    die "порт 80 занят: $(echo "$holder" | cut -d'|' -f1)$( [ -n "$(echo "$holder" | cut -d'|' -f3)" ] && echo " (служба $(echo "$holder" | cut -d'|' -f3))") — Let's Encrypt не сможет проверить сервер; остановите его (кнопка на вкладке «Хост» сервера) или используйте загруженный сертификат"
+  # порт 80 держит служба — pre-hook остановит её на время проверки и сразу запустит обратно; не служба или системная — выпуск не пройдёт
+  if holder="$(port80_holder)"; then
+    if port80_stoppable "$(echo "$holder" | cut -d"|" -f3)"; then
+      echo "порт 80 занят: $(echo "$holder" | cut -d"|" -f1) (служба $(echo "$holder" | cut -d"|" -f3)) — на время проверки Let's Encrypt она остановится и сразу запустится обратно"
+    else
+      die "порт 80 занят: $(echo "$holder" | cut -d"|" -f1) (pid $(echo "$holder" | cut -d"|" -f2))$( [ -n "$(echo "$holder" | cut -d"|" -f3)" ] && echo ", служба $(echo "$holder" | cut -d"|" -f3) — системная, её не останавливаю" || echo " — не служба systemd, остановить на время проверки нельзя"); освободите порт или используйте загруженный сертификат"
+    fi
   fi
   ensure_certbot
   cert_hooks

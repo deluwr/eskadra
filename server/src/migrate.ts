@@ -7,7 +7,8 @@
  * 3. Снимок данных (база и мастер-ключ) с правками для нового места: главный сервер становится обычным узлом
  *    (панель на нём больше не работает), адрес подписок на IP старого сервера меняется на новый.
  * 4. На новом сервере ставится та же версия Эскадры с тем же портом и путём, данные подставляются до первого
- *    запуска (install.sh, ESKADRA_RESTORE). Сертификат панели — Let's Encrypt на IP или домен.
+ *    запуска (install.sh, ESKADRA_RESTORE). Сертификат панели — Let's Encrypt на IP нового сервера или домен; выпускает
+ *    его новый сервер, служба на его порту 80 (nginx…) останавливается на время проверки (ESKADRA_STOP_80=1).
  * 5. Новая панель отвечает — эта помечается перенесённой: фоновые задачи и бот останавливаются, изменения
  *    запрещены (две панели не управляют узлами одновременно). Вернуть управление можно кнопкой.
  */
@@ -42,6 +43,10 @@ export function prepareMovedDb(file: string, oldHost: string, newIp: string) {
   try {
     db.prepare(`UPDATE servers SET mgmt_mode = 'direct' WHERE mgmt_mode = 'local'`).run();
     db.prepare(`DELETE FROM settings WHERE key = 'panel.movedTo'`).run();
+    // адрес панели — новый и первым: по первому адресу eskadra выпускает сертификат на IP и сверяет домен
+    const ex = db.prepare(`SELECT value FROM settings WHERE key = 'executor.ips'`).get() as { value: string } | undefined;
+    const ips = [newIp, ...(ex ? (JSON.parse(ex.value) as string[]) : []).filter((x) => x !== newIp && x !== oldHost)];
+    db.prepare(`INSERT INTO settings (key, value) VALUES ('executor.ips', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(JSON.stringify(ips));
     const sub = db.prepare(`SELECT value FROM settings WHERE key = 'sub.host'`).get() as { value: string } | undefined;
     if (sub && oldHost && JSON.parse(sub.value) === oldHost) db.prepare(`UPDATE settings SET value = ? WHERE key = 'sub.host'`).run(JSON.stringify(newIp));
     // сессии старого адреса новой панели не нужны: войти придётся заново
@@ -128,7 +133,7 @@ export async function movePanel(ctx: Ctx, t: MoveTarget, log: (l: string) => voi
     const url = `https://raw.githubusercontent.com/${repo}/${version}/scripts/install.sh`;
     const env = [
       `ESKADRA_REPO=${repo}`, `ESKADRA_VERSION=${version}`, `ESKADRA_PORT=${config.port}`, `ESKADRA_BASE_PATH=${config.basePath}`,
-      `ESKADRA_TLS=${t.tls}`, ...(t.tls === 'domain' ? [`ESKADRA_DOMAIN=${t.domain}`] : []), 'ESKADRA_XUI=keep', 'ESKADRA_RESTORE=/root/eskadra-move.tar.gz',
+      `ESKADRA_TLS=${t.tls}`, ...(t.tls === 'domain' ? [`ESKADRA_DOMAIN=${t.domain}`] : []), 'ESKADRA_XUI=keep', 'ESKADRA_STOP_80=1', 'ESKADRA_RESTORE=/root/eskadra-move.tar.gz',
     ].join(' ');
     log(`установка Эскадры ${version} на ${ip} (порт ${config.port}, путь ${config.basePath}) — несколько минут…`);
     const inst = await root(`set -o pipefail; (curl -fsSL ${url} || wget -qO- ${url}) > /root/eskadra-install.sh && ${env} bash /root/eskadra-install.sh < /dev/null`, '', 30 * 60_000);

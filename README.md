@@ -30,7 +30,7 @@ Running the same command again updates the panel and keeps your data (`/var/lib/
 
 Unattended: `ESKADRA_TLS=ip|domain`, `ESKADRA_DOMAIN=…`, `ESKADRA_XUI=keep|remove` (choosing Let's Encrypt means you accept its terms).
 
-**Let's Encrypt.** certbot ≥ 5.4 is installed into its own environment (`/opt/eskadra/certbot`) and keeps the certificate in its own directory `/etc/eskadra/letsencrypt` — the system certbot and other sites' certificates on the server are not touched. Issuance uses HTTP-01: port 80 is opened in ufw only while issuing and renewing; if another service occupies it, the installer asks whether it may stop that service for ~30 s. Renewal runs from the `eskadra-certbot.timer` twice a day, and the panel picks up the new certificate without a restart. With a Let's Encrypt certificate, subscriptions are also served over HTTPS.
+**Let's Encrypt.** certbot ≥ 5.4 is installed into its own environment (`/opt/eskadra/certbot`) and keeps the certificate in its own directory `/etc/eskadra/letsencrypt` — the system certbot and other sites' certificates on the server are not touched. Issuance uses HTTP-01: port 80 is opened in ufw only while issuing and renewing; if another service (nginx, apache…) occupies it, that service is stopped for ~30 s during validation and started again right away — on install, update, panel move and every renewal (`ESKADRA_STOP_80=0` leaves it alone). Renewal runs from the `eskadra-certbot.timer` twice a day, and the panel picks up the new certificate without a restart. With a Let's Encrypt certificate, subscriptions are also served over HTTPS.
 
 ## Supported systems
 

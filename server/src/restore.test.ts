@@ -90,6 +90,7 @@ test('перенос панели: копия базы — главный сер
   db.prepare(`INSERT INTO servers (id, name, host, role, key_pub, key_priv_sealed, mgmt_mode) VALUES ('pl', 'pl', '203.0.113.5', 'exit', 'k', 'x', 'direct')`).run();
   setSetting(db, 'sub.host', '198.51.100.1');
   setSetting(db, 'panel.movedTo', 'https://old/');
+  setSetting(db, 'executor.ips', ['198.51.100.1', '192.0.2.50', '198.51.100.9']);
   db.prepare(`INSERT INTO sessions (token_hash, admin_id, expires_at) VALUES ('t', 1, datetime('now', '+1 hour'))`).run();
   const snap = snapshotArchive(db, 'move', (f) => prepareMovedDb(f, '198.51.100.1', '192.0.2.50'));
   const { files } = await decryptBackup(snap.archive, 'move');   // архив переноса не зашифрован
@@ -99,6 +100,8 @@ test('перенос панели: копия базы — главный сер
   assert.deepEqual(copy.prepare(`SELECT id, mgmt_mode FROM servers ORDER BY id`).all().map((r) => ({ ...r })), [{ id: 'main', mgmt_mode: 'direct' }, { id: 'pl', mgmt_mode: 'direct' }]);
   assert.equal(JSON.parse((copy.prepare(`SELECT value FROM settings WHERE key = 'sub.host'`).get() as { value: string }).value), '192.0.2.50');
   assert.equal(copy.prepare(`SELECT 1 FROM settings WHERE key = 'panel.movedTo'`).get(), undefined);
+  // адрес панели в копии — новый и первым (по нему новая панель выпускает сертификат), старого нет
+  assert.deepEqual(JSON.parse((copy.prepare(`SELECT value FROM settings WHERE key = 'executor.ips'`).get() as { value: string }).value), ['192.0.2.50', '198.51.100.9']);
   assert.equal((copy.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n, 0);
   // живая база не тронута
   assert.equal((db.prepare(`SELECT mgmt_mode FROM servers WHERE id = 'main'`).get() as { mgmt_mode: string }).mgmt_mode, 'local');

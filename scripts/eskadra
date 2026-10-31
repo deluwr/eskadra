@@ -36,16 +36,6 @@ prompt() {  # prompt "вопрос" [по умолчанию]
   printf '%s' "${a:-${2:-}}"
 }
 yes_no() { [[ "$(prompt "$1 [y/N]:" n)" =~ ^(y|Y|д|Д|yes|да)$ ]]; }
-yes_no_strict() {  # ответ обязателен: пустой ввод (случайный Enter) не считается «нет», вопрос повторяется
-  local a
-  has_tty || return 1
-  while true; do
-    a="$(prompt "$1 [y/n]:")"
-    [[ "$a" =~ ^(y|Y|д|Д|yes|да)$ ]] && return 0
-    [[ "$a" =~ ^(n|N|н|Н|no|нет)$ ]] && return 1
-    echo "  ответьте y или n"
-  done
-}
 
 getenv() { grep -E "^$1=" "$ENVF" | tail -1 | cut -d= -f2- || true; }
 setenv() { if grep -qE "^$1=" "$ENVF"; then sed -i "s|^$1=.*|$1=$2|" "$ENVF"; else echo "$1=$2" >> "$ENVF"; fi; }
@@ -59,6 +49,24 @@ public_ip() {
   echo "$ip"
 }
 public_host() { local h; h="$(getenv FLEET_PUBLIC_HOST)"; [ -n "$h" ] && echo "$h" || public_ip; }
+# Внешний IP именно этого сервера — для сертификата на IP и проверки домена. Не из базы: после переноса там
+# могли остаться адреса прежнего сервера панели.
+own_ip() {
+  local ip
+  ip="$(curl -4fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)"
+  [[ "$ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || ip="$(ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')"
+  [ -n "$ip" ] || ip="$(hostname -I | awk '{print $1}')"
+  echo "$ip"
+}
+# Кто держит порт 80: «программа pid служба» (служба — пусто, если процесс не служба systemd). Свободен — пусто.
+port80_holder() {
+  local h pid unit
+  h="$(ss -ltnpH 'sport = :80' 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)",pid=\([0-9]*\).*/\1 \2/p' | head -1)"
+  [ -n "$h" ] || return 0
+  pid="${h#* }"; unit="$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [[ "$unit" == *.service ]] || unit=""
+  echo "$h $unit"
+}
 
 ufw_on() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; }
 firewalld_on() { command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; }
@@ -232,22 +240,40 @@ ensure_certbot() {
   "$CERTBOT" --version >/dev/null 2>&1 || die "certbot не установился"
 }
 
-write_hooks() {  # write_hooks <unit, который держит :80, или пусто>
+write_hooks() {  # хуки certbot: порт 80 на время выпуска и каждого продления (ACME HTTP-01)
+  # Служба, которая держит порт 80 в момент проверки (nginx, apache…), останавливается и сразу запускается обратно —
+  # определяется при каждом запуске, а не один раз при выпуске. Системные службы и службы Эскадры не трогаются.
+  # ESKADRA_STOP_80=0 при выпуске — не останавливать ничего.
   install -d -m 755 "$ETC/hooks"
-  {
-    echo '#!/bin/sh'
-    echo '# перед выпуском/продлением: открыть порт 80 на ~30 с (ACME HTTP-01)'
-    [ -n "$1" ] && echo "systemctl stop $1"
-    echo 'if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw allow 80/tcp comment "eskadra acme" >/dev/null; fi'
-    echo 'if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --add-port=80/tcp; fi'
-  } > "$ETC/hooks/pre.sh"
-  {
-    echo '#!/bin/sh'
-    echo 'if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw delete allow 80/tcp >/dev/null 2>&1 || true; fi'
-    echo 'if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --remove-port=80/tcp || true; fi'
-    [ -n "$1" ] && echo "systemctl start $1"
-    echo 'exit 0'
-  } > "$ETC/hooks/post.sh"
+  local stop=1; [ "${ESKADRA_STOP_80:-}" = 0 ] && stop=0
+  cat > "$ETC/hooks/pre.sh" <<EOF
+#!/bin/sh
+: > "$ETC/hooks/stopped80"
+if [ $stop = 1 ]; then
+  for i in 1 2 3; do
+    pid="\$(ss -ltnpH 'sport = :80' 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)"
+    [ -n "\$pid" ] || break
+    u="\$(ps -o unit= -p "\$pid" 2>/dev/null | tr -d ' ')"
+    case "\$u" in *.service) ;; *) break ;; esac
+    case "\$u" in eskadra*|fleet*|ssh.service|sshd.service|systemd-*|dbus*) break ;; esac
+    systemctl stop "\$u" && echo "\$u" >> "$ETC/hooks/stopped80" || break
+  done
+fi
+EOF
+  cat >> "$ETC/hooks/pre.sh" <<'EOF'
+if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw allow 80/tcp comment "eskadra acme" >/dev/null; fi
+if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --add-port=80/tcp; fi
+exit 0
+EOF
+  cat > "$ETC/hooks/post.sh" <<EOF
+#!/bin/sh
+if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw delete allow 80/tcp >/dev/null 2>&1 || true; fi
+if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --remove-port=80/tcp || true; fi
+# остановленное на время проверки — обратно, даже если выпуск не удался
+for u in \$(cat "$ETC/hooks/stopped80" 2>/dev/null); do systemctl start "\$u" || true; done
+rm -f "$ETC/hooks/stopped80"
+exit 0
+EOF
   chmod 755 "$ETC/hooks/pre.sh" "$ETC/hooks/post.sh"
 }
 
@@ -313,8 +339,9 @@ cmd_cert_migrate() {  # сертификат, выпущенный в общий
 }
 
 cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
-  local kind="${1:-}" domain="${2:-}" ip holder pid unit="" email args=()
-  ip="$(public_ip)"
+  local kind="${1:-}" domain="${2:-}" ip holder unit="" email args=()
+  ip="$(own_ip)"
+  [ -n "$ip" ] || die "не удалось определить внешний IP этого сервера"
   if [ -z "$kind" ]; then
     printf '\n  %sСертификат Let'"'"'s Encrypt%s\n' "$c_b" "$c_0"
     printf '   1) На IP %s — без домена, сертификат на 6 дней, продлевается сам\n' "$ip"
@@ -329,13 +356,15 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
   fi
 
   # порт 80 нужен валидатору Let's Encrypt (HTTP-01) на время выпуска и каждого продления
-  holder="$(ss -ltnpH 'sport = :80' 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)",pid=\([0-9]*\).*/\1 \2/p' | head -1)"
+  # служба на порту 80 останавливается на время проверки и сразу запускается обратно (хуки, write_hooks) — всегда,
+  # при выпуске, переносе, обновлении и каждом продлении; ESKADRA_STOP_80=0 — не трогать
+  holder="$(port80_holder)"
   if [ -n "$holder" ]; then
-    pid="${holder#* }"; unit="$(ps -o unit= -p "$pid" 2>/dev/null | tr -d ' ')"
-    warn "порт 80 занят: ${holder% *}${unit:+ ($unit)}"
-    [ -n "$unit" ] && [[ "$unit" == *.service ]] || die "не удалось определить сервис на порту 80 — освободите порт и повторите"
-    if [ "${ESKADRA_STOP_80:-}" = 1 ]; then ok "$unit будет останавливаться на время выпуска (ESKADRA_STOP_80=1)"
-    else yes_no_strict "  Останавливать $unit на ~30 с при выпуске и каждом продлении?"       || die "без порта 80 сертификат Let's Encrypt не выпустить (без терминала: ESKADRA_STOP_80=1 разрешает останавливать $unit)"
+    read -r _ _ unit <<< "$holder"
+    if [ "${ESKADRA_STOP_80:-}" = 0 ]; then die "порт 80 занят: ${holder%% *}${unit:+ ($unit)}, а ESKADRA_STOP_80=0 — освободите порт и повторите"
+    elif [ -z "$unit" ]; then die "порт 80 занят: ${holder%% *} (pid $(echo "$holder" | cut -d' ' -f2)) — это не служба systemd, остановить её на время выпуска нельзя; освободите порт и повторите"
+    elif [[ "$unit" =~ ^(eskadra|fleet|ssh\.service|sshd\.service|systemd-|dbus) ]]; then die "порт 80 занят системной службой $unit — её не останавливаю; освободите порт и повторите"
+    else ok "порт 80 занят: ${holder%% *} ($unit) — на время проверки Let's Encrypt (~30 с) служба остановится и сразу запустится обратно, так же при каждом продлении"
     fi
   fi
   printf '  Выпуск означает согласие с условиями Let'"'"'s Encrypt: https://letsencrypt.org/repository/\n'
@@ -343,7 +372,7 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
   email="$(prompt "  Email для уведомлений Let's Encrypt (Enter — без email):")"
 
   ensure_certbot
-  write_hooks "$unit"
+  write_hooks
   "$CERTBOT" "${LE_ARGS[@]}" delete --cert-name eskadra --non-interactive >/dev/null 2>&1 || true
   args=("${LE_ARGS[@]}" certonly -q --standalone --non-interactive --agree-tos --cert-name eskadra --key-type ecdsa
         --pre-hook "$ETC/hooks/pre.sh" --post-hook "$ETC/hooks/post.sh" --deploy-hook "/usr/local/bin/eskadra cert-deploy")
@@ -641,6 +670,7 @@ case "${1:-menu}" in
   cert) shift; cmd_cert "$@" ;;
   cert-deploy) cmd_cert_deploy ;;
   cert-migrate) cmd_cert_migrate ;;
+  cert-hooks) [ -f "$ETC/hooks/pre.sh" ] && write_hooks || true ;;   # обновление: хуки продления — в текущем виде
   self-node-apply) cmd_self_node_apply ;;
   update-apply) cmd_update_apply ;;
   conflicts) cmd_conflicts ;;

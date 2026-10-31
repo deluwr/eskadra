@@ -311,6 +311,8 @@ fi
 # Сертификат панели — только Let's Encrypt, выпускается до первого запуска панели.
 # Выпускается заново, если сертификата нет, он истекает или он самоподписанный (так было до v0.5.5).
 /usr/local/bin/eskadra cert-migrate || warn "перенос сертификата: eskadra cert-migrate"
+# хуки продления старых установок останавливали только службу, найденную при выпуске (или ничего) — обновляем
+/usr/local/bin/eskadra cert-hooks || warn "хуки продления: eskadra cert-hooks"
 cert_ok() {
   local f="$DATA/tls/cert.pem"
   openssl x509 -in "$f" -noout -checkend 3600 >/dev/null 2>&1 || return 1
@@ -319,6 +321,12 @@ cert_ok() {
 if ! cert_ok; then
   say "Сертификат панели (Let's Encrypt)"
   TLS_MODE="${ESKADRA_TLS:-}"
+  # обновление без терминала (кнопка в панели): сертификат — на то же, на что был (домен или IP)
+  if [ -z "$TLS_MODE" ] && [ "$FRESH" = 0 ] && ! { : < /dev/tty; } 2>/dev/null; then
+    OLD_HOST="$(envget FLEET_PUBLIC_HOST)"
+    if [ -n "$OLD_HOST" ] && ! [[ "$OLD_HOST" =~ ^[0-9.]+$ || "$OLD_HOST" == *:* ]]; then TLS_MODE=domain; ESKADRA_DOMAIN="${ESKADRA_DOMAIN:-$OLD_HOST}"; else TLS_MODE=ip; fi
+    say "сертификат — на ${ESKADRA_DOMAIN:-IP сервера}, как раньше"
+  fi
   if [ -z "$TLS_MODE" ]; then
     { : < /dev/tty; } 2>/dev/null || die "нет терминала для вопросов: задайте ESKADRA_TLS=ip или ESKADRA_TLS=domain ESKADRA_DOMAIN=…"
     printf '   1) На IP %s — без домена, сертификат на 6 дней, продлевается сам (рекомендуется)\n   2) На домен — нужна A-запись домена на %s\n' "$IP" "$IP"
