@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, can, fmtTime } from '../api';
+import { ago, api, can, fmtTime } from '../api';
 import { UpdateModal, type Ver } from '../App';
 import { JobLog } from './Configs';
 import { ErrorBox, Icon, Info, Switch, Tag, useAsync, usePoll, toast, Addr } from '../ui';
@@ -77,19 +77,36 @@ interface Versions { current: string; minWithData: string; error: string | null;
 
 /** Версия панели и откат на прошлую — только owner. Данные возвращаются из копии, снятой при обновлении с той версии. */
 function PanelVersion() {
-  const { data: ver } = usePoll(() => api.get<Ver>('/api/v1/version'), null);
-  const { data } = usePoll(() => (can('owner') ? api.get<Versions>('/api/v1/update/versions') : Promise.resolve(null)), null);
+  const [checked, setChecked] = useState<Ver | null>(null);
+  const { data: loaded } = usePoll(() => api.get<Ver>('/api/v1/version'), null);
+  const ver = checked ?? loaded;
+  const { data, reload } = usePoll(() => (can('owner') ? api.get<Versions>('/api/v1/update/versions') : Promise.resolve(null)), null);
   const [pick, setPick] = useState('');
   const [withData, setWithData] = useState(true);
   const [open, setOpen] = useState<'update' | 'rollback' | null>(null);
+  const { busy, error, run } = useAsync();
+  // ручная проверка: мимо кэша панели (10 минут), сразу обновляет и список версий для отката
+  const check = () => void run(async () => {
+    const v = await api.post<Ver>('/api/v1/version/check');
+    setChecked(v);
+    await reload();
+    if (v.error) toast(`GitHub недоступен: ${v.error}`, 'fail');
+    else toast(v.updateAvailable ? `Доступна новая версия ${v.latest}` : 'Установлена последняя версия', v.updateAvailable ? 'info' : 'ok');
+  });
   if (!ver) return null;
   const v = data?.versions.find((x) => x.version === pick) ?? data?.versions[0];
   return (
     <section className="card pad stack">
       <span className="flex" style={{ justifyContent: 'space-between' }}>
         <h2>Версия панели <Info>Перед каждым обновлением и откатом панель сохраняет копию своих данных (последние 8). При откате на версию её данные можно вернуть — на момент, когда с неё обновились.</Info></h2>
-        <span className="flex" style={{ gap: 8 }}><Tag kind="acc">{ver.version}</Tag>{ver.updateAvailable && can('owner') && <button className="btn pri sm" onClick={() => setOpen('update')}>{`Обновить до ${ver.latest}`}</button>}</span>
+        <span className="flex" style={{ gap: 8 }}>
+          <Tag kind="acc">{ver.version}</Tag>
+          <button className="btn sm" disabled={busy} onClick={check}>{busy ? 'Проверяю…' : 'Проверить обновления'}</button>
+          {ver.updateAvailable && can('owner') && <button className="btn pri sm" onClick={() => setOpen('update')}>{`Обновить до ${ver.latest}`}</button>}
+        </span>
       </span>
+      {ver.checkedAt && <span className="k">{ver.error ? `Последняя проверка ${ago(ver.checkedAt)}: GitHub недоступен (${ver.error})` : `Проверено ${ago(ver.checkedAt)} · последняя версия ${ver.latest ?? '—'}`}</span>}
+      <ErrorBox error={error} />
       {!can('owner') ? <span className="k">Обновление и откат панели — только у owner.</span> : !data ? <span className="k">Загрузка версий…</span> : data.error ? <ErrorBox error={`список версий с GitHub недоступен: ${data.error}`} /> : !data.versions.length ? <span className="k">Прошлых версий нет.</span> : (
         <div className="flex" style={{ alignItems: 'flex-end', gap: 14 }}>
           <label className="fld" style={{ flex: '0 1 320px' }}>Откатить на

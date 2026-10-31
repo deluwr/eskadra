@@ -142,7 +142,7 @@ export function App() {
   );
 }
 
-export type Ver = { version: string; latest: string | null; updateAvailable: boolean };
+export type Ver = { version: string; latest: string | null; updateAvailable: boolean; error?: string | null; checkedAt?: string };
 
 /** Низ меню: только когда есть обновление (версия — под логотипом). */
 /** Панель перенесена на другой сервер: здесь только просмотр; owner может вернуть управление сюда. */

@@ -269,6 +269,8 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
 
   // ───── настройки ─────
   app.get('/api/v1/version', async () => versionInfo());
+  // ручная проверка обновлений (кнопка в «Настройках»)
+  app.post('/api/v1/version/check', async () => versionInfo(true));
 
   app.get('/api/v1/settings', async () => ({
     lang: getSetting(db, 'ui.lang', 'ru'),

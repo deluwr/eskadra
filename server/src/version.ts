@@ -11,10 +11,12 @@ export const panelVersion = () => read('VERSION') || 'dev';
 export const panelRepo = () => read('REPO') || 'deluwr/eskadra';
 let cache: { at: number; latest: string | null; error: string | null } | null = null;
 
-export async function versionInfo() {
+/** force — ручная проверка из «Настроек»: мимо кэша, но не чаще раза в 30 секунд (лимит GitHub — 60 запросов в час на IP). */
+export async function versionInfo(force = false) {
   const version = read('VERSION') || 'dev';
   const repo = read('REPO') || 'deluwr/eskadra';
-  if (!cache || Date.now() - cache.at > 10 * 60_000) {
+  if (!cache || Date.now() - cache.at > (force ? 30_000 : 10 * 60_000)) {
+    if (force) relCache = null;   // список версий для отката — тоже свежий
     try {
       const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
         headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'eskadra-panel' }, signal: AbortSignal.timeout(8000),
@@ -26,7 +28,7 @@ export async function versionInfo() {
     }
   }
   const updateAvailable = version !== 'dev' && !!cache.latest && cmpVersion(cache.latest, version) > 0;
-  return { version, latest: cache.latest, updateAvailable, error: cache.error };
+  return { version, latest: cache.latest, updateAvailable, error: cache.error, checkedAt: new Date(cache.at).toISOString() };
 }
 
 let relCache: { at: number; list: Array<{ version: string; published: string; prerelease: boolean }> } | null = null;

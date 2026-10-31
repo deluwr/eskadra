@@ -1568,4 +1568,13 @@ export const EN: Record<string, string> = {
   "Запускаю…": "Starting…",
   "Выпустить": "Issue",
   "Выпустить…": "Issue…",
+  // ручная проверка обновлений панели
+  "Проверить обновления": "Check for updates",
+  "Установлена последняя версия": "You're on the latest version",
+  "Доступна новая версия {}": "New version available: {}",
+  "GitHub недоступен: {}": "GitHub is unreachable: {}",
+  "Проверено {} · последняя версия {}": "Checked {} · latest version {}",
+  "Проверено {}": "Checked {}",
+  "последняя версия {}": "latest version {}",
+  "Последняя проверка {}: GitHub недоступен ({})": "Last check {}: GitHub is unreachable ({})",
 };
