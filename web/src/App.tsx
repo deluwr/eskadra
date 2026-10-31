@@ -117,7 +117,7 @@ export function App() {
           {route.page === 'users' && <UsersPage />}
           {route.page === 'ports' && <PortsPage />}
           {route.page === 'access' && <AccessPage auth={auth} onChange={refreshAuth} />}
-          {route.page === 'settings' && <SettingsPage />}
+          {route.page === 'settings' && <SettingsPage onAuthChange={() => void refreshAuth()} />}
           {route.page === 'backups' && <BackupsPage />}
           {route.page === 'audit' && <AuditPage />}
           {route.page === 'help' && <HelpPage />}

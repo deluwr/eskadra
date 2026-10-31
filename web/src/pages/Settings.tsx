@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { ago, api, can, fmtTime } from '../api';
 import { UpdateModal, type Ver } from '../App';
 import { JobLog } from './Configs';
-import { ErrorBox, Icon, Info, Switch, Tag, useAsync, usePoll, toast, Addr } from '../ui';
+import { CopyButton, ErrorBox, Icon, Info, Switch, Tag, useAsync, usePoll, toast, Addr } from '../ui';
 
 interface S {
   executorIps: string[];
@@ -13,7 +13,8 @@ interface S {
   backup: { tgIds: string[]; time: string; enabled: boolean; hasPassword: boolean };
 }
 
-export function SettingsPage() {
+/** onAuthChange — перечитать состояние входа в App (после переноса панели появляется баннер со ссылкой). */
+export function SettingsPage({ onAuthChange }: { onAuthChange?: () => void }) {
   const { data, reload } = usePoll(() => api.get<S>('/api/v1/settings'), null);
   if (!data) return <p className="muted">Загрузка…</p>;
   return (
@@ -26,7 +27,7 @@ export function SettingsPage() {
       <BotCard s={data} onSaved={reload} />
       {/* бэкапы и перенос панели — только owner */}
       {can('owner') && <BackupCard s={data} />}
-      {can('owner') && <MoveCard />}
+      {can('owner') && <MoveCard onMoved={onAuthChange} />}
     </>
   );
 }
@@ -257,12 +258,18 @@ function BackupCard({ s }: { s: S }) {
 }
 
 /** Перенос панели на другой сервер: та же версия, порт и путь, все данные; эта панель после переноса отходит. */
-function MoveCard() {
+function MoveCard({ onMoved }: { onMoved?: () => void }) {
   const [f, setF] = useState({ host: '', sshPort: '22', user: 'root', password: '', privateKey: '', tls: 'ip' as 'ip' | 'domain', domain: '' });
   const [useKey, setUseKey] = useState(false);
   const [jobId, setJobId] = useState<number | null>(null);
   const [done, setDone] = useState(false);   // перенос закончился — журнал остаётся на экране
+  const [movedUrl, setMovedUrl] = useState<string | null>(null);
   const { busy, error, run } = useAsync();
+  // перенос завершён: адрес новой панели — ссылкой здесь и баннером на всех страницах (без перезагрузки)
+  const finished = () => {
+    setDone(true);
+    void api.get<{ movedTo?: string | null }>('/api/v1/auth/state').then((a) => { setMovedUrl(a.movedTo ?? null); if (a.movedTo) onMoved?.(); }).catch(() => undefined);
+  };
   const start = () => run(async () => {
     const r = await api.post<{ jobId: number }>('/api/v1/panel/move', {
       host: f.host.trim(), sshPort: Number(f.sshPort) || 22, user: f.user.trim() || 'root', tls: f.tls,
@@ -301,7 +308,14 @@ function MoveCard() {
       <span className="k">Пароль и ключ используются только на время переноса и не сохраняются.</span>
       <div className="flex"><button className="btn pri" disabled={busy || !ready || (!!jobId && !done)} onClick={() => void start()}>Перенести панель</button></div>
       <ErrorBox error={error} />
-      {jobId && <JobLog id={jobId} title="Перенос" onDone={() => setDone(true)} />}
+      {movedUrl && (
+        <div className="alert ok stack" style={{ gap: 8 }}>
+          <span>Панель перенесена. Новый адрес: <a href={movedUrl} target="_blank" rel="noopener noreferrer"><b className="mono">{movedUrl}</b></a></span>
+          <span className="k">Войдите там тем же логином и паролем — сессии не переносятся. Сохраните адрес: путь в нём секретный.</span>
+          <span className="flex"><a className="btn sm pri" href={movedUrl} target="_blank" rel="noopener noreferrer">Открыть новую панель</a><CopyButton text={movedUrl} /></span>
+        </div>
+      )}
+      {jobId && <JobLog id={jobId} title="Перенос" onDone={finished} />}
     </section>
   );
 }

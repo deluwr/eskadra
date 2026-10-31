@@ -1577,4 +1577,8 @@ export const EN: Record<string, string> = {
   "Проверено {}": "Checked {}",
   "последняя версия {}": "latest version {}",
   "Последняя проверка {}: GitHub недоступен ({})": "Last check {}: GitHub is unreachable ({})",
+  // перенос панели завершён
+  "Панель перенесена. Новый адрес:": "The panel has been moved. New address:",
+  "Войдите там тем же логином и паролем — сессии не переносятся. Сохраните адрес: путь в нём секретный.": "Sign in there with the same login and password — sessions are not moved. Save the address: its path is secret.",
+  "Открыть новую панель": "Open the new panel",
 };
