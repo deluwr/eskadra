@@ -45,12 +45,16 @@ const holderOf = (v?: string) => {
 /** Кто мешает Let's Encrypt: «порт 80 занят: nginx (служба nginx.service)». */
 export const holderText = (h: { name: string; unit: string }) => `порт 80 занят: ${h.name}${h.unit ? ` (служба ${h.unit})` : ''}`;
 
-/** Понятное имя сертификата: ip — на IP сервера, dom-<домен>, tpl-<id> — загруженный для конфигурации, cdn-<id> — входа за CDN. */
+/**
+ * Понятное имя сертификата: ip — на IP сервера, dom-<домен>, tpl-<id> — загруженный для конфигурации, cdn-<id> — входа за CDN,
+ * cf-<домен> — Cloudflare Origin CA с вкладки «Хост» (tlsissue.ts).
+ */
 export function certLabel(name: string, templateName?: (id: string) => string | undefined): string {
   if (name === 'ip') return 'сертификат на IP';
   if (name.startsWith('dom-')) return `сертификат ${name.slice(4)}`;
   if (name.startsWith('tpl-')) return `загруженный сертификат «${templateName?.(name) ?? name}»`;
   if (name.startsWith('cdn-')) return 'сертификат входа за CDN';
+  if (name.startsWith('cf-')) return `сертификат Cloudflare ${name.slice(3).replace(/^_/, '*')}`;
   return `сертификат ${name}`;
 }
 

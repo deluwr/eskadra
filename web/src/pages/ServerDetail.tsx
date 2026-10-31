@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { HostStatsPanel } from '../HostStats';
 import { ViaPicker, viaBody, viaOnly, viaReady, type Via } from '../ViaPicker';
 import { api, ago, can, fmtTime, paidLeftText, ruDate, type Check, type Job, type Preflight, type Server, type ServerDetail } from '../api';
+import { JobLog } from './Configs';
 import { CopyBlock, CopyButton, ErrorBox, Info, Level, Modal, Seg, StagePip, StageHelp, Switch, Tag, RoleTag, useAsync, usePoll, ask, toast, LEVEL_LABEL, Addr } from '../ui';
 
 type Tab = 'protect' | 'ports' | 'access' | 'sos' | 'host' | 'jobs';
@@ -684,22 +685,106 @@ function SosTab({ d }: { d: ServerDetail }) {
 
 // ───── хост ─────
 
-const certName = (n: string) => (n === 'ip' ? 'На IP сервера' : n.startsWith('dom-') ? n.slice(4) : n.startsWith('tpl-') ? 'Загруженный' : n);
+const certName = (n: string) => (n === 'ip' ? 'На IP сервера' : n.startsWith('dom-') ? n.slice(4) : n.startsWith('tpl-') ? 'Загруженный'
+  : n.startsWith('cf-') ? `Cloudflare · ${n.slice(3).replace(/^_/, '*')}` : n.startsWith('cdn-') ? 'Вход за CDN' : n);
+
+type IssueMethod = 'ip' | 'domain' | 'cdn';
+interface CertSetup { ipHost: string | null; domain: string; cf: { hostnames: string[]; expiresOn: string; zone: string; at: string } | null; cdnPorts: number[] }
+
+const METHOD_HELP: Record<IssueMethod, string> = {
+  ip: 'Let’s Encrypt на IP сервера: без домена, сертификат на 6 дней, сервер продлевает его сам каждые 3 дня. Нужен открытый снаружи порт 80 (открывается только на время проверки). Клиенты подключаются по IP.',
+  domain: 'Let’s Encrypt на домен: запись A/AAAA домена должна указывать на сервер (без прокси CDN). Сертификат на 90 дней, сервер продлевает его сам. Нужен открытый снаружи порт 80.',
+  cdn: 'Cloudflare Origin CA: сертификат на 15 лет для связи Cloudflare → сервер, его проверяет Cloudflare в режиме «Full (strict)». Для XHTTP через CDN: клиенты идут к Cloudflare, Cloudflare — к входу по TLS. Порт 80 не нужен.',
+};
+
+/** Выпуск сертификата с выбором способа; ход выпуска — журнал задачи. */
+function IssueCert({ s, onDone, onClose }: { s: Server; onDone: () => void; onClose: () => void }) {
+  const { data: setup, reload } = usePoll(() => api.get<CertSetup>(`/api/v1/servers/${s.id}/certs/setup`), 0, [s.id]);
+  const { busy, error, run } = useAsync();
+  const [method, setMethod] = useState<IssueMethod>('ip');
+  const [domain, setDomain] = useState('');
+  const [hosts, setHosts] = useState('');
+  const [token, setToken] = useState('');
+  const [cfDns, setCfDns] = useState(true);
+  const [cfStrict, setCfStrict] = useState(true);
+  const [jobId, setJobId] = useState<number | null>(null);
+  useEffect(() => {
+    if (!setup) return;
+    if (!setup.ipHost) setMethod((m) => (m === 'ip' ? 'domain' : m));
+    setDomain((d) => d || setup.domain);
+    setHosts((h) => h || (setup.cf?.hostnames.join(', ') ?? ''));
+  }, [setup]);
+  const hostnames = hosts.split(/[\s,]+/).filter(Boolean);
+  const ready = method === 'ip' ? !!setup?.ipHost : method === 'domain' ? /\.[A-Za-z]{2,}$/.test(domain.trim()) : hostnames.length > 0 && token.trim().length > 20;
+  const start = () => void run(async () => {
+    const body = method === 'ip' ? { method } : method === 'domain' ? { method, domain: domain.trim() } : { method, hostnames, cfToken: token.trim(), cfDns, cfStrict };
+    const r = await api.post<{ jobId: number }>(`/api/v1/servers/${s.id}/certs/issue`, body);
+    setToken('');
+    setJobId(r.jobId);
+  });
+  if (jobId) return (
+    <div className="stack">
+      <JobLog id={jobId} title="Выпуск сертификата" onDone={() => { onDone(); void reload(); }} />
+      <span><button className="btn sm" onClick={() => setJobId(null)}>Выпустить ещё</button> <button className="btn ghost sm" onClick={onClose}>Закрыть</button></span>
+    </div>
+  );
+  return (
+    <div className="card pad stack" style={{ background: 'var(--surface2)' }}>
+      <div className="flex" style={{ justifyContent: 'space-between' }}>
+        <b>Выпустить сертификат</b>
+        <Seg label="Способ выпуска" value={method} onChange={setMethod} options={[['ip', 'На IP'], ['domain', 'На домен'], ['cdn', 'CDN (Cloudflare)']]} />
+      </div>
+      <span className="k">{METHOD_HELP[method]}</span>
+      {method === 'ip' && (setup && !setup.ipHost
+        ? <div className="alert warn">Сервер добавлен по имени, а не по IP — выберите «На домен».</div>
+        : <span>Сертификат будет выпущен на <code>{setup?.ipHost ?? s.host}</code>.</span>)}
+      {method === 'domain' && (
+        <label className="fld" style={{ maxWidth: 420 }}>Домен сервера
+          <input className="inp mono" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="vpn.example.com" spellCheck={false} />
+        </label>
+      )}
+      {method === 'cdn' && (
+        <>
+          {setup?.cf && <div className="alert ok">Уже выпущен: <b>{setup.cf.hostnames.join(', ')}</b> (зона {setup.cf.zone}), действует до {fmtTime(setup.cf.expiresOn)}. Повторный выпуск заменит его.</div>}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(260px, 100%), 1fr))', gap: 12 }}>
+            <label className="fld"><span>Домен CDN <Info>Имя, через которое клиенты подключаются к Cloudflare, например cdn.example.com. Можно несколько через запятую и *.example.com — все из одной зоны.</Info></span>
+              <input className="inp mono" value={hosts} onChange={(e) => setHosts(e.target.value)} placeholder="cdn.example.com" spellCheck={false} />
+            </label>
+            <label className="fld"><span>API-токен Cloudflare <Info>Cloudflare → My Profile → API Tokens → Create Token → Custom. Права: Zone · SSL and Certificates · Edit; Zone · Zone Settings · Edit; Zone · DNS · Edit (для записи); Zone · Zone · Read. Токен используется один раз и не сохраняется.</Info></span>
+              <input className="inp mono" type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" spellCheck={false} />
+            </label>
+          </div>
+          <label className="cb"><input type="checkbox" checked={cfDns} onChange={(e) => setCfDns(e.target.checked)} />создать или исправить DNS-запись домена на адрес сервера, через прокси Cloudflare</label>
+          <label className="cb"><input type="checkbox" checked={cfStrict} onChange={(e) => setCfStrict(e.target.checked)} />перевести зону в SSL/TLS «Full (strict)»</label>
+          <span className="k">Дальше: в конфигурации VLESS «через вход» на этом сервере укажите домен CDN и порт входа из {setup?.cdnPorts.join(', ') ?? '443, 2053, 2083, 2087, 2096, 8443'} — вход XHTTP возьмёт этот сертификат вместо самоподписанного.</span>
+        </>
+      )}
+      <span className="flex">
+        <button className="btn sm pri" disabled={busy || !ready} onClick={start}>{busy ? 'Запускаю…' : 'Выпустить'}</button>
+        <button className="btn ghost sm" disabled={busy} onClick={onClose}>Отмена</button>
+      </span>
+      <ErrorBox error={error} />
+    </div>
+  );
+}
 
 /** TLS-сертификаты узла: Let's Encrypt продлевает сам узел; здесь — сроки, результат продления, ручной запуск. */
 function CertsCard({ s, onChange }: { s: Server; onChange: () => void }) {
   const { busy, error, run } = useAsync();
   const st = s.tls_state;
+  const [issue, setIssue] = useState(false);
   const act = (a: 'check' | 'renew') => run(async () => { await api.post(`/api/v1/servers/${s.id}/certs/${a}`); toast(a === 'renew' ? 'Продление выполнено — результат ниже' : 'Сертификаты проверены'); onChange(); });
   return (
     <section className="card pad stack">
       <div className="flex" style={{ justifyContent: 'space-between' }}>
         <h2>TLS-сертификаты <Info>Let's Encrypt продлевает сам сервер: таймер дважды в сутки, сертификат на IP — за 3 дня до конца, на домен — за 30. Панель проверяет сроки каждые 3 часа и пишет в бот, если продление не удалось или срок подходит к концу. Для продления нужен открытый снаружи порт 80.</Info></h2>
         <span className="flex">
+          {can('servers.manage') && !issue && <button className="btn sm pri" disabled={busy || s.sudo_mode !== 'restricted'} onClick={() => setIssue(true)}>Выпустить…</button>}
           <button className="btn sm" disabled={busy || s.sudo_mode !== 'restricted'} onClick={() => void act('check')}>Проверить</button>
           {st?.certs.some((c) => c.le) && <button className="btn sm" disabled={busy} onClick={() => void act('renew')}>{busy ? 'Продлеваю…' : 'Продлить сейчас'}</button>}
         </span>
       </div>
+      {issue && <IssueCert s={s} onDone={onChange} onClose={() => setIssue(false)} />}
       {s.certProblems.map((p) => <div key={p.key} className={`alert ${p.level}`}><b>{p.title}</b><br />{p.detail}</div>)}
       {!st ? <span className="k">Ещё не проверялись. Сертификаты появляются у конфигураций с TLS и Hysteria2.</span> : !st.certs.length ? <span className="k">На сервере нет TLS-сертификатов Эскадры.</span> : (
         <div className="table-wrap">

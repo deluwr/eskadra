@@ -19,6 +19,9 @@ import { Ops, peersAllowed, startJob, XUI_TOKEN } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
 import { CHECKLIST, renderPlan } from '../firewall.js';
 import { certProblems } from '../certs.js';
+import { cfOriginOf, issueCert } from '../tlsissue.js';
+import { CDN_PORTS } from '../protocols.js';
+import { getSetting } from '../db.js';
 import { localRaw, parseHostStat } from '../hoststats.js';
 import { botProxyOptions } from '../botproxy.js';
 import { scanSni } from '../sni.js';
@@ -400,6 +403,38 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     const st = await new Ops(ctx).checkCerts(r, req.params.act === 'renew');
     if (req.params.act === 'renew') audit(db, who(req), 'server.certs_renew', r.id, { renew: st.renew });
     return publicView(ctx, ctx.server(r.id));
+  });
+
+  // Выпуск сертификата с выбором способа (IP, домен, Cloudflare для CDN) — фоном, шаги пишутся в журнал задачи
+  app.get<{ Params: { id: string } }>('/api/v1/servers/:id/certs/setup', async (req) => {
+    const r = ctx.server(req.params.id);
+    const cf = cfOriginOf(ctx, r.id);
+    return {
+      ipHost: isIP(r.host) ? r.host : null,
+      domain: getSetting<string>(db, `tls.domain.${r.id}`, ''),
+      cf: cf && { hostnames: cf.hostnames, expiresOn: cf.expiresOn, zone: cf.zone, at: cf.at },
+      cdnPorts: CDN_PORTS,
+    };
+  });
+
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/certs/issue', { preHandler: guard(ctx, 'servers.manage') }, async (req) => {
+    const r = ctx.server(req.params.id);
+    if (r.sudo_mode !== 'restricted') throw new HttpError(409, 'сервер ещё не настроен');
+    const b = z.object({
+      method: z.enum(['ip', 'domain', 'cdn']),
+      domain: z.string().max(253).optional(),
+      hostnames: z.array(z.string().max(253)).max(10).optional(),
+      cfToken: z.string().max(200).optional(),
+      cfDns: z.boolean().optional(),
+      cfStrict: z.boolean().optional(),
+    }).parse(req.body);
+    if (db.prepare(`SELECT 1 FROM jobs WHERE server_id = ? AND kind = 'cert-issue' AND status = 'running' AND started_at > datetime('now', '-15 minutes')`).get(r.id))
+      throw new HttpError(409, 'выпуск сертификата на этом сервере уже идёт');
+    const job = startJob(ctx, r.id, 'cert-issue');
+    void issueCert(ctx, r, b, job.log)
+      .then(() => { job.finish('ok'); audit(db, who(req), 'server.cert_issue', r.id, { method: b.method, domain: b.domain, hostnames: b.hostnames }); })
+      .catch((e: Error) => { job.log(`ошибка: ${e.message}`); job.finish('failed'); });
+    return { jobId: job.id };
   });
 
   /**

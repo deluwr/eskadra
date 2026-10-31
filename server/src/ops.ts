@@ -79,6 +79,7 @@ export function skipLevels(results: Array<{ exitId: string; ok: boolean }>, slow
 const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'amd64' | 'arm64';
 import { buildKitBundle, kitVersion } from './nodekit.js';
 import { parseCertStatus, type TlsState } from './certs.js';
+import { cfOriginFor, installCf } from './tlsissue.js';
 import { parseSections } from './preflight.js';
 
 export interface JobHandle { id: number; log: (line: string) => void; finish: (s: 'ok' | 'failed') => void }
@@ -297,8 +298,11 @@ export class Ops {
       const name = certName(sp, t.id, s.id, s.host);
       if (!name) throw new Error(`${s.name}: нет сертификата для TLS — ${sp.certMode === 'ip' ? 'адрес сервера не IP' : 'не указан домен сервера'}`);
       if (sp.certMode === 'cdn') {
-        // вход за CDN: самоподписанный под домен CDN, выпускается один раз на узле
-        await n.must(['tls-self', name, sp.cdn]);
+        // вход за CDN: сертификат Cloudflare Origin CA сервера, если он покрывает домен (вкладка «Хост»),
+        // иначе самоподписанный под домен CDN, выпускается один раз на узле
+        const cf = cfOriginFor(this.ctx, s.id, sp.cdn);
+        if (cf) await installCf(this.ctx, n, name, cf);
+        else await n.must(['tls-self', name, sp.cdn]);
       } else if (sp.certMode === 'custom') {
         const c = getSetting<{ fullchain: string; privkey: string } | null>(this.ctx.db, `cert.${t.id}`, null);
         if (!c) throw new Error('загрузите сертификат и ключ в настройках конфигурации');
