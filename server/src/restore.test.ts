@@ -12,7 +12,7 @@ import { Ctx } from './ctx.js';
 import { backupPassword, backupSettings, Backups, saveBackupSettings, snapshotArchive } from './backup.js';
 import { applyStagedRestore, armRestore, decryptBackup, stageRestore } from './restorelib.js';
 import { decryptWithPassword, encryptWithPassword } from './lib/backupcrypt.js';
-import { prepareMovedDb } from './migrate.js';
+import { LEFTOVER_CLEANUP, prepareMovedDb } from './migrate.js';
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'esk-rs-'));
@@ -136,4 +136,14 @@ test('перенесённая панель: изменения запрещен
   assert.equal((await call('GET')).statusCode, 200, 'просмотр работает');
   assert.equal((await call('POST', '/api/v1/panel/move/cancel')).statusCode, 200, 'вернуть управление можно');
   await app.close();
+});
+
+test('перенос: остатки прошлой попытки убираются без узла флота на том же сервере', () => {
+  const rm = LEFTOVER_CLEANUP.split('\n').filter((l) => /^\s*rm /.test(l)).join('\n');
+  // общий с узлом каталог целиком, конфиги ядер, сертификаты узла и nodekit — не трогаются
+  assert.doesNotMatch(rm, /\/etc\/eskadra(\s|$)/);
+  assert.doesNotMatch(rm, /\/etc\/eskadra\/(xray|sing-box|telemt|tls)\b|\/usr\/local\/(lib\/eskadra|sbin)/);
+  assert.match(rm, /\/etc\/eskadra\/eskadra\.env/);
+  // таймер продления общий с узлом: удаляется только там, где узла нет
+  assert.match(LEFTOVER_CLEANUP, /if \[ -x \/usr\/local\/sbin\/fleet-core \]; then[\s\S]*else[\s\S]*eskadra-certbot\.\*\nfi/);
 });

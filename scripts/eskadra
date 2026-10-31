@@ -553,8 +553,47 @@ fw_close() {  # закрыть в ufw / firewalld все порты Эскадр
   fi
 }
 
-cmd_uninstall() {  # cmd_uninstall [--purge]
-  local purge="${1:-}" unit
+# На сервере работает и узел флота (nodekit, ядра): у панели и узла общий каталог $ETC (там конфиги ядер, сертификаты
+# узла, общий каталог Let's Encrypt) и общий таймер продления eskadra-certbot — панель удаляется без них.
+node_here() { [ -x /usr/local/sbin/fleet-core ] || [ -d "$ETC/xray" ] || [ -d "$ETC/sing-box" ] || [ -d "$ETC/telemt" ]; }
+
+# Узел на этом сервере — полностью: ядра и их службы, конфиги и сертификаты, nodekit, firewall Эскадры, пользователи
+# fleet и fleet-mgmt. Настройки SSH и консольный пользователь fleetadmin остаются — иначе можно потерять доступ.
+node_remove() {
+  local u
+  for u in $(systemctl list-unit-files --no-legend 'eskadra-*' 2>/dev/null | awk '{print $1}') fleet-fw.service; do
+    systemctl disable --now "$u" >/dev/null 2>&1 || systemctl stop "$u" >/dev/null 2>&1 || true
+  done
+  rm -f /etc/systemd/system/eskadra-*.service /etc/systemd/system/eskadra-*.timer /etc/systemd/system/fleet-fw.service
+  nft delete table inet fleet >/dev/null 2>&1 || true
+  # каталоги узла в $ETC; сертификаты Let's Encrypt узла — все, кроме сертификата панели (eskadra)
+  rm -rf "$ETC/xray" "$ETC/sing-box" "$ETC/telemt" "$ETC/tls" "$ETC/hy2-hop" "$ETC/hy2-relay" "$ETC/netfair"
+  for f in "$LE"/renewal/*.conf; do
+    [ -f "$f" ] || continue
+    u="$(basename "$f" .conf)"; [ "$u" = eskadra ] && continue
+    rm -rf "$LE/live/$u" "$LE/archive/$u" "$f"
+  done
+  rm -rf /usr/local/lib/eskadra /etc/fleet /var/lib/fleet
+  rm -f /usr/local/sbin/fleet-* /usr/local/sbin/fleetctl /etc/sudoers.d/90-fleet /etc/sudoers.d/90-fleet-bootstrap /etc/sudoers.d/91-fleet-shell
+  pkill -u fleet >/dev/null 2>&1 || true
+  userdel -r fleet >/dev/null 2>&1 || true
+  userdel fleet-mgmt >/dev/null 2>&1 || true
+  systemctl daemon-reload
+  warn "оставлены настройки SSH (/etc/ssh/sshd_config.d/00-fleet-*.conf) и консольный пользователь fleetadmin — чтобы не потерять доступ к серверу"
+}
+
+# Только файлы панели (программа, база, настройки панели, её сертификат) — узел на этом сервере не задевается.
+# Та же очистка — в переносе панели (server/src/migrate.ts), когда новый сервер остался после неудачной попытки.
+panel_purge() {
+  rm -rf "$PREFIX" "$DATA" /var/log/eskadra-install.log
+  rm -f /usr/local/bin/eskadra "$ENVF" "$ETC/.setup-done"
+  rm -rf "$ETC/hooks" "$LE/live/eskadra" "$LE/archive/eskadra" "$LE/renewal/eskadra.conf"
+  userdel eskadra >/dev/null 2>&1 || true
+}
+
+cmd_uninstall() {  # cmd_uninstall [--purge|--keep] [--with-node] [--yes]
+  local purge="" node=keep yes="" a unit
+  for a in "$@"; do case "$a" in --purge) purge=--purge ;; --keep) purge=keep ;; --with-node) node=remove ;; --yes|-y) yes=1 ;; esac; done
   if [ -z "$purge" ]; then
     printf '\n  %sУдаление Эскадры%s\n' "$c_b" "$c_0"
     printf '   1) Удалить программу, сохранить данные и настройки (%s, %s) — можно поставить заново и продолжить\n' "$DATA" "$ETC"
@@ -562,31 +601,51 @@ cmd_uninstall() {  # cmd_uninstall [--purge]
     printf '   0) Отмена\n'
     case "$(prompt "  Выберите [0]:" 0)" in 1) purge=keep ;; 2) purge=--purge ;; *) return 0 ;; esac
   fi
-  if [ "$purge" = --purge ]; then
-    warn "Будут удалены база панели, ключи SSH к узлам и локальные бэкапы. Узлы продолжат работать, но управлять ими будет нечем:"
-    warn "на узлах останутся пользователь fleet, nodekit и правила firewall — их снимают на самих узлах."
-    [ "$(prompt "  Для подтверждения введите УДАЛИТЬ:")" = "УДАЛИТЬ" ] || { ok "отменено"; return 0; }
-    fw_close
+  # узел на этом же сервере: по умолчанию остаётся (VPN продолжает работать), удалить — только явным выбором
+  if node_here && [ "$node" = keep ] && [ -z "$yes" ]; then
+    local running; running="$(systemctl list-units --no-legend --state=active 'eskadra-*.service' 2>/dev/null | awk '{print $1}' | grep -v '^eskadra-\(selfnode\|update\|certbot\)' | paste -sd' ' || true)"
+    printf '\n  %sНа этом сервере работает и узел флота%s%s\n' "$c_b" "$c_0" "${running:+ ($running)}"
+    printf '   1) Оставить узел — удалить только панель: ядра, их конфиги и сертификаты не трогаются, VPN работает\n'
+    printf '   2) Удалить всё — и панель, и узел: ядра, конфиги, сертификаты, nodekit, firewall Эскадры, пользователь fleet\n'
+    case "$(prompt "  Выберите [1]:" 1)" in 2) node=remove ;; esac
+  fi
+  if [ "$purge" = --purge ] || [ "$node" = remove ]; then
+    if [ "$purge" = --purge ]; then
+      warn "Будут удалены база панели, ключи SSH к узлам и локальные бэкапы. Узлы продолжат работать, но управлять ими будет нечем:"
+      warn "на других узлах останутся пользователь fleet, nodekit и правила firewall — их снимают на самих узлах."
+    fi
+    if [ "$node" = remove ]; then warn "Узел на этом сервере будет удалён: ядра остановятся, клиенты через него больше не подключатся."; fi
+    [ -n "$yes" ] || [ "$(prompt "  Для подтверждения введите УДАЛИТЬ:")" = "УДАЛИТЬ" ] || { ok "отменено"; return 0; }
+    if [ "$purge" = --purge ]; then fw_close; fi
   else
-    yes_no "  Удалить программу? Данные в $DATA и настройки в $ETC сохранятся." || return 0
+    [ -n "$yes" ] || yes_no "  Удалить программу? Данные в $DATA и настройки в $ETC сохранятся." || return 0
   fi
   # по одному юниту: «disable --now a b» падает целиком, если одного юнита нет, и панель оставалась запущенной
-  for unit in eskadra.service eskadra-certbot.timer eskadra-certbot.service eskadra-selfnode.path eskadra-selfnode.service eskadra-update.path eskadra-update.service; do
+  for unit in eskadra.service eskadra-selfnode.path eskadra-selfnode.service eskadra-update.path eskadra-update.service; do
     systemctl disable --now "$unit" >/dev/null 2>&1 || systemctl stop "$unit" >/dev/null 2>&1 || true
   done
+  rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-selfnode.* /etc/systemd/system/eskadra-update.*
+  if node_here && [ "$node" = keep ]; then
+    # таймер продления общий с узлом: остаётся; если его переписала панель — узел возвращает свой (fleet-core cert-renew)
+    if [ -f /etc/systemd/system/eskadra-certbot.service ] && ! grep -q 'cert-renew' /etc/systemd/system/eskadra-certbot.service; then
+      /usr/local/sbin/fleet-core cert-status >/dev/null 2>&1 || true
+    fi
+  else
+    systemctl disable --now eskadra-certbot.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/eskadra-certbot.*
+  fi
   pkill -u eskadra >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-certbot.* /etc/systemd/system/eskadra-selfnode.* /etc/systemd/system/eskadra-update.*
   systemctl daemon-reload
+  if [ "$node" = remove ]; then node_remove; fi
   if [ "$purge" = --purge ]; then
     legacy_le_drop
     rm -rf /etc/letsencrypt/live/eskadra /etc/letsencrypt/archive/eskadra /etc/letsencrypt/renewal/eskadra.conf
-    rm -rf "$PREFIX" "$DATA" "$ETC" /var/log/eskadra-install.log /var/log/eskadra-letsencrypt
-    userdel eskadra >/dev/null 2>&1 || true
-    rm -f /usr/local/bin/eskadra
-    ok "Эскадра удалена полностью. Поставить заново: bash <(curl -fsSL https://raw.githubusercontent.com/deluwr/eskadra/main/scripts/install.sh)"
+    panel_purge
+    if ! node_here; then rm -rf "$ETC" /var/log/eskadra-letsencrypt; fi
+    ok "Эскадра удалена полностью$(node_here && echo ' (узел на этом сервере оставлен и работает)'). Поставить заново: bash <(curl -fsSL https://raw.githubusercontent.com/deluwr/eskadra/main/scripts/install.sh)"
   else
     rm -rf "$PREFIX"; rm -f /usr/local/bin/eskadra
-    ok "программа удалена. Данные: $DATA, настройки: $ETC — повторная установка подхватит их. Полностью: eskadra uninstall --purge"
+    ok "программа удалена$(node_here && echo ', узел на этом сервере оставлен'). Данные: $DATA, настройки: $ETC — повторная установка подхватит их. Полностью: eskadra uninstall --purge"
   fi
   exit 0   # самого скрипта и панели больше нет — в меню возвращаться некуда
 }
@@ -605,7 +664,9 @@ usage() {
   reset-password [логин]  новый пароль администратора
   disable-2fa <логин>     отключить 2FA
   admins | backup | update [версия]
-  uninstall [--purge]     удалить программу (данные сохраняются) или полностью
+  uninstall [--purge] [--with-node] [--yes]
+                          удалить программу (данные сохраняются) или полностью; узел флота
+                          на этом сервере остаётся, если не указать --with-node
 EOF
 }
 
@@ -679,7 +740,7 @@ case "${1:-menu}" in
   admins) cli admins ;;
   backup) cli backup ;;
   update) cmd_update "${2:-}" ;;
-  uninstall) cmd_uninstall "${2:-}" ;;
+  uninstall) cmd_uninstall "${@:2}" ;;
   help|-h|--help) usage ;;
   *) usage; exit 2 ;;
 esac

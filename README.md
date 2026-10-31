@@ -71,7 +71,7 @@ An interactive numbered menu: **fleet** — overview, servers, users, configurat
 | `eskadra cert letsencrypt [ip / domain <domain>]` | issue a Let's Encrypt certificate |
 | `eskadra conflicts` | 3x-ui / xray / sing-box on this server: extend or remove |
 | `eskadra update [version]` | update |
-| `eskadra uninstall [--purge]` | remove the program (data is kept) or everything — database, keys, certificate and firewall ports |
+| `eskadra uninstall [--purge] [--with-node] [--yes]` | remove the program (data is kept) or everything — database, keys, certificate and firewall ports. If a fleet node (cores) also runs on the server, asks whether to keep or remove it; by default the node stays and keeps serving VPN, `--with-node` removes it too |
 
 ## Connecting nodes
 

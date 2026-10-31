@@ -1,7 +1,8 @@
 /**
  * Перенос панели на другой сервер (кнопка в «Настройках», только owner, с кодом 2FA).
  *
- * 1. Вход на новый сервер по SSH (root или пользователь с sudo; пароль или ключ) и проверки: там ещё нет Эскадры.
+ * 1. Вход на новый сервер по SSH (root или пользователь с sudo; пароль или ключ) и проверки: там нет другой панели.
+ *    Остатки прошлой неудачной попытки убираются (LEFTOVER_CLEANUP) — только файлы панели, узел флота остаётся.
  * 2. Новый адрес разрешается на узлах (fleetctl allow: firewall и from= у ключа панели) и в executor.ips —
  *    иначе новая панель не зайдёт на узлы. Узлы в режиме туннеля ходят к панели через свой адрес — им ничего не нужно.
  * 3. Снимок данных (база и мастер-ключ) с правками для нового места: главный сервер становится обычным узлом
@@ -12,8 +13,11 @@
  * 5. Новая панель отвечает — эта помечается перенесённой: фоновые задачи и бот останавливаются, изменения
  *    запрещены (две панели не управляют узлами одновременно). Вернуть управление можно кнопкой.
  */
+import { createHash } from 'node:crypto';
 import dns from 'node:dns/promises';
+import fs from 'node:fs';
 import https from 'node:https';
+import path from 'node:path';
 import net from 'node:net';
 import { DatabaseSync } from 'node:sqlite';
 import ssh2, { type Client as SshClient } from 'ssh2';
@@ -33,6 +37,31 @@ export interface MoveTarget {
   /** сертификат новой панели: Let's Encrypt на IP или на домен (A-запись домена уже должна вести на новый сервер) */
   tls: 'ip' | 'domain'; domain?: string;
 }
+
+/**
+ * Остатки неудачной попытки переноса на новом сервере — только файлы панели (как panel_purge в scripts/eskadra).
+ * Своя копия, а не «eskadra uninstall» оттуда: там может лежать старая версия, которая удаляла и общий с узлом /etc/eskadra.
+ * Таймер продления eskadra-certbot общий с узлом: при узле остаётся (переписанный панелью узел возвращает себе).
+ */
+export const LEFTOVER_CLEANUP = `
+for u in eskadra.service eskadra-selfnode.path eskadra-selfnode.service eskadra-update.path eskadra-update.service; do
+  systemctl disable --now "$u" >/dev/null 2>&1 || systemctl stop "$u" >/dev/null 2>&1 || true
+done
+rm -f /etc/systemd/system/eskadra.service /etc/systemd/system/eskadra-selfnode.* /etc/systemd/system/eskadra-update.*
+if [ -x /usr/local/sbin/fleet-core ]; then
+  if [ -f /etc/systemd/system/eskadra-certbot.service ] && ! grep -q cert-renew /etc/systemd/system/eskadra-certbot.service; then
+    /usr/local/sbin/fleet-core cert-status >/dev/null 2>&1 || true
+  fi
+else
+  systemctl disable --now eskadra-certbot.timer >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/eskadra-certbot.*
+fi
+systemctl daemon-reload
+pkill -u eskadra >/dev/null 2>&1 || true
+rm -rf /opt/eskadra /var/lib/eskadra /etc/eskadra/hooks /etc/eskadra/letsencrypt/live/eskadra /etc/eskadra/letsencrypt/archive/eskadra
+rm -f /usr/local/bin/eskadra /etc/eskadra/eskadra.env /etc/eskadra/.setup-done /etc/eskadra/letsencrypt/renewal/eskadra.conf
+userdel eskadra >/dev/null 2>&1 || true
+echo cleaned`;
 
 /** Куда перенесена панель (адрес новой); null — работает здесь. */
 export const movedTo = (db: Db) => getSetting<string | null>(db, 'panel.movedTo', null);
@@ -101,9 +130,21 @@ export async function movePanel(ctx: Ctx, t: MoveTarget, log: (l: string) => voi
     const root = (script: string, stdin: Buffer | string = '', timeoutMs?: number) =>
       exec(`${sudo}bash -c ${shq(script)}`, sudo.startsWith('sudo -S') ? Buffer.concat([Buffer.from(t.password + '\n'), Buffer.from(stdin)]) : stdin, timeoutMs);
 
-    const pre = await root('id -u; uname -m; test -f /etc/eskadra/eskadra.env && echo ESKADRA-EXISTS; command -v curl || command -v wget || echo NO-DOWNLOADER');
+    const pre = await root('id -u; uname -m; test -f /etc/eskadra/eskadra.env && echo ESKADRA-EXISTS; systemctl is-active --quiet eskadra && echo ESKADRA-RUNNING; '
+      + 'test -f /var/lib/eskadra/master.key && echo "MASTER=$(sha256sum /var/lib/eskadra/master.key | cut -c1-64)"; test -x /usr/local/sbin/fleet-core && echo NODE-HERE; '
+      + 'command -v curl || command -v wget || echo NO-DOWNLOADER');
     if (pre.code !== 0 || !/^0$/m.test(pre.out)) throw new Error(`нет прав root на новом сервере: ${mask(pre.out.trim(), secrets)}`);
-    if (pre.out.includes('ESKADRA-EXISTS')) throw new Error('на новом сервере уже установлена Эскадра — перенос ставит её с нуля; удалите её там (eskadra uninstall) или выберите другой сервер');
+    if (pre.out.includes('ESKADRA-EXISTS')) {
+      // панель там уже есть: если это остатки прошлой попытки переноса этой же панели (тот же мастер-ключ, или ключа нет —
+      // она не запускалась) и она не запущена, убираются только файлы панели; узел флота (ядра, конфиги, сертификаты) остаётся
+      const ours = createHash('sha256').update(fs.readFileSync(path.join(config.dataDir, 'master.key'))).digest('hex');
+      const theirs = pre.out.match(/^MASTER=([0-9a-f]{64})$/m)?.[1];
+      if (pre.out.includes('ESKADRA-RUNNING') || (theirs && theirs !== ours))
+        throw new Error('на новом сервере работает другая установка Эскадры — перенос ставит панель с нуля; удалите её там (eskadra uninstall, узел флота на сервере при этом остаётся) или выберите другой сервер');
+      log(`на ${ip} остались файлы панели от прошлой попытки переноса — убираю их${pre.out.includes('NODE-HERE') ? ', узел флота на этом сервере не трогаю' : ''}`);
+      const cl = await root(LEFTOVER_CLEANUP);
+      if (cl.code !== 0) throw new Error(`не удалось убрать остатки прошлой попытки: ${mask(cl.out.trim(), secrets)}`);
+    }
     if (pre.out.includes('NO-DOWNLOADER')) throw new Error('на новом сервере нет ни curl, ни wget — установите curl');
     if (!/x86_64|aarch64|arm64/.test(pre.out)) throw new Error(`архитектура нового сервера не поддерживается: ${pre.out.split('\n')[1]}`);
 
