@@ -111,6 +111,8 @@ export interface User {
   excluded_profiles: string[];
   effective: { trafficGb: number | null; devices: number | null; expireAt: string | null };
   traffic: { up: number; down: number; period: string };
+  /** трафик за всё время; since — первый месяц с трафиком (ГГГГ-ММ) */
+  trafficTotal: { up: number; down: number; since: string | null };
   allowedIps: Array<{ id: number; cidr: string; source: string; expires_at: string }>;
   devices: Array<{ ip: string; first_seen: string; last_seen: string; blocked: number }>;
   online: boolean; lastSeen: string | null;

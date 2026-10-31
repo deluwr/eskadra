@@ -44,7 +44,7 @@ export function UsersPage() {
         <div className="card-head"><Seg value={filter} onChange={setFilter} label="Статус" options={[['all', `Все · ${users?.length ?? 0}`], ['online', `Онлайн · ${onlineN}`], ['active', 'Активные'], ['expiring', 'Истекают'], ['disabled', 'Отключены']]} /></div>
         <div className="table-wrap" style={{ borderTop: '1px solid var(--line)' }}>
           <table>
-            <thead><tr>{th('name', 'Пользователь')}{th('traffic', 'Трафик за месяц')}{th('expire', 'Срок')}<th>Режимы</th>{th('devices', 'Устройства')}{th('profiles', 'Профилей')}{wlOn && <th>Белый список</th>}</tr></thead>
+            <thead><tr>{th('name', 'Пользователь')}{th('traffic', 'Трафик за месяц')}{th('total', 'За всё время')}{th('expire', 'Срок')}<th>Режимы</th>{th('devices', 'Устройства')}{th('profiles', 'Профилей')}{wlOn && <th>Белый список</th>}</tr></thead>
             <tbody>
               {sorted.map((u) => {
                 const used = u.traffic.up + u.traffic.down;
@@ -53,6 +53,7 @@ export function UsersPage() {
                   <tr key={u.id} className={`clickable ${sel === u.id ? 'sel' : ''}`} onClick={() => setSel(u.id)}>
                     <td><span className="flex" style={{ gap: 8, flexWrap: 'nowrap' }}><OnlineDot u={u} /><b>{u.name}</b></span>{u.note && <div className="k note-line" title={u.note}>{u.note}</div>}<div className="k">{u.limit_group}{u.status === 'disabled' && ` · отключён${u.disabled_reason ? `: ${u.disabled_reason}` : ''}`}</div></td>
                     <td><div className="stack" style={{ gap: 4 }}><span className="mono small">{fmtBytes(used)} / {u.effective.trafficGb ? `${u.effective.trafficGb} ГБ` : '∞'}</span>{u.effective.trafficGb ? <div className={`bar ${pct > 80 ? 'hot' : ''}`}><span style={{ width: `${pct}%` }} /></div> : null}</div></td>
+                    <td><span className="mono small" title={u.trafficTotal.since ? `с ${u.trafficTotal.since} · ↓${fmtBytes(u.trafficTotal.down)} ↑${fmtBytes(u.trafficTotal.up)}` : undefined}>{fmtBytes(u.trafficTotal.up + u.trafficTotal.down)}</span></td>
                     <td>{u.effective.expireAt ? <span className={soon(u) ? 'tag warn' : 'k'}>до {u.effective.expireAt.slice(0, 10)}</span> : <span className="k">бессрочно</span>}</td>
                     <td><span className="flex" style={{ gap: 4 }}>{u.modes.map((m) => <Tag key={m}>{m === 'via' ? 'вход' : 'напрямую'}</Tag>)}</span></td>
                     <td>{(() => { const on = u.devices.filter((d) => !d.blocked).length; const over = u.devices.length - on;
@@ -282,7 +283,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
 
 // ───── сортировка таблицы: клик по заголовку, повторный — обратный порядок; выбор помнит браузер ─────
 
-type SortKey = 'name' | 'traffic' | 'expire' | 'devices' | 'profiles';
+type SortKey = 'name' | 'traffic' | 'total' | 'expire' | 'devices' | 'profiles';
 interface Sort { key: SortKey; dir: 1 | -1 }
 const SORT_LS = 'users.sort';
 const readSort = (): Sort => { try { const v = JSON.parse(localStorage.getItem(SORT_LS) ?? '') as Sort; if (v && v.key && (v.dir === 1 || v.dir === -1)) return v; } catch { /* нет — по имени */ } return { key: 'name', dir: 1 }; };
@@ -294,6 +295,7 @@ function sortUsers(list: User[], s: Sort): User[] {
     switch (s.key) {
       case 'name': return u.name.toLocaleLowerCase();
       case 'traffic': return u.traffic.up + u.traffic.down;
+      case 'total': return u.trafficTotal.up + u.trafficTotal.down;
       case 'expire': return u.effective.expireAt ? Date.parse(u.effective.expireAt) : Number.MAX_SAFE_INTEGER;
       case 'devices': return u.devices.filter((d) => !d.blocked).length;
       case 'profiles': return u.profiles;

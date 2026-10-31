@@ -99,6 +99,8 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
 
   const view = (u: UserRow) => {
     const t = db.prepare('SELECT up, down FROM traffic WHERE user_id = ? AND period = ?').get(u.id, period()) as { up: number; down: number } | undefined;
+    // за всё время: помесячные записи не удаляются — сумма с первого месяца, когда был трафик
+    const total = db.prepare('SELECT COALESCE(SUM(up), 0) AS up, COALESCE(SUM(down), 0) AS down, MIN(period) AS since FROM traffic WHERE user_id = ?').get(u.id) as { up: number; down: number; since: string | null };
     const lim = effectiveLimits(ctx, u);
     const ips = db.prepare(`SELECT id, cidr, source, expires_at FROM allowed_ips WHERE user_id = ? AND expires_at > ? ORDER BY expires_at DESC`)
       .all(u.id, new Date().toISOString());
@@ -111,6 +113,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
       excluded_profiles: json<string[]>(u.excluded_profiles, []),
       effective: lim,
       traffic: { up: t?.up ?? 0, down: t?.down ?? 0, period: period() },
+      trafficTotal: { up: total.up, down: total.down, since: total.since },
       allowedIps: ips,
       // устройства (IP с открытыми соединениями) за последние минуты; blocked — сверх лимита
       devices: db.prepare('SELECT ip, first_seen, last_seen, blocked FROM user_devices WHERE user_id = ? ORDER BY first_seen, ip').all(u.id),
