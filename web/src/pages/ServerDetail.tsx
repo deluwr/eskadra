@@ -441,6 +441,29 @@ function PortsTab({ d }: { d: ServerDetail }) {
 
 // ───── доступ и SSH ─────
 
+/**
+ * Восстановить доступ панели к настроенному серверу: логин и пароль root (или ключ) — один раз, не сохраняются.
+ * Панель заходит с ними, заново кладёт свой ключ пользователю fleet, закрепляет ключ сервера и проходит настройку
+ * (sudo, nodekit, строгий режим) — как при подключении. Нужен, когда ключ панели на сервере пропал (переустановка, чистка).
+ */
+function RecoverAccessRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
+  const s = d.server;
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="row" style={open ? { flexDirection: 'column', alignItems: 'stretch' } : undefined}>
+      <div className="flex" style={{ justifyContent: 'space-between' }}>
+        <div className="row-text"><b>Восстановить доступ <Info>Пароль root панель не хранит: после подключения она заходит на сервер своим ключом под пользователем fleet, поэтому смена пароля root на её работу не влияет. Восстановление нужно, если ключ панели на сервере пропал (сервер переустановили, ключ удалили) — панель зайдёт с этими данными один раз и снова настроит доступ.</Info></b>
+          <span className="k">Логин и пароль root (или SSH-ключ) — используются один раз и не сохраняются.{s.fail_since ? ' Если сервер не отвечает совсем (таймаут), пароль не поможет: проверьте, что сервер включён и SSH открыт.' : ''}</span></div>
+        {!open && <button className="btn" onClick={() => setOpen(true)}>Ввести логин и пароль…</button>}
+      </div>
+      {open && <>
+        <AuthForm id={s.id} mgmtMode={s.mgmt_mode} onStarted={() => { setOpen(false); toast('Восстановление доступа запущено — ход на экране сервера'); onChange(); }} />
+        <span><button className="btn ghost sm" onClick={() => setOpen(false)}>Отмена</button></span>
+      </>}
+    </div>
+  );
+}
+
 function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const s = d.server;
   const { busy, error, run } = useAsync();
@@ -466,6 +489,7 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
       {s.ssh_mode === 'shell' && <Terminal id={s.id} />}
       </>}
       <MgmtRow d={d} onChange={onChange} />
+      {can('servers.manage') && s.stage >= 2 && <RecoverAccessRow d={d} onChange={onChange} />}
       <div className="row">
         <div className="row-text"><b>Прямой доступ пользователей <Info>Пользователи подключаются к этому серверу напрямую, а не только через вход: профиль «{s.name} · напрямую» попадает в подписки.</Info></b></div>
         <span className="flex">

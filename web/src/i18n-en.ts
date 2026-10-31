@@ -1577,6 +1577,14 @@ export const EN: Record<string, string> = {
   "Проверено {}": "Checked {}",
   "последняя версия {}": "latest version {}",
   "Последняя проверка {}: GitHub недоступен ({})": "Last check {}: GitHub is unreachable ({})",
+  // восстановление доступа к серверу по паролю root
+  "Восстановить доступ": "Restore access",
+  "Пароль root панель не хранит: после подключения она заходит на сервер своим ключом под пользователем fleet, поэтому смена пароля root на её работу не влияет. Восстановление нужно, если ключ панели на сервере пропал (сервер переустановили, ключ удалили) — панель зайдёт с этими данными один раз и снова настроит доступ.": "The panel doesn't store the root password: once connected it logs in with its own key as the fleet user, so changing the root password doesn't affect it. Restore access if the panel's key is gone from the server (reinstalled, key removed) — the panel logs in once with these credentials and sets up access again.",
+  "Логин и пароль root (или SSH-ключ) — используются один раз и не сохраняются.": "Root login and password (or an SSH key) — used once and not stored.",
+  " Если сервер не отвечает совсем (таймаут), пароль не поможет: проверьте, что сервер включён и SSH открыт.": " If the server doesn't respond at all (timeout), a password won't help: check that the server is up and SSH is open.",
+  "Если сервер не отвечает совсем (таймаут), пароль не поможет: проверьте, что сервер включён и SSH открыт.": "If the server doesn't respond at all (timeout), a password won't help: check that the server is up and SSH is open.",
+  "Ввести логин и пароль…": "Enter login and password…",
+  "Восстановление доступа запущено — ход на экране сервера": "Access restore started — progress is on the server page",
   // перенос панели завершён
   "Панель перенесена. Новый адрес:": "The panel has been moved. New address:",
   "Войдите там тем же логином и паролем — сессии не переносятся. Сохраните адрес: путь в нём секретный.": "Sign in there with the same login and password — sessions are not moved. Save the address: its path is secret.",
