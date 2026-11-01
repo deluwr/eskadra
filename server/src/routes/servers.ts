@@ -6,14 +6,13 @@ import dns from 'node:dns/promises';
 import { config } from '../config.js';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import ssh2 from 'ssh2';
 import { Ctx, coreMode, expectedPanelIps, guard, HttpError, type ServerRow } from '../ctx.js';
 import { can, roleOf } from '../roles.js';
 import { randomToken, sha256hex } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { credsFields, credsOf, newTunnel } from '../mgmt.js';
 import { checkLogin, installNodekit, onboardingRunning, runPreflight, snippetOf, startOnboarding } from '../onboard.js';
-import { fetchHostKey, withNodeLock, withSession } from '../ssh/executor.js';
+import { fetchHostKey, newSshKeyPair, withNodeLock, withSession } from '../ssh/executor.js';
 import { kitVersion } from '../nodekit.js';
 import { Ops, peersAllowed, startJob, XUI_TOKEN } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
@@ -30,7 +29,6 @@ import { linkTestOf } from '../spread.js';
 import { billingAlerts, paidDaysLeft } from '../billing.js';
 import { mgmtVia, viaLabel, viaOutbound } from '../via.js';
 
-const sshUtils = ssh2.utils;
 /** entry — вход (к нему подключаются пользователи, он же пересылает на выходы); exit — выход в интернет. relay/control — старые значения. */
 const ROLES = ['entry', 'exit', 'relay', 'control'] as const;
 
@@ -133,7 +131,7 @@ export function createServer(ctx: Ctx, body: z.infer<typeof createBody>, actor: 
     throw new HttpError(409, 'сервер с таким адресом и портом уже есть');
   db.prepare('INSERT OR IGNORE INTO groups (name) VALUES (?)').run(body.group);
   const id = 'srv-' + randomToken(4).toLowerCase().replace(/[^a-z0-9]/g, 'x');
-  const keys = sshUtils.generateKeyPairSync('ed25519', { comment: `fleet-panel/${id}` });
+  const keys = newSshKeyPair(`fleet-panel/${id}`);
   // по умолчанию обычная защита; уровень повышается в карточке сервера
   db.prepare(
     `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed)
@@ -186,7 +184,7 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     const dir = path.join(config.dataDir, 'selfnode');
     if (!fs.existsSync(dir)) throw new HttpError(409, 'на сервере нет помощника для этой операции — обновите панель: eskadra update');
     const id = 'srv-' + randomToken(4).toLowerCase().replace(/[^a-z0-9]/g, 'x');
-    const keys = sshUtils.generateKeyPairSync('ed25519', { comment: `fleet-panel/${id}` });
+    const keys = newSshKeyPair(`fleet-panel/${id}`);
     const resultFile = path.join(dir, 'result.json');
     fs.rmSync(resultFile, { force: true });
     fs.writeFileSync(path.join(dir, 'request.json'), JSON.stringify({ id, pubkey: keys.public.trim() }) + '\n');

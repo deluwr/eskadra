@@ -8,14 +8,14 @@ import ssh2 from 'ssh2';
 import { openDb, setSetting } from './db.js';
 import { Sealer } from './lib/crypto.js';
 import { Ctx } from './ctx.js';
-import { fingerprintOf, withSession, type SshTarget } from './ssh/executor.js';
+import { fingerprintOf, newSshKeyPair, withSession, type SshTarget } from './ssh/executor.js';
 import { pruneServerRefs } from './prune.js';
 
 const { Server, utils } = ssh2;
 
 /** SSH-сервер в процессе: exec отвечает своим именем; tcpip (ssh -J) пересылает только на разрешённый адрес. */
 async function sshServer(name: string, allowForward?: string): Promise<{ port: number; fp: string; forwards: string[]; close: () => void }> {
-  const key = utils.generateKeyPairSync('ed25519');
+  const key = newSshKeyPair();
   const parsed = utils.parseKey(key.private);
   const fp = fingerprintOf((Array.isArray(parsed) ? parsed[0]! : parsed).getPublicSSH()).fp;
   const forwards: string[] = [];
@@ -43,7 +43,7 @@ async function sshServer(name: string, allowForward?: string): Promise<{ port: n
   return { port: (srv.address() as net.AddressInfo).port, fp, forwards, close: () => srv.close() };
 }
 
-const clientKey = utils.generateKeyPairSync('ed25519').private;
+const clientKey = newSshKeyPair().private;
 
 test('через сервер: панель заходит на посредника и через него — на узел; команды выполняются на узле', async () => {
   const target = await sshServer('nl-1');

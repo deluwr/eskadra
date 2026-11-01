@@ -49,6 +49,20 @@ export class HostKeyError extends Error {}
 // Только ed25519: именно его отпечаток печатает bootstrap-сниппет (ssh-keygen -lf ..._ed25519_key.pub).
 const HOST_KEY_ALGOS = ['ssh-ed25519' as const];
 
+/**
+ * Пара ключей ed25519 для SSH. ssh2 изредка (около 0,5%) выдаёт закрытый ключ, который сам же не разбирает
+ * («Malformed OpenSSH private key»): с таким ключом панель не вошла бы на новый сервер. Такой — генерируем заново.
+ */
+export function newSshKeyPair(comment?: string): { private: string; public: string } {
+  for (let i = 0; i < 20; i++) {
+    const k = ssh2.utils.generateKeyPairSync('ed25519', comment ? { comment } : {});
+    const p = ssh2.utils.parseKey(k.private);
+    const key = Array.isArray(p) ? p[0] : p;
+    if (key && !(key instanceof Error)) return k;
+  }
+  throw new Error('не удалось создать ключ SSH');
+}
+
 export function fingerprintOf(key: Buffer): { fp: string; algo: string } {
   const len = key.readUInt32BE(0);
   const algo = key.subarray(4, 4 + len).toString('ascii');

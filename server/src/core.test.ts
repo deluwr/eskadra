@@ -174,3 +174,13 @@ test('node lock serializes operations per node', async () => {
   await Promise.all([slow('a', 30), slow('b', 1), withNodeLock('n2', async () => void order.push('c'))]);
   assert.deepEqual(order.filter((x) => x !== 'c'), ['a+', 'a-', 'b+', 'b-']);
 });
+
+test('ключ SSH панели: ssh2 разбирает каждый — без редкого «Malformed OpenSSH private key»', async () => {
+  const { newSshKeyPair } = await import('./ssh/executor.js');
+  for (let i = 0; i < 2000; i++) {
+    const k = newSshKeyPair('fleet-panel/srv-test');
+    const p = sshUtils.parseKey(k.private);
+    assert.ok(!(p instanceof Error) && !(Array.isArray(p) && p[0] instanceof Error), `ключ ${i} не разбирается`);
+    assert.match(k.public, /^ssh-ed25519 \S+ fleet-panel\/srv-test$/);
+  }
+});
