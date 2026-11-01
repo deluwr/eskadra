@@ -277,13 +277,20 @@ EOF
   chmod 755 "$ETC/hooks/pre.sh" "$ETC/hooks/post.sh"
 }
 
+# certbot по очереди с узлом флота на этом же сервере (общий каталог Let's Encrypt, fleet-core cb): иначе второй
+# экземпляр падает с «Another instance of Certbot is already running»
+certbot_q() {
+  install -d -m 700 "$LE"
+  if command -v flock >/dev/null; then flock -w 600 "$LE/.eskadra.lock" "$CERTBOT" "$@"; else "$CERTBOT" "$@"; fi
+}
+
 install_renew_timer() {
   cat > /etc/systemd/system/eskadra-certbot.service <<EOF
 [Unit]
 Description=Eskadra: renew Let's Encrypt certificate
 [Service]
 Type=oneshot
-ExecStart=$CERTBOT ${LE_ARGS[*]} renew -q
+ExecStart=$( command -v flock >/dev/null && echo "$(command -v flock) -w 900 $LE/.eskadra.lock " || true )$CERTBOT ${LE_ARGS[*]} renew -q
 EOF
   cat > /etc/systemd/system/eskadra-certbot.timer <<'EOF'
 [Unit]
@@ -373,14 +380,14 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
 
   ensure_certbot
   write_hooks
-  "$CERTBOT" "${LE_ARGS[@]}" delete --cert-name eskadra --non-interactive >/dev/null 2>&1 || true
+  certbot_q "${LE_ARGS[@]}" delete --cert-name eskadra --non-interactive >/dev/null 2>&1 || true
   args=("${LE_ARGS[@]}" certonly -q --standalone --non-interactive --agree-tos --cert-name eskadra --key-type ecdsa
         --pre-hook "$ETC/hooks/pre.sh" --post-hook "$ETC/hooks/post.sh" --deploy-hook "/usr/local/bin/eskadra cert-deploy")
   if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
   if [ "$kind" = ip ]; then args+=(--preferred-profile shortlived --ip-address "$ip"); else args+=(-d "$domain"); fi
   [ "${ESKADRA_LE_STAGING:-}" = 1 ] && args+=(--test-cert)   # для проверок: тестовый CA, без лимитов боевого
   echo "  выпускаю сертификат…"
-  "$CERTBOT" "${args[@]}" || die "Let's Encrypt не выдал сертификат (см. вывод выше). Частая причина — порт 80 закрыт снаружи: проверьте firewall в панели хостера (порт 80/tcp должен быть открыт для всех)."
+  certbot_q "${args[@]}" || die "Let's Encrypt не выдал сертификат (см. вывод выше). Частая причина — порт 80 закрыт снаружи: проверьте firewall в панели хостера (порт 80/tcp должен быть открыт для всех)."
   if [ "$kind" = ip ]; then
     # 6-дневный сертификат: продлевать за 3 дня до окончания (таймер проверяет дважды в сутки)
     local rc="$LE/renewal/eskadra.conf"
@@ -731,7 +738,10 @@ case "${1:-menu}" in
   cert) shift; cmd_cert "$@" ;;
   cert-deploy) cmd_cert_deploy ;;
   cert-migrate) cmd_cert_migrate ;;
-  cert-hooks) [ -f "$ETC/hooks/pre.sh" ] && write_hooks || true ;;   # обновление: хуки продления — в текущем виде
+  cert-hooks)   # обновление: хуки и таймер продления — в текущем виде
+    [ -f "$ETC/hooks/pre.sh" ] && write_hooks || true
+    # таймер узла (fleet-core cert-renew) продлевает и сертификат панели, по очереди с остальными — его не трогаем
+    if [ -f "$LE/renewal/eskadra.conf" ] && ! grep -qs cert-renew /etc/systemd/system/eskadra-certbot.service; then install_renew_timer; fi ;;
   self-node-apply) cmd_self_node_apply ;;
   update-apply) cmd_update_apply ;;
   conflicts) cmd_conflicts ;;

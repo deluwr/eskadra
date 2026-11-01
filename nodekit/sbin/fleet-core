@@ -607,7 +607,28 @@ UNIT
 # ───── сертификаты TLS для inbounds: /etc/eskadra/tls/<имя>/{fullchain,privkey}.pem ─────
 CB="$LIB/certbot/bin/certbot"
 LEDIR="$ETC/letsencrypt"
-cb() { "$CB" --config-dir "$LEDIR" --work-dir "$LEDIR/work" --logs-dir /var/log/eskadra-letsencrypt "$@"; }
+# certbot по очереди: выкат, таймер продления, кнопки панели (и панель Эскадры, если она на этом же сервере) работают
+# с одним каталогом Let's Encrypt, а certbot держит на нём блокировку и второй экземпляр сразу падает
+# («Another instance of Certbot is already running»). Ждём своей очереди (flock), а на чужой certbot — повторяем.
+cb() {
+  local i rc err pids
+  install -d -m 700 "$LEDIR"
+  for i in 1 2 3 4 5 6; do
+    rc=0; err="$(mktemp)"
+    if command -v flock >/dev/null; then
+      flock -E 75 -w 300 "$LEDIR/.eskadra.lock" "$CB" --config-dir "$LEDIR" --work-dir "$LEDIR/work" --logs-dir /var/log/eskadra-letsencrypt "$@" 2>"$err" || rc=$?
+    else
+      "$CB" --config-dir "$LEDIR" --work-dir "$LEDIR/work" --logs-dir /var/log/eskadra-letsencrypt "$@" 2>"$err" || rc=$?
+    fi
+    if [ "$rc" = 75 ]; then rm -f "$err"; echo "другой выпуск или продление сертификата идёт дольше 5 минут — повторите позже" >&2; return 1; fi
+    if [ "$rc" != 0 ] && grep -q 'Another instance of Certbot is already running' "$err" && [ "$i" -lt 6 ]; then rm -f "$err"; sleep 20; continue; fi
+    cat "$err" >&2; rm -f "$err"
+    if [ "$rc" != 0 ] && pids="$(pgrep -f 'certbot' | grep -vx "$$" | paste -sd, -)" && [ -n "$pids" ]; then
+      echo "certbot всё ещё занят другим процессом (pid $pids, $(ps -o etime= -p "${pids%%,*}" 2>/dev/null | tr -d ' ') с запуска) — если он завис: kill ${pids//,/ }" >&2
+    fi
+    return "$rc"
+  done
+}
 
 ensure_certbot() {  # certbot ≥ 5.4 (сертификаты на IP) в своём venv; системный certbot не трогаем
   if [ -x "$CB" ] && "$CB" --version 2>/dev/null | awk '{split($2,v,"."); exit !(v[1]>5 || (v[1]==5 && v[2]>=4))}'; then return; fi
@@ -737,7 +758,7 @@ cmd_cert_renew() {  # продление (таймер и кнопка в пан
   [ -x "$CB" ] || { echo "certbot не установлен"; return 0; }
   cert_hooks   # хуки старых nodekit останавливали только отмеченные службы — обновляем перед продлением
   [ -f "$UNITS/eskadra-certbot.timer" ] && ! systemctl is-active --quiet eskadra-certbot.timer && systemctl enable --now eskadra-certbot.timer >/dev/null 2>&1 || true
-  out="$("$CB" --config-dir "$LEDIR" --work-dir "$LEDIR/work" --logs-dir /var/log/eskadra-letsencrypt renew -q 2>&1)" || code=$?
+  out="$(cb renew -q 2>&1)" || code=$?
   install -d -m 755 "$ETC/tls"
   { echo "at=$(date +%s)"; echo "code=$code"
     echo "err=$(printf '%s' "$out" | grep -v '^\s*$' | tail -n 3 | tr '\n' ' ' | tr -d '\r' | cut -c1-400)"
