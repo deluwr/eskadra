@@ -76,13 +76,40 @@ export function UsersPage() {
   );
 }
 
+interface SubSettings { host: string; port: number; scheme: string; tls?: boolean; certNames?: string[]; certOk?: boolean; certHelper?: boolean }
+
+/** Выпуск сертификата панели на её домен и адрес подписок: ход — журнал root-помощника, в конце панель перезапускается. */
+function SubCertIssue({ onDone }: { onDone: () => void }) {
+  const { data: st } = usePoll(() => api.get<{ pending: boolean; running: boolean; exit: number | null; log: string[]; head?: string | null }>('/api/v1/update/status').catch(() => null), 3000);
+  // пока помощник не взял запрос, в журнале — прошлое обновление: его не показываем
+  const data = st && !st.pending && /^start .* cert /.test(st.head ?? '') ? st : st ? { ...st, running: false, exit: null, log: [] } : null;
+  const done = !!data && !data.running && data.exit !== null;
+  const [told, setTold] = useState(false);
+  useEffect(() => { if (done && !told) { setTold(true); onDone(); } }, [done, told, onDone]);
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <span className="k">{!data ? 'Панель перезапускается…' : data.running ? 'Выпускаю сертификат…' : data.exit === 0 ? 'Сертификат выпущен, панель перезапущена.' : data.exit !== null ? 'Выпуск не удался — причина в журнале.' : 'Жду помощника…'}</span>
+      {!!data?.log.length && <pre className="code">{data.log.join('\n')}</pre>}
+    </div>
+  );
+}
+
 function SubServiceCard() {
-  const { data, reload } = usePoll(() => api.get<{ sub: { host: string; port: number; scheme: string } }>('/api/v1/settings'), null);
+  const { data, reload } = usePoll(() => api.get<{ sub: SubSettings }>('/api/v1/settings'), null);
   const [host, setHost] = useState('');
   const [port, setPort] = useState('');
+  const [issuing, setIssuing] = useState(false);
   const { busy, error, run } = useAsync();
   useEffect(() => { if (data) { setHost(data.sub.host); setPort(String(data.sub.port || '')); } }, [data]);
   const save = (randomPort = false) => run(async () => { await api.put('/api/v1/settings/sub', { host, port: num(port), scheme: data?.sub.scheme ?? 'http', randomPort }); void reload(); });
+  const sub = data?.sub;
+  const isDomain = !!sub && /[A-Za-z]/.test(sub.host) && !sub.host.includes(':');
+  const issue = () => run(async () => {
+    if (!sub) return;
+    if (!(await ask(`Выпустить сертификат панели Let’s Encrypt на ${[...(sub.certNames ?? []).filter((n) => /[A-Za-z]/.test(n) && !n.includes(':')), sub.host].filter((v, i, a) => a.indexOf(v) === i).join(' и ')}? Домен ${sub.host} уже должен указывать на этот сервер. В конце панель перезапустится (около 10 секунд).`))) return;
+    await api.post('/api/v1/settings/sub/cert');
+    setIssuing(true);
+  });
   return (
     <section className="card pad flex" style={{ alignItems: 'flex-end', gap: 16 }} aria-label="Сервис подписок">
       <div className="row-text" style={{ flex: '1 1 260px' }}><h2>Сервис подписок</h2><span className="k">Порт выбран случайно при установке, а не известный по умолчанию — так сервис сложнее найти сканером. Адрес — тот, по которому клиенты достают главный сервер.</span></div>
@@ -90,6 +117,16 @@ function SubServiceCard() {
       <label className="fld" style={{ flex: '0 1 120px' }}>Порт<input className="inp mono" value={port} onChange={(e) => setPort(e.target.value)} /></label>
       <button className="btn" disabled={busy} onClick={() => void save(true)}>Случайный порт</button>
       <button className="btn pri" disabled={busy} onClick={() => void save()}>Сохранить</button>
+      {/* подписки по HTTPS — с сертификатом панели: адрес подписок должен в нём быть, иначе клиенты не примут подписку */}
+      {sub && sub.certOk === false && !issuing && (
+        <div className="alert warn stack" style={{ flex: '1 1 100%', gap: 8 }}>
+          <span>Сертификат выдан на <b>{(sub.certNames ?? []).join(', ')}</b>, а адрес подписок — <b>{sub.host}</b>. Браузеры покажут «Not secure», а VPN-клиенты не примут подписку по HTTPS.</span>
+          {isDomain && can('owner') && sub.certHelper
+            ? <span className="flex"><button className="btn sm pri" disabled={busy} onClick={() => void issue()}>Выпустить сертификат и на {sub.host}</button><span className="k">или укажите адрес подписок {(sub.certNames ?? [])[0]}</span></span>
+            : <span className="k">{isDomain ? <>Выпустите сертификат на оба имени на сервере панели: <code>eskadra cert letsencrypt domain {[...(sub.certNames ?? []), sub.host].join(',')}</code> — или укажите адрес подписок из сертификата.</> : 'Укажите адрес подписок из сертификата.'}</span>}
+        </div>
+      )}
+      {issuing && <div style={{ flex: '1 1 100%' }}><SubCertIssue onDone={() => void reload()} /></div>}
       <ErrorBox error={error} />
     </section>
   );

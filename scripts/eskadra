@@ -345,8 +345,8 @@ cmd_cert_migrate() {  # сертификат, выпущенный в общий
   fi
 }
 
-cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
-  local kind="${1:-}" domain="${2:-}" ip holder unit="" email args=()
+cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен[,домен…]] — первый — домен панели, остальные (адрес подписок) — в том же сертификате
+  local kind="${1:-}" domain="${2:-}" ip holder unit="" email args=() d doms=()
   ip="$(own_ip)"
   [ -n "$ip" ] || die "не удалось определить внешний IP этого сервера"
   if [ -z "$kind" ]; then
@@ -357,9 +357,15 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
   fi
   if [ "$kind" = domain ]; then
     [ -n "$domain" ] || domain="$(prompt "  Домен:")"
-    [[ "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "неверный домен"
-    local resolved; resolved="$(getent ahostsv4 "$domain" | awk 'NR==1{print $1}')"
-    [ "$resolved" = "$ip" ] || warn "домен $domain указывает на ${resolved:-ничто}, а сервер — $ip. Выпуск, скорее всего, не пройдёт."
+    IFS=, read -r -a doms <<< "${domain// /}"
+    [ "${#doms[@]}" -gt 0 ] || die "неверный домен"
+    local resolved
+    for d in "${doms[@]}"; do
+      [[ "$d" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "неверный домен: $d"
+      resolved="$(getent ahostsv4 "$d" | awk 'NR==1{print $1}')"
+      [ "$resolved" = "$ip" ] || warn "домен $d указывает на ${resolved:-ничто}, а сервер — $ip. Выпуск, скорее всего, не пройдёт."
+    done
+    domain="${doms[0]}"
   fi
 
   # порт 80 нужен валидатору Let's Encrypt (HTTP-01) на время выпуска и каждого продления
@@ -384,7 +390,7 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
   args=("${LE_ARGS[@]}" certonly -q --standalone --non-interactive --agree-tos --cert-name eskadra --key-type ecdsa
         --pre-hook "$ETC/hooks/pre.sh" --post-hook "$ETC/hooks/post.sh" --deploy-hook "/usr/local/bin/eskadra cert-deploy")
   if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
-  if [ "$kind" = ip ]; then args+=(--preferred-profile shortlived --ip-address "$ip"); else args+=(-d "$domain"); fi
+  if [ "$kind" = ip ]; then args+=(--preferred-profile shortlived --ip-address "$ip"); else for d in "${doms[@]}"; do args+=(-d "$d"); done; fi
   [ "${ESKADRA_LE_STAGING:-}" = 1 ] && args+=(--test-cert)   # для проверок: тестовый CA, без лимитов боевого
   echo "  выпускаю сертификат…"
   certbot_q "${args[@]}" || die "Let's Encrypt не выдал сертификат (см. вывод выше). Частая причина — порт 80 закрыт снаружи: проверьте firewall в панели хостера (порт 80/tcp должен быть открыт для всех)."
@@ -399,11 +405,14 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен]
   local host; if [ "$kind" = domain ]; then host="$domain"; else host="$ip"; fi
   setenv FLEET_PUBLIC_HOST "$host"
   setenv FLEET_SUB_TLS 1
-  cli sub-port "" "$host" >/dev/null
-  ok "сертификат Let's Encrypt выпущен на $host, продление — автоматически"
+  # адрес подписок: если он среди доменов сертификата (ESKADRA_SUB_HOST — из панели) — он, иначе — адрес панели
+  local sub="$host"
+  for d in "${doms[@]}"; do if [ "$d" = "${ESKADRA_SUB_HOST:-}" ]; then sub="$d"; fi; done
+  cli sub-port "" "$sub" >/dev/null
+  ok "сертификат Let's Encrypt выпущен на ${doms[*]:-$host}, продление — автоматически"
   [ "${ESKADRA_INSTALL:-}" = 1 ] && return 0   # установщик сам запустит панель
   restart
-  warn "подписки отдаются по HTTPS: https://$host:$(sub_port)/…"
+  warn "подписки отдаются по HTTPS: https://$sub:$(sub_port)/…"
   cmd_url
 }
 
@@ -488,6 +497,21 @@ cmd_update_apply() {
   req="$dir/request.json"
   [ -f "$req" ] || return 0
   ver="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","latest"))' "$req" 2>/dev/null || echo latest)"
+  # выпуск сертификата панели из «Сервиса подписок»: домен панели и адрес подписок в одном сертификате
+  local action doms subh
+  action="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action",""))' "$req" 2>/dev/null || true)"
+  if [ "$action" = cert ]; then
+    doms="$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1])).get("domains",[])))' "$req" 2>/dev/null || true)"
+    subh="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("subHost",""))' "$req" 2>/dev/null || true)"
+    rm -f "$req"
+    [[ "$doms" =~ ^[A-Za-z0-9.,-]{4,1000}$ ]] || doms=""
+    [[ "$subh" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || subh=""
+    : > "$dir/log"; chown eskadra:eskadra "$dir/log"; chmod 640 "$dir/log"
+    echo "start $(date -Is) cert $doms" >> "$dir/log"
+    if [ -n "$doms" ]; then ( ESKADRA_SUB_HOST="$subh" cmd_letsencrypt domain "$doms" ) >> "$dir/log" 2>&1 || code=$?; else echo "неверный список доменов" >> "$dir/log"; code=1; fi
+    echo "exit=$code" >> "$dir/log"
+    return 0
+  fi
   rm -f "$req"
   [[ "$ver" =~ ^(latest|v?[0-9]+\.[0-9]+\.[0-9]+)$ ]] || ver=latest
   : > "$dir/log"; chown eskadra:eskadra "$dir/log"; chmod 640 "$dir/log"
@@ -666,7 +690,7 @@ usage() {
   port [N|random]         порт панели (ufw обновится)
   path [имя]              секретный путь панели
   sub-port [N|random]     порт подписок
-  cert [show|letsencrypt [ip|domain <домен>]|set <cert> <key>]
+  cert [show|letsencrypt [ip|domain <домен>[,<домен>…]]|set <cert> <key>]
   conflicts               3x-ui / xray / sing-box на этом сервере: дополнить или удалить
   reset-password [логин]  новый пароль администратора
   disable-2fa <логин>     отключить 2FA

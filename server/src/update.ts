@@ -2,6 +2,7 @@
  * Обновление из панели (кнопка «Обновить»): панель работает без root, поэтому кладёт запрос с версией
  * в $DATA/update/request.json, а root-юнит eskadra-update.path запускает `eskadra update` и пишет журнал.
  */
+import { X509Certificate } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -19,6 +20,32 @@ export function requestUpdate(version: string) {
   fs.renameSync(f + '.new', f);
 }
 
+/**
+ * Выпуск сертификата панели на несколько доменов (например, панель и адрес подписок) — тем же root-помощником:
+ * `eskadra update-apply` видит action=cert и выпускает Let's Encrypt; ход — в том же журнале, что и обновление.
+ */
+export function requestCert(domains: string[], subHost: string) {
+  fs.mkdirSync(dir(), { recursive: true, mode: 0o750 });
+  const f = path.join(dir(), 'request.json');
+  fs.writeFileSync(f + '.new', JSON.stringify({ action: 'cert', domains, subHost, at: new Date().toISOString() }), { mode: 0o640 });
+  fs.renameSync(f + '.new', f);
+}
+
+/** Имена в сертификате панели (DNS и IP из subjectAltName); нет сертификата — пусто. */
+export function panelCertNames(): string[] {
+  if (!config.tlsCert) return [];
+  try {
+    const san = new X509Certificate(fs.readFileSync(config.tlsCert)).subjectAltName ?? '';
+    return san.split(',').map((s) => s.trim().replace(/^(DNS|IP Address):/, '')).filter(Boolean);
+  } catch { return []; }
+}
+
+/** Имя покрыто сертификатом: точно или *.зона на один уровень. */
+export const certCovers = (names: string[], host: string) => {
+  const h = host.toLowerCase();
+  return names.some((n) => { const x = n.toLowerCase(); return x === h || (x.startsWith('*.') && h.includes('.') && h.slice(h.indexOf('.') + 1) === x.slice(2)); });
+};
+
 /** Журнал последнего обновления: идёт ли сейчас, код завершения, последние строки. */
 export function updateStatus() {
   const f = path.join(dir(), 'log');
@@ -33,6 +60,7 @@ export function updateStatus() {
     running: !exitLine && Date.now() - mtime.getTime() < 30 * 60_000,
     exit: exitLine ? Number(exitLine.slice(5)) : null,
     log: lines.slice(-40),
+    head: lines[0] ?? null,   // «start <время> <версия>» или «start <время> cert <домены>» — что за запуск
     at: mtime.toISOString(),
   };
 }

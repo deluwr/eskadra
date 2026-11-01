@@ -17,7 +17,7 @@ import { Vpn, json, period } from '../vpn.js';
 import { backupPassword, backupSettings, saveBackupSettings, type Backups } from '../backup.js';
 import type { Bot } from '../bot.js';
 import { attentionOf } from '../attention.js';
-import { listSnapshots, MIN_ROLLBACK_WITH_DATA, requestUpdate, snapshotDb, stageRollbackData, updateHelperInstalled, updateStatus } from '../update.js';
+import { certCovers, listSnapshots, MIN_ROLLBACK_WITH_DATA, panelCertNames, requestCert, requestUpdate, snapshotDb, stageRollbackData, updateHelperInstalled, updateStatus } from '../update.js';
 import { armRestore, decryptBackup, stageRestore } from '../restorelib.js';
 import { config } from '../config.js';
 import { NOTIFY } from '../botadmin.js';
@@ -275,7 +275,13 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   app.get('/api/v1/settings', async () => ({
     lang: getSetting(db, 'ui.lang', 'ru'),
     executorIps: ctx.executorIps(),
-    sub: { host: getSetting(db, 'sub.host', ''), port: getSetting(db, 'sub.port', 0), scheme: getSetting(db, 'sub.scheme', 'http') },
+    sub: (() => {
+      const host = getSetting(db, 'sub.host', '');
+      // подписки по HTTPS отдаются с сертификатом панели: адрес подписок должен в нём быть, иначе клиенты не примут
+      const names = config.subTls ? panelCertNames() : [];
+      return { host, port: getSetting(db, 'sub.port', 0), scheme: getSetting(db, 'sub.scheme', 'http'), tls: config.subTls, certNames: names,
+        certOk: !config.subTls || !host || !names.length || certCovers(names, host), certHelper: updateHelperInstalled() };
+    })(),
     knockTtlHours: getSetting(db, 'knock.ttlHours', 12),
     // белый список IP пользователей — дополнительная опция: включается скрытностью группы S3/S4
     whitelistOn: !!db.prepare(`SELECT 1 FROM groups WHERE stealth IN ('S3','S4')`).get(),
@@ -355,6 +361,24 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     setSetting(db, 'executor.ips', uniq);
     audit(db, who(req), 'executor.ips.set', undefined, { ips: uniq });
     return { ips: uniq };
+  });
+
+  /**
+   * Сертификат панели — на её домен и адрес подписок сразу (Let's Encrypt, root-помощник eskadra-update): подписки по
+   * HTTPS отдаются с сертификатом панели. Ход — в журнале обновления (/api/v1/update/status); в конце панель перезапускается.
+   */
+  app.post('/api/v1/settings/sub/cert', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const host = getSetting<string>(db, 'sub.host', '');
+    const dom = /^(?=.{4,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
+    if (!dom.test(host)) throw new HttpError(400, 'адрес подписок — не домен: сертификат Let’s Encrypt выпускается на домен (для IP он уже на IP сервера)');
+    if (!updateHelperInstalled()) throw new HttpError(409, 'помощник обновления не установлен — выполните на сервере панели: eskadra cert letsencrypt domain <домены через запятую>');
+    if (updateStatus().running) throw new HttpError(409, 'идёт обновление или выпуск — дождитесь окончания');
+    const panel = (process.env.FLEET_PUBLIC_HOST ?? '').toLowerCase();
+    // имена нынешнего сертификата (домен панели) остаются, адрес подписок добавляется
+    const domains = [...new Set([...(dom.test(panel) ? [panel] : []), ...panelCertNames().map((n) => n.toLowerCase()).filter((n) => dom.test(n)), host.toLowerCase()])];
+    requestCert(domains, host);
+    audit(db, who(req), 'panel.cert_request', undefined, { domains });
+    return { domains };
   });
 
   app.put('/api/v1/settings/sub', { preHandler: guard(ctx, 'settings.edit') }, async (req) => {
