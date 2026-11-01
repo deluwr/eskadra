@@ -4,7 +4,7 @@ import { coreMode, type Ctx, type ServerRow, type UserRow } from './ctx.js';
 import { audit } from './lib/audit.js';
 import { getSetting, setSetting } from './db.js';
 import { cmpVersion, listReleases } from './releases.js';
-import { Ops } from './ops.js';
+import { Ops, renderHash } from './ops.js';
 import { effectiveLimits, json, period } from './vpn.js';
 import type { Backups } from './backup.js';
 import type { Bot } from './bot.js';
@@ -15,9 +15,18 @@ import { movedTo } from './migrate.js';
 
 const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60_000 : 0);
 
+/**
+ * Сколько проверок подряд узел должен не ответить, чтобы считаться упавшим (≈ 2 мин). Одиночный сбой SSH
+ * (потерянный пакет на рукопожатии, фильтрация на границе) — не падение: без уведомлений, в аудите как server.blip.
+ */
+const DOWN_AFTER_FAILS = 3;
+
 export class Workers {
   private readonly ops: Ops;
   private timers: NodeJS.Timeout[] = [];
+  /** Неудачные heartbeat подряд по узлу и узлы, о падении которых уже сообщили. */
+  private fails = new Map<string, number>();
+  private downNotified = new Set<string>();
   private busy = new Set<string>();
 
   constructor(private readonly ctx: Ctx, private readonly log: FastifyBaseLogger, private readonly backups: Backups, private readonly bot: Bot) {
@@ -129,9 +138,15 @@ export class Workers {
         const r = await this.ctx.onNode(s, (n) => n.op(['ping'], { timeoutMs: 15_000 }));
         if (r.stdout.trim() !== 'pong') throw new Error('no pong');
         if (s.fail_since) {
-          audit(this.ctx.db, 'system', 'server.recovered', s.id, { downMin: Math.round(minutesSince(s.fail_since)) });
-          void this.bot.notifyAdmins(`✅ ${s.name} снова на связи (не отвечал ${Math.max(1, Math.round(minutesSince(s.fail_since)))} мин)`, undefined, 'down');
+          const downMin = Math.round(minutesSince(s.fail_since));
+          // после перезапуска панели счётчик пуст — долгий сбой узнаём по длительности
+          if (this.downNotified.has(s.id) || downMin >= DOWN_AFTER_FAILS) {
+            audit(this.ctx.db, 'system', 'server.recovered', s.id, { downMin });
+            void this.bot.notifyAdmins(`✅ ${s.name} снова на связи (не отвечал ${Math.max(1, downMin)} мин)`, undefined, 'down');
+          } else audit(this.ctx.db, 'system', 'server.blip', s.id, { fails: this.fails.get(s.id) ?? 1 });
         }
+        this.fails.delete(s.id);
+        this.downNotified.delete(s.id);
         this.ctx.updateServer(s.id, { last_seen_at: new Date().toISOString(), fail_since: null });
         // таймер подтверждения firewall истёк без подтверждения → узел сам откатил правила
         if (s.fw_mode === 'pending' && s.fw_pending_until && Date.parse(s.fw_pending_until) < Date.now() - 15_000) {
@@ -140,8 +155,11 @@ export class Workers {
         }
       } catch {
         const since = s.fail_since ?? new Date().toISOString();
-        if (!s.fail_since) {
-          this.ctx.updateServer(s.id, { fail_since: since });
+        if (!s.fail_since) this.ctx.updateServer(s.id, { fail_since: since });
+        const fails = (this.fails.get(s.id) ?? 0) + 1;
+        this.fails.set(s.id, fails);
+        if (fails >= DOWN_AFTER_FAILS && !this.downNotified.has(s.id)) {
+          this.downNotified.add(s.id);
           void this.bot.notifyAdmins(`⚠️ ${s.name} не отвечает панели`, undefined, 'down');
         }
         if (s.checklist_passed_at && minutesSince(since) > threshold) {
@@ -285,6 +303,12 @@ export class Workers {
   /** Переприменение конфигов узлов, где поменялись пользователи или шаблоны. */
   async syncDirty() {
     for (const s of this.ctx.servers().filter((x) => x.config_dirty && x.sudo_mode === 'restricted')) {
+      // конфиг узла не изменился (markDirty() отмечает все узлы, а выкат уже применил свои) — ядра не перезапускаем:
+      // перезапуск рвёт соединения всех пользователей узла
+      if (coreMode(s) !== 'xui' && getSetting<string>(this.ctx.db, `applied.${s.id}`, '') === renderHash(this.ops.vpn, s)) {
+        this.ctx.updateServer(s.id, { config_dirty: 0 });
+        continue;
+      }
       try {
         await this.ctx.onNode(s, (n) => this.ops.applyServer(this.ctx.server(s.id), n, (l) => this.log.info(`${s.name}: ${l}`)));
       } catch (e) {
