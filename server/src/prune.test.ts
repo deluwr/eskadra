@@ -13,8 +13,8 @@ test('удалённый сервер: ссылки на него убирают
   const ctx = new Ctx(db, new Sealer(Buffer.alloc(32, 2)));
   for (const id of ['srv-pl', 'srv-fi', 'srv-relay'])
     db.prepare(`INSERT INTO servers (id, name, host, role, key_pub, key_priv_sealed) VALUES (?, ?, '203.0.113.1', 'exit', 'k', 'x')`).run(id, id);
-  // как «quadro» на боевой панели: удалённый srv-old — в серверах и первым в порядке «Авто»
-  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids, entry_id, entry_port, settings) VALUES ('t', 'quadro', 'xray', 'vless', 443, '[]', ?, 'srv-relay', 8443, ?)`)
+  // удалённый srv-old — в серверах и первым в порядке «Авто»
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids, entry_id, entry_port, settings) VALUES ('t', 'multi', 'xray', 'vless', 443, '[]', ?, 'srv-relay', 8443, ?)`)
     .run(JSON.stringify(['srv-pl', 'srv-fi', 'srv-old']), JSON.stringify({ autoMode: 'order', exitOrder: ['srv-old', 'srv-pl', 'srv-fi'], domains: { 'srv-old': 'old.example', 'srv-pl': 'pl.example' } }));
   db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids, entry_id, entry_port) VALUES ('t2', 'via-old', 'xray', 'vless', 443, '[]', '["srv-pl"]', 'srv-gone', 9443)`).run();
   db.prepare(`INSERT INTO users (id, name, sub_token, knock_token, node_ids) VALUES ('u-1', 'ann', 's', 'k', '["srv-old","srv-pl"]')`).run();
@@ -24,7 +24,7 @@ test('удалённый сервер: ссылки на него убирают
   setSetting(db, 'applied.srv-old', 'x');
 
   const fixed = pruneServerRefs(ctx);
-  assert.deepEqual(fixed.sort(), ['конфигурация quadro', 'конфигурация via-old', 'пользователь ann', 'пользователь bob', 'прокси бота', 'роль seller'].sort());
+  assert.deepEqual(fixed.sort(), ['конфигурация multi', 'конфигурация via-old', 'пользователь ann', 'пользователь bob', 'прокси бота', 'роль seller'].sort());
   const t = db.prepare(`SELECT * FROM templates WHERE id = 't'`).get() as { node_ids: string; settings: string; revision: number };
   assert.deepEqual(JSON.parse(t.node_ids), ['srv-pl', 'srv-fi']);
   assert.deepEqual(JSON.parse(t.settings).exitOrder, ['srv-pl', 'srv-fi']);
@@ -52,13 +52,13 @@ test('3x-ui: режим «внутри 3x-ui» только при работа�
 test('удалённая конфигурация: убирается из выбора пользователей и области ролей — сохранение пользователя не падает', () => {
   const db = openDb(fs.mkdtempSync(path.join(os.tmpdir(), 'esk-prune-t-')));
   const ctx = new Ctx(db, new Sealer(Buffer.alloc(32, 2)));
-  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids) VALUES ('t-new', 'fleet-vless', 'xray', 'vless', 443, '[]', '[]')`).run();
-  db.prepare(`INSERT INTO users (id, name, sub_token, knock_token, template_ids) VALUES ('u-1', 'testuser', 's', 'k', '["t-old","t-new"]')`).run();
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids) VALUES ('t-new', 'new-config', 'xray', 'vless', 443, '[]', '[]')`).run();
+  db.prepare(`INSERT INTO users (id, name, sub_token, knock_token, template_ids) VALUES ('u-1', 'carol', 's', 'k', '["t-old","t-new"]')`).run();
   db.prepare(`INSERT INTO users (id, name, sub_token, knock_token, template_ids) VALUES ('u-2', 'bob', 's2', 'k2', '["t-old"]')`).run();
   db.prepare(`INSERT INTO users (id, name, sub_token, knock_token) VALUES ('u-3', 'all', 's3', 'k3')`).run();
   db.prepare(`INSERT INTO roles (id, name, scope) VALUES ('r', 'seller', '{"templates":["t-old","t-new"]}')`).run();
 
-  assert.deepEqual(pruneTemplateRefs(ctx).sort(), ['пользователь bob', 'пользователь testuser', 'роль seller']);
+  assert.deepEqual(pruneTemplateRefs(ctx).sort(), ['пользователь bob', 'пользователь carol', 'роль seller']);
   const tpl = (id: string) => (db.prepare('SELECT template_ids FROM users WHERE id = ?').get(id) as { template_ids: string | null }).template_ids;
   assert.deepEqual(JSON.parse(tpl('u-1')!), ['t-new']);
   assert.deepEqual(JSON.parse(tpl('u-2')!), [], 'была только удалённая — «ни одной», а не «все»');

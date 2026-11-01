@@ -14,6 +14,7 @@ import { buildInstallScript, readKitFile, SUDO_DROP_BOOTSTRAP, SUDO_NARROW_WRITE
 import { Ops, startJob, type JobHandle } from './ops.js';
 import { viaOutbound, type BootstrapVia } from './via.js';
 import { beaconAnswers, beaconScript, beaconStopScript, destScript, diagScript, explainTunnel, openScript, parseDest, parseTunnelDiag, snippetFailure, tlsReachable, TUNNEL_PORT_CANDIDATES } from './tunnelcheck.js';
+import { twinOf } from './twins.js';
 
 const { Client } = ssh2;
 
@@ -115,6 +116,9 @@ export async function bootstrapWithAuth(ctx: Ctx, r: ServerRow, auth: BootstrapA
     } finally {
       client.end();
     }
+    // тот же сервер уже есть в панели — вторая запись стирала бы его конфигурации при выкате (twins.ts)
+    const twin = twinOf(ctx, { id: r.id, host_key_fp: seenFp });
+    if (twin) throw new Error(`это тот же сервер, что «${twin.name}» (одинаковый ключ хоста) — он уже есть в панели; удалите эту запись и пользуйтесь «${twin.name}»`);
     ctx.updateServer(r.id, { host_key_fp: seenFp, host_key_pending_fp: null, host_key_algo: 'ssh-ed25519' });
     // сервер недоступен из РФ целиком: туннель управления дальше идёт через тот же прокси (цепочка в mgmt.ts)
     if (auth.via && auth.keepVia && r.mgmt_mode === 'tunnel') {
@@ -351,6 +355,8 @@ export function startOnboarding(ctx: Ctx, id: string, who: string, auth?: Bootst
         job.log('шаг 1/5: сниппет выполнен вручную — получаю ключ сервера');
         const t = ctx.target(r);
         const hk = await fetchHostKey(t.host, t.port, 15_000, t);
+        const twin = twinOf(ctx, { id, host_key_fp: hk.fp });
+        if (twin) throw new Error(`это тот же сервер, что «${twin.name}» (одинаковый ключ хоста) — он уже есть в панели; удалите эту запись и пользуйтесь «${twin.name}»`);
         ctx.updateServer(id, { host_key_fp: hk.fp, host_key_algo: hk.algo, host_key_pending_fp: null });
         job.log(`ключ сервера ${hk.fp} закреплён`);
         r = ctx.server(id);

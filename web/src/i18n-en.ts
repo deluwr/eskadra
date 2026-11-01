@@ -1577,6 +1577,17 @@ export const EN: Record<string, string> = {
   "Проверено {}": "Checked {}",
   "последняя версия {}": "latest version {}",
   "Последняя проверка {}: GitHub недоступен ({})": "Last check {}: GitHub is unreachable ({})",
+  // один сервер двумя записями — объединение
+  "У них одинаковый ключ хоста: это одна машина, записанная в панели дважды. У каждой записи свои конфигурации, а выкат переписывает конфиг сервера целиком, поэтому выкат одной записи стирает конфигурации другой. Пока записи не объединены, выкат на этот сервер не запускается.": "They have the same host key: it is one machine added to the panel twice. Each record has its own configurations, and a rollout rewrites the server config entirely, so rolling out one record wipes the other's configurations. Until the records are merged, rollouts to this server don't run.",
+  "После объединения останется одна запись: конфигурации, пользователи и пароли обеих — без изменений. Адрес — {}: конфигурации с сертификатом на IP ходят на него, со «своим доменом» — на свой домен.": "After merging one record remains: configurations, users and passwords of both stay unchanged. Address — {}: configurations with an IP certificate connect to it, those with “own domain” — to their domain.",
+  "«{}» и «{}» — один и тот же сервер.": "“{}” and “{}” are the same server.",
+  "Какое имя оставить": "Name to keep",
+  "Объединить": "Merge",
+  "Объединить «{}» и «{}» в одну запись «{}»? Входы, конфигурации, пользователи и пароли перейдут без изменений, вторая запись исчезнет. После этого выкатите конфигурации этого сервера.": "Merge “{}” and “{}” into one record “{}”? Entries, configurations, users and passwords move over unchanged; the second record disappears. Then roll out this server's configurations.",
+  "Объединено — выкатите конфигурации этого сервера": "Merged — roll out this server's configurations",
+  "Объединено. Совпали порты {} — смените порт в одной из конфигураций": "Merged. Ports {} collide — change the port in one of the configurations",
+  "{} — домен": "{} — domain",
+  "Клиенты подключаются к этому серверу по этому домену, и сертификат Let’s Encrypt выпускается на него. A-запись домена должна указывать на сервер.": "Clients connect to this server by this domain, and the Let’s Encrypt certificate is issued for it. The domain's A record must point to the server.",
   // сертификат панели и адрес подписок
   "Выпускаю сертификат…": "Issuing the certificate…",
   "Сертификат выпущен, панель перезапущена.": "Certificate issued, the panel has restarted.",

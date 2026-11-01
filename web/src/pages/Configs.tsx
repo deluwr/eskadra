@@ -474,7 +474,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
           {st.certMode === 'domain' && (
             <div className="grid g2">
               {usedIds.length ? usedIds.map((id) => (
-                <label key={id} className="fld">Домен для {servers.find((x) => x.id === id)?.name ?? id}
+                <label key={id} className="fld"><span>{`${servers.find((x) => x.id === id)?.name ?? id} — домен`} <Info>Клиенты подключаются к этому серверу по этому домену, и сертификат Let’s Encrypt выпускается на него. A-запись домена должна указывать на сервер.</Info></span>
                   <input className="inp mono" value={st.domains[id] ?? ''} onChange={(e) => setSt({ domains: { ...st.domains, [id]: e.target.value.trim() } })} placeholder="de.example.com" />
                 </label>
               )) : <span className="k">Сначала выберите серверы ниже.</span>}

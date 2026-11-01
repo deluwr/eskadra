@@ -81,6 +81,7 @@ import { buildKitBundle, kitVersion } from './nodekit.js';
 import { parseCertStatus, type TlsState } from './certs.js';
 import { cfOriginFor, installCf } from './tlsissue.js';
 import { pruneTemplateRefs } from './prune.js';
+import { twinOf, twinText } from './twins.js';
 import { parseSections } from './preflight.js';
 
 export interface JobHandle { id: number; log: (line: string) => void; finish: (s: 'ok' | 'failed') => void }
@@ -328,6 +329,9 @@ export class Ops {
 
   /** Отрендерить и применить все конфиги узла; ядро без inbounds останавливается. */
   async applyServer(s: ServerRow, n: NodeSession, log: (l: string) => void) {
+    // тот же сервер второй записью: конфиг собирается из входов одной записи и стёр бы входы другой (twins.ts)
+    const twin = twinOf(this.ctx, s);
+    if (twin) throw new Error(twinText(s, twin));
     const cores = json<Record<string, unknown>>(s.cores, {});
     const xuiMode = coreMode(s) === 'xui';
     if (xuiMode) {

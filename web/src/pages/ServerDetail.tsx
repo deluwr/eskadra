@@ -37,6 +37,7 @@ export function ServerDetailPage({ id }: { id: string }) {
       </div>
       <ErrorBox error={error} />
       {s.fail_since && <div className="alert fail">Нет связи с сервером с {fmtTime(s.fail_since)}.{s.protection_target !== 'P1' ? ' Если сбой продлится дольше порога из настроек, проверку перед защитой придётся пройти заново.' : ''}</div>}
+      {s.twin && <TwinMerge s={s} twin={s.twin} />}
       {s.fw_mode === 'pending' && <PendingBanner d={d} onChange={reload} />}
 
       {onboarding ? <Onboarding d={d} onChange={reload} /> : (
@@ -253,6 +254,35 @@ function AuthForm({ id, mgmtMode, onStarted }: { id: string; mgmtMode: string; o
       <div><button className="btn pri" disabled={busy || (channel === 'jump' ? !jump || (!configured && !hasSecret) : !hasSecret || !viaReady(via))}>Подключить</button></div>
       <ErrorBox error={error} />
     </form>
+  );
+}
+
+/**
+ * Тот же сервер второй записью (одинаковый ключ хоста): пока записей две, выкат одной стирает конфигурации другой,
+ * поэтому выкат на сервер не запускается. Админ объединяет записи и выбирает, какое имя останется.
+ */
+function TwinMerge({ s, twin }: { s: Server; twin: NonNullable<Server['twin']> }) {
+  const { busy, error, run } = useAsync();
+  const [name, setName] = useState(s.name);
+  const ip = [s.host, twin.host].find((h) => /^[0-9.]+$|:/.test(h));
+  const merge = () => run(async () => {
+    if (!(await ask(`Объединить «${s.name}» и «${twin.name}» в одну запись «${name}»? Входы, конфигурации, пользователи и пароли перейдут без изменений, вторая запись исчезнет. После этого выкатите конфигурации этого сервера.`))) return;
+    const r = await api.post<{ server: Server; clash: string[] }>(`/api/v1/servers/${s.id}/merge`, { with: twin.id, name });
+    toast(r.clash.length ? `Объединено. Совпали порты ${r.clash.join(', ')} — смените порт в одной из конфигураций` : 'Объединено — выкатите конфигурации этого сервера', r.clash.length ? 'info' : 'ok');
+    location.hash = `#/servers/${r.server.id}`;
+  });
+  return (
+    <div className="alert fail stack" style={{ gap: 10 }}>
+      <span><b>{`«${s.name}» и «${twin.name}» — один и тот же сервер.`}</b> У них одинаковый ключ хоста: это одна машина, записанная в панели дважды. У каждой записи свои конфигурации, а выкат переписывает конфиг сервера целиком, поэтому выкат одной записи стирает конфигурации другой. Пока записи не объединены, выкат на этот сервер не запускается.</span>
+      <span className="k">{`После объединения останется одна запись: конфигурации, пользователи и пароли обеих — без изменений. Адрес — ${ip ?? s.host}: конфигурации с сертификатом на IP ходят на него, со «своим доменом» — на свой домен.`}</span>
+      <div className="flex" style={{ alignItems: 'flex-end', gap: 10 }}>
+        <span className="stack" style={{ gap: 4 }}><span className="k">Какое имя оставить</span>
+          <Seg label="Имя сервера" value={name} onChange={setName} options={[[s.name, s.name], [twin.name, twin.name]]} />
+        </span>
+        <button className="btn pri" disabled={busy || !can('servers.manage')} onClick={() => void merge()}>Объединить</button>
+      </div>
+      <ErrorBox error={error} />
+    </div>
   );
 }
 

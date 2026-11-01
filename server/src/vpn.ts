@@ -112,7 +112,7 @@ export class Vpn {
         if (!s) continue;
         if (ib.kind === 'direct' && modes.includes('direct') && s.direct_access && this.userAllows(u, s.id, t.id)) {
           out.push({ key: `d:${t.id}:${s.id}`, name: `${s.name} · ${L.direct}${suffix}`, mode: 'direct', template: t,
-            host: s.host, port: ib.port, credKey: `t:${t.id}`, inbound: ib, targetName: s.name });
+            host: this.clientHost(this.spec(t), s), port: ib.port, credKey: `t:${t.id}`, inbound: ib, targetName: s.name });
         }
         if (ib.kind === 'relay' && modes.includes('via') && natRelayOf(this.spec(t))) {
           // пересылка ядром ОС: один выход, клиент договаривается с его inbound'ом (пароль «вход → выход» знает выход)
@@ -125,16 +125,27 @@ export class Vpn {
         if (ib.kind === 'relay' && modes.includes('via')) {
           const targets = this.relayTargets(t).filter((x) => this.userAllows(u, x.id, t.id));
           if (!targets.length) continue;
+          const at = this.clientHost(entrySpec(this.spec(t)), s);
           // «вход → авто» — только если авто-выбор выхода у конфигурации включён
           if (this.spec(t).autoEnabled) out.push({ key: `v:${t.id}:auto`, name: `${s.name} → ${L.auto}${suffix}`, mode: 'auto', template: t,
-            host: s.host, port: ib.port, credKey: `v:${t.id}:auto`, inbound: ib, targetName: 'auto' });
+            host: at, port: ib.port, credKey: `v:${t.id}:auto`, inbound: ib, targetName: 'auto' });
           for (const x of targets)
             out.push({ key: `v:${t.id}:${x.id}`, name: `${s.name} → ${x.name}${suffix}`, mode: 'via', template: t,
-              host: s.host, port: ib.port, credKey: `v:${t.id}:${x.id}`, inbound: ib, targetName: x.name });
+              host: at, port: ib.port, credKey: `v:${t.id}:${x.id}`, inbound: ib, targetName: x.name });
         }
       }
     }
     return out.filter((p) => !this.profileOff(u, p.key));
+  }
+
+  /**
+   * Куда подключается клиент: при сертификате «свой домен на каждом сервере» — домен этого сервера из конфигурации
+   * (сертификат выпущен на него, и он может отличаться от адреса сервера в панели); иначе — адрес сервера.
+   * Конфигурации с сертификатом на IP и REALITY по-прежнему идут на адрес сервера.
+   */
+  clientHost(sp: Spec, s: Pick<ServerRow, 'id' | 'host'>): string {
+    const tls = sp.security === 'tls' || sp.protocol === 'hysteria2';
+    return (tls && sp.certMode === 'domain' && sp.domains[s.id]) || s.host;
   }
 
   /** Узлы, на которые ведёт вход шаблона: его direct-узлы с активным inbound, кроме самого входа. */

@@ -75,6 +75,8 @@ export interface Server {
   last_seen_at: string | null; fail_since: string | null; direct_access: number; peer_ssh: string; key_only: number;
   ufw_active: number; ssh_ports: number[]; admin_ips: string[]; cores: Record<string, { version: string }>;
   checklist_passed_at: string | null; kit_version: string | null; stage: number; executorOk: boolean; created_at: string;
+  /** тот же сервер ещё одной записью (одинаковый ключ хоста) — объединить в карточке сервера */
+  twin?: { id: string; name: string; host: string; mgmt: string } | null;
   core_mode: 'auto' | 'own' | 'xui'; coreModeEffective: 'own' | 'xui'; xuiConfigured: boolean; xui_user: string | null;
   tls_state: { checkedAt: string; certs: Array<{ name: string; notAfter: string | null; le: boolean }>; renew: { at: string; code: number; err: string; holder?: { name: string; pid: string; unit: string } | null } | null; timer: boolean; port80Units?: string[] } | null;
   certProblems: Array<{ key: string; level: 'fail' | 'warn'; title: string; detail: string }>;

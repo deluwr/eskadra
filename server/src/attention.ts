@@ -2,6 +2,7 @@ import type { Ctx } from './ctx.js';
 import type { Vpn } from './vpn.js';
 import { certProblems } from './certs.js';
 import { coresOff } from './ops.js';
+import { twinOf, twinText } from './twins.js';
 import { backupPassword, backupSettings } from './backup.js';
 
 /**
@@ -23,6 +24,10 @@ export function attentionOf(ctx: Ctx, vpn: Vpn): Attention[] {
   const attention: Attention[] = [];
   for (const s of servers) {
     const protect = s.protection_target !== 'P1';   // при обычной защите про firewall и проверку не напоминаем
+    // та же машина второй записью — одна карточка на пару (у записи, созданной раньше)
+    const twin = twinOf(ctx, s);
+    if (twin && (s.created_at < twin.created_at || (s.created_at === twin.created_at && s.id < twin.id)))
+      attention.push({ level: 'fail', title: `${s.name} и ${twin.name}: один сервер двумя записями`, detail: `${twinText(s, twin)} — выкат на него до этого не запускается.`, serverId: s.id });
     if (s.fail_since) {
       // панель не заходит на сервер, но вход до него доходит: VPN работает, отрезан путь панель → сервер (SSH)
       const via = seenByEntries(ctx, s.id);

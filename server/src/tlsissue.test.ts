@@ -49,10 +49,10 @@ test('CSR: ECDSA P-256, подпись и SAN проверяет openssl', (t) =
 
 test('сертификат панели и адрес подписок: имя покрыто точно или *.зона на один уровень', async () => {
   const { certCovers } = await import('./update.js');
-  assert.ok(certCovers(['pnl.teropen.eu'], 'PNL.teropen.eu'));
-  assert.ok(!certCovers(['pnl.teropen.eu'], 'trp.teropen.eu'), 'как на скриншоте: подписки на другом имени');
-  assert.ok(certCovers(['pnl.teropen.eu', 'trp.teropen.eu'], 'trp.teropen.eu'));
-  assert.ok(certCovers(['*.teropen.eu'], 'trp.teropen.eu'));
-  assert.ok(!certCovers(['*.teropen.eu'], 'a.trp.teropen.eu'));
+  assert.ok(certCovers(['panel.example.com'], 'PANEL.example.com'));
+  assert.ok(!certCovers(['panel.example.com'], 'sub.example.com'), 'подписки на другом имени');
+  assert.ok(certCovers(['panel.example.com', 'sub.example.com'], 'sub.example.com'));
+  assert.ok(certCovers(['*.example.com'], 'sub.example.com'));
+  assert.ok(!certCovers(['*.example.com'], 'a.sub.example.com'));
   assert.ok(certCovers(['203.0.113.7'], '203.0.113.7'));
 });

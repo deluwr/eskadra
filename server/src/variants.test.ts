@@ -60,13 +60,13 @@ test('варианты от роли с областью: чужие выклю�
 test('IP без права: адреса людей заменены, адреса серверов и время — нет', () => {
   const out = maskPersonIps({
     devices: [{ ip: '94.25.170.33', first_seen: '2026-10-13T10:00:00Z' }], allowedIps: [{ cidr: '198.51.100.0/24' }],
-    servers: [{ host: '185.253.45.124', admin_ips: ['1.2.3.4'], seen_from_ip: '5.6.7.8' }],
+    servers: [{ host: '203.0.113.44', admin_ips: ['1.2.3.4'], seen_from_ip: '5.6.7.8' }],
     items: [{ action: 'admin.login', detail: '{"ip":"176.97.134.21","at":"23:59:59"}' }],
   }) as any;
   assert.equal(out.devices[0].ip, 'скрыт');
   assert.equal(out.devices[0].first_seen, '2026-10-13T10:00:00Z');
   assert.equal(out.allowedIps[0].cidr, 'скрыт');
-  assert.equal(out.servers[0].host, '185.253.45.124', 'адрес сервера — в ссылках подписки, не маскируется');
+  assert.equal(out.servers[0].host, '203.0.113.44', 'адрес сервера — в ссылках подписки, не маскируется');
   assert.deepEqual(out.servers[0].admin_ips, ['скрыт']);
   assert.equal(out.servers[0].seen_from_ip, 'скрыт');
   assert.equal(out.items[0].detail, '{"ip":"скрыт","at":"23:59:59"}');

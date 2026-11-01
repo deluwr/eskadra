@@ -9,12 +9,12 @@ import { Ctx } from './ctx.js';
 import { Ops } from './ops.js';
 import { certProblems, parseCertStatus } from './certs.js';
 
-/** Флот: ufo и pl-1 доступны, nl-1 — уже нет. Панель 192.0.2.1. */
+/** Флот: gate и pl-1 доступны, nl-1 — уже нет. Панель 192.0.2.1. */
 function fixture() {
   const db = openDb(fs.mkdtempSync(path.join(os.tmpdir(), 'esk-peer-')));
   const ctx = new Ctx(db, new Sealer(Buffer.alloc(32, 8)));
   setSetting(db, 'executor.ips', ['192.0.2.1']);
-  for (const [id, host, fail] of [['ufo', '198.51.100.3', null], ['pl', '203.0.113.5', null], ['nl', '203.0.113.9', '2026-10-29T10:16:00Z']] as const)
+  for (const [id, host, fail] of [['gate', '198.51.100.3', null], ['pl', '203.0.113.5', null], ['nl', '203.0.113.9', '2026-10-29T10:16:00Z']] as const)
     db.prepare(`INSERT INTO servers (id, name, host, role, key_pub, key_priv_sealed, sudo_mode, host_key_fp, fail_since) VALUES (?, ?, ?, 'exit', 'k', ?, 'restricted', 'SHA256:x', ?)`).run(id, id, host, ctx.seal('KEY'), fail);
   const calls: string[] = [];
   (ctx as unknown as { onNode: unknown }).onNode = async (r: { name: string }, fn: (n: unknown) => Promise<unknown>) => fn({
@@ -28,7 +28,7 @@ test('адреса флота заранее: доступные узлы пол
   const { ctx, db, calls } = fixture();
   const ops = new Ops(ctx);
   await ops.syncPeerAccess(() => undefined);
-  for (const node of ['ufo', 'pl'])
+  for (const node of ['gate', 'pl'])
     for (const ip of ['192.0.2.1', '198.51.100.3', '203.0.113.5', '203.0.113.9']) assert.ok(calls.includes(`${node}: allow ${ip}`), `${node} ← ${ip}`);
   assert.ok(!calls.some((c) => c.startsWith('nl-1') || c.startsWith('nl:')), 'недоступный узел не трогаем');
   assert.deepEqual(getSetting<string[]>(db, 'peers.allowed.pl', []).sort(), ['192.0.2.1', '198.51.100.3', '203.0.113.5', '203.0.113.9']);
@@ -38,7 +38,7 @@ test('адреса флота заранее: доступные узлы пол
   // новый сервер во флоте — его адрес дописывается на остальные
   db.prepare(`INSERT INTO servers (id, name, host, role, key_pub, key_priv_sealed) VALUES ('es', 'es', '203.0.113.7', 'exit', 'k', 'x')`).run();
   await ops.syncPeerAccess(() => undefined);
-  assert.deepEqual(calls.sort(), ['pl: allow 203.0.113.7', 'ufo: allow 203.0.113.7']);
+  assert.deepEqual(calls.sort(), ['gate: allow 203.0.113.7', 'pl: allow 203.0.113.7']);
 });
 
 test('адрес посредника уже разрешён заранее — переключение на «через сервер» без команды в консоли', async () => {
@@ -49,7 +49,7 @@ test('адрес посредника уже разрешён заранее —
   app.addHook('preHandler', async (req) => { (req as { admin?: unknown }).admin = { id: 1, username: 'o', role: 'owner', totp: false, totpSecret: null }; });
   const { serverRoutes } = await import('./routes/servers.js');
   await serverRoutes(app, ctx);
-  const r = await app.inject({ method: 'PATCH', url: '/api/v1/servers/nl', payload: { mgmtMode: 'jump', mgmtJump: 'ufo' } });
+  const r = await app.inject({ method: 'PATCH', url: '/api/v1/servers/nl', payload: { mgmtMode: 'jump', mgmtJump: 'gate' } });
   assert.equal(r.statusCode, 200, r.body);
   assert.equal(r.json().consoleHint, null);
   // адреса не было в списке — команда для консоли, как раньше

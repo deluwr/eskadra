@@ -21,6 +21,7 @@ import { certProblems } from '../certs.js';
 import { cfOriginOf, issueCert } from '../tlsissue.js';
 import { CDN_PORTS } from '../protocols.js';
 import { getSetting } from '../db.js';
+import { mergeServer, mergeTwins, twinOf } from '../twins.js';
 import { localRaw, parseHostStat } from '../hoststats.js';
 import { botProxyOptions } from '../botproxy.js';
 import { scanSni } from '../sni.js';
@@ -50,6 +51,8 @@ export function publicView(ctx: Ctx, r: ServerRow) {
     certProblems: certProblems(r, (id) => (ctx.db.prepare('SELECT name FROM templates WHERE id = ?').get(id) as { name: string } | undefined)?.name),
     stage: stageOf(r),
     executorOk: !r.seen_from_ip || expectedPanelIps(r, ctx.panelSources(r)).includes(r.seen_from_ip),
+    // та же машина ещё одной записью (одинаковый ключ хоста) — объединить в карточке сервера (twins.ts)
+    twin: (() => { const t = twinOf(ctx, r); return t ? { id: t.id, name: t.name, host: t.host, mgmt: t.mgmt_mode } : null; })(),
   };
 }
 
@@ -202,6 +205,14 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
       `INSERT INTO servers (id, name, host, ssh_port, role, group_name, protection_target, direct_access, key_pub, key_priv_sealed, mgmt_mode, host_key_fp, host_key_algo)
        VALUES (?, 'relay', ?, ?, 'entry', 'default', 'P1', 1, ?, ?, 'local', ?, 'ssh-ed25519')`,
     ).run(id, host, res.sshPort, keys.public.trim(), ctx.seal(keys.private), res.hostKeyFp);
+    // главный сервер уже есть во флоте (панель переехала на свой узел): второй записи не будет — прежняя запись
+    // становится главным сервером с этим доступом, её входы и конфигурации остаются как были
+    const twin = twinOf(ctx, ctx.server(id));
+    if (twin) {
+      mergeServer(ctx, twin, ctx.server(id));
+      audit(db, who(req), 'server.self_merged', twin.id, { host, into: twin.name });
+      return { server: publicView(ctx, ctx.server(twin.id)), jobId: null };
+    }
     audit(db, who(req), 'server.self_added', id, { host, sshPort: res.sshPort });
     return { server: publicView(ctx, ctx.server(id)), jobId: startOnboarding(ctx, id, who(req)) };
   });
@@ -801,6 +812,21 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     ctx.updateServer(r.id, { fw_mode: 'observe', fw_pending_until: null });
     audit(db, who(req), 'server.fw_rollback', r.id);
     return { output: out.stdout.trim() };
+  });
+
+  /**
+   * Один сервер двумя записями (одинаковый ключ хоста): объединить в одну с выбранным именем (twins.ts). Входы,
+   * конфигурации, пользователи и пароли переходят без изменений; конфиг сервера собирается заново фоновой синхронизацией.
+   */
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/merge', { preHandler: guard(ctx, 'servers.manage', { otp: true }) }, async (req) => {
+    const r = ctx.server(req.params.id);
+    const b = z.object({ with: z.string().max(64), name: z.string().trim().min(1).max(64).regex(/^[\p{L}0-9 ._-]+$/u) }).parse(req.body);
+    const other = ctx.server(b.with);
+    if (twinOf(ctx, r)?.id !== other.id) throw new HttpError(409, `«${r.name}» и «${other.name}» — разные серверы, объединять нечего`);
+    let res: { id: string; clash: string[] };
+    try { res = mergeTwins(ctx, r, other, b.name); } catch (e) { throw new HttpError(409, (e as Error).message); }
+    audit(db, who(req), 'server.merge', res.id, { from: [r.name, other.name], name: b.name, clash: res.clash });
+    return { server: publicView(ctx, ctx.server(res.id)), clash: res.clash };
   });
 
   app.delete<{ Params: { id: string } }>('/api/v1/servers/:id', { preHandler: guard(ctx, 'servers.manage', { otp: true }) }, async (req) => {
