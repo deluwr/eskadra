@@ -9,6 +9,31 @@ import { getSetting, setSetting } from './db.js';
 
 const parse = <T>(s: string | null | undefined, d: T): T => { try { return s ? (JSON.parse(s) as T) : d; } catch { return d; } };
 
+/**
+ * Убрать ссылки на удалённые конфигурации: выбранные конфигурации пользователей и область ролей. Висящий id ломал
+ * сохранение пользователя («нет такой конфигурации»), хотя в карточке его уже не видно. Пустой список остаётся
+ * пустым — «ни одной», а не «все».
+ */
+export function pruneTemplateRefs(ctx: Ctx): string[] {
+  const { db } = ctx;
+  const alive = new Set((db.prepare('SELECT id FROM templates').all() as Array<{ id: string }>).map((r) => r.id));
+  const changed: string[] = [];
+  for (const u of db.prepare('SELECT id, name, template_ids FROM users WHERE template_ids IS NOT NULL').all() as Array<{ id: string; name: string; template_ids: string }>) {
+    const ids = parse<string[]>(u.template_ids, []);
+    if (ids.every((x) => alive.has(x))) continue;
+    db.prepare('UPDATE users SET template_ids = ? WHERE id = ?').run(JSON.stringify(ids.filter((x) => alive.has(x))), u.id);
+    changed.push(`пользователь ${u.name}`);
+  }
+  for (const r of db.prepare('SELECT id, name, scope FROM roles').all() as Array<{ id: string; name: string; scope: string }>) {
+    const sc = parse<{ templates?: string[] | null }>(r.scope, {});
+    if (!sc.templates || sc.templates.every((x) => alive.has(x))) continue;
+    sc.templates = sc.templates.filter((x) => alive.has(x));
+    db.prepare('UPDATE roles SET scope = ? WHERE id = ?').run(JSON.stringify(sc), r.id);
+    changed.push(`роль ${r.name}`);
+  }
+  return changed;
+}
+
 /** Убрать ссылки на серверы, которых нет. Возвращает, что изменилось (для журнала). */
 export function pruneServerRefs(ctx: Ctx): string[] {
   const { db } = ctx;

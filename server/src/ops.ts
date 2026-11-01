@@ -80,6 +80,7 @@ const archOf = (s: ServerRow) => (s.arch === 'arm64' ? 'arm64' : 'amd64') as 'am
 import { buildKitBundle, kitVersion } from './nodekit.js';
 import { parseCertStatus, type TlsState } from './certs.js';
 import { cfOriginFor, installCf } from './tlsissue.js';
+import { pruneTemplateRefs } from './prune.js';
 import { parseSections } from './preflight.js';
 
 export interface JobHandle { id: number; log: (line: string) => void; finish: (s: 'ok' | 'failed') => void }
@@ -915,6 +916,7 @@ export class Ops {
       log(`${s.name}: снято`);
     }
     this.ctx.db.prepare('DELETE FROM templates WHERE id = ?').run(t.id);
+    pruneTemplateRefs(this.ctx);   // выбранные конфигурации пользователей и область ролей — без удалённой
   }
 
   /**

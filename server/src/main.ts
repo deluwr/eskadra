@@ -25,7 +25,7 @@ import { Backups } from './backup.js';
 import { SubService } from './subsvc.js';
 import { Workers } from './workers.js';
 import { Mgmt } from './mgmt.js';
-import { pruneServerRefs } from './prune.js';
+import { pruneServerRefs, pruneTemplateRefs } from './prune.js';
 import { applyStagedRestore } from './restorelib.js';
 
 fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
@@ -65,6 +65,8 @@ process.once('exit', () => mgmt.stop());
 {
   const fixed = pruneServerRefs(ctx);
   if (fixed.length) console.log(`убраны ссылки на удалённые серверы: ${fixed.join(', ')}`);
+  const tpl = pruneTemplateRefs(ctx);
+  if (tpl.length) console.log(`убраны ссылки на удалённые конфигурации: ${tpl.join(', ')}`);
 }
 
 // v0.17: в inbounds Xray узлов добавлен служебный клиент svc.mgmt (первичный доступ через прокси) — переприменить один раз

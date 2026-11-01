@@ -6,7 +6,7 @@ import path from 'node:path';
 import { openDb, setSetting, getSetting } from './db.js';
 import { Sealer } from './lib/crypto.js';
 import { coreMode, Ctx, type ServerRow } from './ctx.js';
-import { pruneServerRefs } from './prune.js';
+import { pruneServerRefs, pruneTemplateRefs } from './prune.js';
 
 test('удалённый сервер: ссылки на него убираются из конфигураций, порядка «Авто», доменов, пользователей, ролей и прокси бота', () => {
   const db = openDb(fs.mkdtempSync(path.join(os.tmpdir(), 'esk-prune-')));
@@ -47,4 +47,22 @@ test('3x-ui: режим «внутри 3x-ui» только при работа�
   assert.equal(coreMode(s('inactive')), 'own');
   assert.equal(coreMode(s('')), 'own');
   assert.equal(coreMode({ ...s('inactive'), core_mode: 'xui' } as ServerRow), 'xui', 'выбранный вручную режим — как выбран');
+});
+
+test('удалённая конфигурация: убирается из выбора пользователей и области ролей — сохранение пользователя не падает', () => {
+  const db = openDb(fs.mkdtempSync(path.join(os.tmpdir(), 'esk-prune-t-')));
+  const ctx = new Ctx(db, new Sealer(Buffer.alloc(32, 2)));
+  db.prepare(`INSERT INTO templates (id, name, core, protocol, port, sni, node_ids) VALUES ('t-new', 'fleet-vless', 'xray', 'vless', 443, '[]', '[]')`).run();
+  db.prepare(`INSERT INTO users (id, name, sub_token, knock_token, template_ids) VALUES ('u-1', 'testuser', 's', 'k', '["t-old","t-new"]')`).run();
+  db.prepare(`INSERT INTO users (id, name, sub_token, knock_token, template_ids) VALUES ('u-2', 'bob', 's2', 'k2', '["t-old"]')`).run();
+  db.prepare(`INSERT INTO users (id, name, sub_token, knock_token) VALUES ('u-3', 'all', 's3', 'k3')`).run();
+  db.prepare(`INSERT INTO roles (id, name, scope) VALUES ('r', 'seller', '{"templates":["t-old","t-new"]}')`).run();
+
+  assert.deepEqual(pruneTemplateRefs(ctx).sort(), ['пользователь bob', 'пользователь testuser', 'роль seller']);
+  const tpl = (id: string) => (db.prepare('SELECT template_ids FROM users WHERE id = ?').get(id) as { template_ids: string | null }).template_ids;
+  assert.deepEqual(JSON.parse(tpl('u-1')!), ['t-new']);
+  assert.deepEqual(JSON.parse(tpl('u-2')!), [], 'была только удалённая — «ни одной», а не «все»');
+  assert.equal(tpl('u-3'), null, '«все конфигурации» не трогаются');
+  assert.deepEqual(JSON.parse((db.prepare(`SELECT scope FROM roles WHERE id = 'r'`).get() as { scope: string }).scope).templates, ['t-new']);
+  assert.deepEqual(pruneTemplateRefs(ctx), [], 'второй проход ничего не меняет');
 });

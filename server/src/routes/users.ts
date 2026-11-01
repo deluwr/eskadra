@@ -57,7 +57,8 @@ export function saveUser(ctx: Ctx, id: string | null, input: z.infer<typeof user
   } catch (e) { if (e instanceof ScopeError) throw new HttpError(403, e.message); throw e; }
   if (b.nodeIds) for (const n of b.nodeIds) ctx.server(n);
   if (!db.prepare('SELECT 1 FROM limit_groups WHERE name = ?').get(b.limitGroup)) throw new HttpError(400, 'нет такой группы лимитов');
-  if (b.templateIds) for (const t of b.templateIds) if (!db.prepare('SELECT 1 FROM templates WHERE id = ?').get(t)) throw new HttpError(400, 'нет такой конфигурации');
+  // удалённые конфигурации в выборе (прежние версии не чистили его при удалении) — просто отбрасываются
+  if (b.templateIds) b = { ...b, templateIds: b.templateIds.filter((t) => db.prepare('SELECT 1 FROM templates WHERE id = ?').get(t)) };
   const vals = [b.name, b.tgId, b.limitGroup, b.trafficLimitGb, b.expireAt, b.deviceLimit, b.overAction, JSON.stringify(b.modes),
     b.nodeIds ? JSON.stringify(b.nodeIds) : null, b.templateIds ? JSON.stringify(b.templateIds) : null, b.wlMode, b.status];
   if (id) {
