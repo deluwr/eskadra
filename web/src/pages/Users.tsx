@@ -122,7 +122,7 @@ function SubServiceCard() {
         <div className="alert warn stack" style={{ flex: '1 1 100%', gap: 8 }}>
           <span>Сертификат выдан на <b>{(sub.certNames ?? []).join(', ')}</b>, а адрес подписок — <b>{sub.host}</b>. Браузеры покажут «Not secure», а VPN-клиенты не примут подписку по HTTPS.</span>
           {isDomain && can('owner') && sub.certHelper
-            ? <span className="flex"><button className="btn sm pri" disabled={busy} onClick={() => void issue()}>Выпустить сертификат и на {sub.host}</button><span className="k">или укажите адрес подписок {(sub.certNames ?? [])[0]}</span></span>
+            ? <span className="flex"><button className="btn sm pri" disabled={busy} onClick={() => void issue()}>{`Выпустить сертификат и на ${sub.host}`}</button><span className="k">или укажите адрес подписок {(sub.certNames ?? [])[0]}</span></span>
             : <span className="k">{isDomain ? <>Выпустите сертификат на оба имени на сервере панели: <code>eskadra cert letsencrypt domain {[...(sub.certNames ?? []), sub.host].join(',')}</code> — или укажите адрес подписок из сертификата.</> : 'Укажите адрес подписок из сертификата.'}</span>}
         </div>
       )}
