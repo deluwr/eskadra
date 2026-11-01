@@ -73,12 +73,12 @@ function RestoreCard() {
       {restarting ? <span className="flex small" style={{ gap: 8 }}><span className="spin" aria-hidden="true" />Панель перезапускается с восстановленными данными…</span> : !sum ? (
         <>
           <div className="grid g2">
-            <label className="fld">Файл копии<input className="inp" type="file" accept=".enc,.age" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setSum(null); }} style={{ paddingTop: 8 }} /></label>
+            <label className="fld">Файл копии<input className="inp" type="file" accept=".enc,.age" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setSum(null); }} /></label>
             {legacy
               ? <label className="fld">Приватный ключ age<textarea className="inp mono" rows={2} value={key} onChange={(e) => setKey(e.target.value)} placeholder="AGE-SECRET-KEY-1…" autoComplete="off" spellCheck={false} /></label>
               : <label className="fld">Пароль бэкапа<input className="inp" type="password" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" aria-label="Пароль бэкапа" /></label>}
           </div>
-          <div><button className="btn" disabled={busy || !file || (legacy ? !key.includes('AGE-SECRET-KEY-') : !key)} onClick={() => void check()}>{busy ? 'Проверяю…' : 'Проверить копию'}</button></div>
+          <div><button className="btn" disabled={busy || !file || (legacy ? !key.includes('AGE-SECRET-KEY-') : !key && !file.name.endsWith('.tar.gz'))} onClick={() => void check()}>{busy ? 'Проверяю…' : 'Проверить копию'}</button></div>
         </>
       ) : (
         <>

@@ -46,7 +46,7 @@ test('«eskadra»: одна конфигурация создаёт служеб
   assert.deepEqual(JSON.parse(hy.node_ids), ['pl', 'fi'], 'только выходы');
   assert.equal(hy.entry_id, null);
   const hsp = specOf(hy);
-  assert.equal(hsp.certMode, 'self');
+  assert.equal(hsp.certMode, 'ip', 'выходы с IP — Let\'s Encrypt на IP, без insecure у клиентов');
   assert.equal(hsp.hy2Obfs, 'ob');
   assert.equal(hsp.hy2Hop, '20000-21000');
   assert.equal(specOf(vpn.template(esk.id)!).hy2Leg, hy.id);
@@ -77,6 +77,10 @@ test('«eskadra»: изменения переносятся в Hysteria2; уб�
   // без изменений — ревизия не растёт
   await app.inject({ method: 'PUT', url: `/api/v1/templates/${esk.id}`, payload: { ...base, name: 'esk2', nodeIds: ['pl'], settings: { ...base.settings, hy2Port: 8555, hy2Obfs: 'new' } } });
   assert.equal(hy().revision, rev + 1);
+  // выход с адресом-доменом: Let's Encrypt на IP не выпустить — самоподписанный
+  db.prepare(`UPDATE servers SET host = 'pl.example' WHERE id = 'pl'`).run();
+  await app.inject({ method: 'PUT', url: `/api/v1/templates/${esk.id}`, payload: { ...base, name: 'esk2', nodeIds: ['pl'], settings: { ...base.settings, hy2Port: 8555, hy2Obfs: 'new' } } });
+  assert.equal(specOf(hy()).certMode, 'self');
   await app.close();
 });
 
@@ -191,13 +195,14 @@ test('eskadra со входом по Hysteria2: клиенты — Hysteria2 к�
   ib('v-ru', esk.id, 'ru', 'relay', 9443, 'udp', null, 'cd'.repeat(32));
   ib('h-pl', hy.id, 'pl', 'direct', 8443, 'udp', null, 'ab'.repeat(32)); ib('h-fi', hy.id, 'fi', 'direct', 8443, 'udp', null, 'ab'.repeat(32));
 
-  // ссылка «вход → авто» — Hysteria2 на вход: сертификат входа, obfs, смена портов
+  // ссылка «вход → авто» — Hysteria2 на вход: сертификат Let's Encrypt на IP входа (без insecure), obfs, смена портов
   const auto = vpn.profiles(user()).find((p) => p.key === `v:${esk.id}:auto`)!;
   const u = new URL(vpn.link(user(), auto).replace('hysteria2://', 'https://'));
   assert.equal(u.hostname, '198.51.100.10');
   assert.equal(u.port, '9443');
-  assert.equal(u.searchParams.get('pinSHA256'), 'cd'.repeat(32));
-  assert.equal(u.searchParams.get('sni'), 'www.apple.com');
+  assert.equal(u.searchParams.get('insecure'), null);
+  assert.equal(u.searchParams.get('pinSHA256'), null);
+  assert.equal(u.searchParams.get('sni'), null, 'имя не нужно: сертификат на адрес подключения');
   assert.equal(u.searchParams.get('obfs-password'), 'ob');
   assert.equal(decodeURIComponent(u.username), vpn.cred(id, `v:${esk.id}:auto`));
   // напрямую к выходу — по-прежнему VLESS
@@ -207,6 +212,7 @@ test('eskadra со входом по Hysteria2: клиенты — Hysteria2 к�
   const sb = vpn.renderSingbox(ctx.server('ru')) as any;
   const entry = sb.inbounds.find((i: any) => i.tag === 'in-v-ru');
   assert.equal(entry.type, 'hysteria2');
+  assert.equal(entry.tls.certificate_path, '/etc/eskadra/tls/ip/fullchain.pem');
   assert.equal(entry.listen_port, 9443);
   assert.deepEqual(entry.obfs, { type: 'salamander', password: 'ob' });
   assert.equal(entry.users.find((x: any) => x.name === `${id}.a-${esk.id}`).password, vpn.cred(id, `v:${esk.id}:auto`));
@@ -246,9 +252,10 @@ test('eskadra: смена входного протокола меняет по�
   const { Ops } = await import('./ops.js');
   const ib = await new Ops(ctx).ensureInbound(vpn.template(esk.id)!, ctx.server('ru'), 'relay', n as never);
   assert.equal(ib.proto, 'udp');
-  assert.equal(ib.tls_pin, 'ef'.repeat(32), 'на входе выпущен сертификат Hysteria2');
   assert.ok(calls.includes('port-close tcp 9443'), 'прежний TCP-порт закрыт');
-  assert.ok(calls.includes('singbox-tls www.apple.com'));
+  assert.ok(calls.includes('tls-issue ip ip 198.51.100.10'), 'на входе с IP — Let\'s Encrypt на IP');
+  assert.ok(!calls.some((c) => c.startsWith('singbox-tls')), 'самоподписанный не нужен');
+  assert.equal(ib.tls_pin, null);
   await app.close();
 });
 

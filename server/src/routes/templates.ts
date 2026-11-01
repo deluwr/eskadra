@@ -7,7 +7,7 @@ import { audit } from '../lib/audit.js';
 import { medianSpeed, Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
 import { checkTemplateQuota, checkTemplateServers, roleOf, ScopeError } from '../roles.js';
-import { hopRange, hy2Entry, natRelayOf, PROTOCOLS, SS_METHODS, specOf, usesXhttp, xhttpPath, type Protocol } from '../protocols.js';
+import { hopRange, hy2Entry, ipHost, natRelayOf, PROTOCOLS, SS_METHODS, specOf, usesXhttp, xhttpPath, type Protocol } from '../protocols.js';
 
 /** Число или диапазон «16-32» для тонкой настройки XHTTP; пусто — по умолчанию Xray. */
 const xRange = z.string().max(24).regex(/^(\d{1,9}(-\d{1,9})?)?$/, 'XHTTP: число или диапазон вида 16-32').optional();
@@ -115,12 +115,15 @@ export function syncCompanion(db: Ctx['db'], vpn: Vpn, t: TemplateRow): Template
   const old = companionOf(vpn, t.id)[0];
   if (!sp.bundle) return old ?? null;
   const exits = json<string[]>(t.node_ids, []).filter((id) => id !== t.entry_id);
+  // сертификат на выходах — Let's Encrypt на IP: клиенту и плечу входа не нужен insecure. У выхода с адресом-доменом
+  // его не выпустить — тогда самоподписанный у всех
+  const hosts = exits.map((id) => (db.prepare('SELECT host FROM servers WHERE id = ?').get(id) as { host: string } | undefined)?.host ?? '');
   const settings = JSON.stringify({
-    certMode: 'self', companionOf: t.id, hy2Obfs: sp.hy2Obfs, hy2Hop: sp.hy2Hop, hy2HopInterval: sp.hy2HopInterval,
+    certMode: hosts.length && hosts.every(ipHost) ? 'ip' : 'self', companionOf: t.id, hy2Obfs: sp.hy2Obfs, hy2Hop: sp.hy2Hop, hy2HopInterval: sp.hy2HopInterval,
     hy2UpMbps: sp.hy2UpMbps, hy2DownMbps: sp.hy2DownMbps, hy2ServerUpMbps: sp.hy2ServerUpMbps, hy2ServerDownMbps: sp.hy2ServerDownMbps,
     hy2IgnoreClientBw: sp.hy2IgnoreClientBw, hy2Masquerade: sp.hy2Masquerade,
   });
-  // самоподписанный сертификат на выходе: плечо — служебный канал входа, имя в сертификате — сайт маскировки VLESS
+  // сайт маскировки Hysteria2 (и имя в самоподписанном сертификате) — сайт маскировки VLESS
   const sni = JSON.stringify([sp.sni[0] || 'www.bing.com']);
   const port = sp.hy2Port || t.port;
   const nodes = JSON.stringify(exits);

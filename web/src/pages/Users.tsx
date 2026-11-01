@@ -159,6 +159,9 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
   // конфигурации, профили которых попадут в подписку (у существующего пользователя — с примером профилей)
   const { data: tpls } = usePoll(() => api.get<Array<{ id: string; name: string }>>('/api/v1/templates'), null);
   const configs = user?.configs ?? tpls?.map((t) => ({ id: t.id, name: t.name, allowed: true, profiles: [] as User['configs'][number]['profiles'] })) ?? [];
+  // конфигурации в списке свёрнуты: в строке — сколько вариантов включено, раскрытая показывает сами варианты
+  const [openCfg, setOpenCfg] = useState<string[]>([]);
+  const toggleOpen = (id: string) => setOpenCfg(openCfg.includes(id) ? openCfg.filter((x) => x !== id) : [...openCfg, id]);
   const toggleProfile = (key: string) => setF({ ...f, excludedProfiles: (f.excludedProfiles.includes(key) ? f.excludedProfiles.filter((k) => k !== key) : [...f.excludedProfiles, key]).sort() });
   const toggleTpl = (id: string) => {
     const all = configs.map((c) => c.id);
@@ -244,21 +247,39 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
               {(!inScope('modes', 'via') || !inScope('modes', 'direct')) && <span className="k">режим вне вашей роли не меняется</span>}
             </div>
             <span className="k">Конфигурации и варианты <Info>Отмеченные конфигурации дают пользователю свои варианты подключения; у снятой — ни одного. Отдельный вариант можно снять галочкой: он пропадёт из подписки, а его ссылка перестанет работать на сервере. Новые варианты (например, новый выход в конфигурации) появляются включёнными. Варианты зависят ещё и от режимов выше.</Info></span>
-            {configs.length ? (
+            {configs.length ? (<>
+              {user && configs.length > 1 && (
+                <span className="cfg-all">
+                  <button type="button" className="link" onClick={() => setOpenCfg(configs.map((c) => c.id))}>развернуть все</button>
+                  <button type="button" className="link" onClick={() => setOpenCfg([])}>свернуть все</button>
+                </span>
+              )}
               <ul className="cfg-pick">
                 {configs.map((c) => {
                   const mine = inScope('templates', c.id);
                   // вне области роли: у существующего пользователя — как было, новому не выдаётся
                   const on = (!f.templateIds || f.templateIds.includes(c.id)) && (mine || !!user);
+                  const open = openCfg.includes(c.id);
+                  const pOnCount = c.profiles.filter((p) => !f.excludedProfiles.includes(p.key)).length;
                   return (
-                    <li key={c.id} className={on ? '' : 'off'}>
-                      <label className="cb"><input type="checkbox" checked={on} disabled={!mine} onChange={() => toggleTpl(c.id)} /><b>{c.name}</b>{!mine && <span className="k"> · вне вашей роли</span>}</label>
-                      {user && (c.profiles.length
+                    <li key={c.id} className={`${on ? '' : 'off'}${open ? ' open' : ''}`}>
+                      <div className="cfg-row">
+                        <label className="cb"><input type="checkbox" checked={on} disabled={!mine} onChange={() => toggleTpl(c.id)} /><b>{c.name}</b>{!mine && <span className="k"> · вне вашей роли</span>}</label>
+                        {user && (
+                          <button type="button" className="cfg-toggle" aria-expanded={open} onClick={() => toggleOpen(c.id)} title={open ? 'Свернуть варианты' : 'Показать варианты'}>
+                            <span className="mono">{c.profiles.length ? `вариантов: ${on ? pOnCount : 0}/${c.profiles.length}` : 'вариантов нет'}</span>
+                            <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+                          </button>
+                        )}
+                      </div>
+                      {user && open && (c.profiles.length
                         ? <span className="cfg-profiles">{c.profiles.map((p) => {
                           const pOn = !f.excludedProfiles.includes(p.key);
+                          // имя конфигурации уже в заголовке — в варианте только «сервер · режим»
+                          const short = p.name.endsWith(` · ${c.name}`) ? p.name.slice(0, -(c.name.length + 3)) : p.name;
                           return (
                             <label key={p.key} className={`chip-cb ${pOn && on ? 'on' : ''}`} title={on ? (pOn ? 'вариант в подписке — снимите, чтобы убрать' : 'вариант выключен — ссылка не работает') : 'конфигурация не выдана'}>
-                              <input type="checkbox" checked={pOn} disabled={!on || !mine} onChange={() => toggleProfile(p.key)} />{p.name}
+                              <input type="checkbox" checked={pOn} disabled={!on || !mine} onChange={() => toggleProfile(p.key)} />{short}
                             </label>
                           );
                         })}</span>
@@ -267,7 +288,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
                   );
                 })}
               </ul>
-            ) : <span className="k">Конфигураций пока нет — создайте их в разделе «Конфигурации».</span>}
+            </>) : <span className="k">Конфигураций пока нет — создайте их в разделе «Конфигурации».</span>}
             {!user && <span className="k">Профили каждой конфигурации появятся здесь после создания пользователя.</span>}
             {f.nodeIds && <div className="alert warn small flex" style={{ justifyContent: 'space-between' }}>
               <span>{`Задано и ограничение по серверам: ${f.nodeIds.map((id) => servers.find((s) => s.id === id)?.name ?? id).join(', ') || 'ни одного'}`}</span>

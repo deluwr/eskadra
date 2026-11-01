@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { ago, api, can, fmtTime } from '../api';
 import { UpdateModal, type Ver } from '../App';
 import { JobLog } from './Configs';
-import { CopyButton, ErrorBox, Icon, Info, Switch, Tag, useAsync, usePoll, toast, Addr } from '../ui';
+import { ask, CopyButton, ErrorBox, Icon, Info, Seg, Switch, Tag, useAsync, usePoll, toast, Addr } from '../ui';
 
 interface S {
   executorIps: string[];
@@ -10,7 +10,7 @@ interface S {
   knockTtlHours: number;
   failThresholdMin: number;
   bot: { configured: boolean };
-  backup: { tgIds: string[]; time: string; enabled: boolean; hasPassword: boolean };
+  backup: { tgIds: string[]; time: string; enabled: boolean; every?: 'day' | 'week' | 'month'; encrypt?: boolean; hasPassword: boolean };
 }
 
 /** onAuthChange — перечитать состояние входа в App (после переноса панели появляется баннер со ссылкой). */
@@ -227,32 +227,52 @@ function BotProxy() {
 }
 
 function BackupCard({ s }: { s: S }) {
-  const [v, setV] = useState({ tgIds: s.backup.tgIds.join('\n'), time: s.backup.time, enabled: s.backup.enabled });
+  const [v, setV] = useState({ tgIds: s.backup.tgIds.join('\n'), time: s.backup.time, enabled: s.backup.enabled, every: s.backup.every ?? 'day', encrypt: s.backup.encrypt ?? true });
   const [pw, setPw] = useState('');
   const [hasPw, setHasPw] = useState(s.backup.hasPassword);
   const { busy, error, run } = useAsync();
   const save = () => run(async () => {
-    await api.put('/api/v1/settings/backup', { tgIds: v.tgIds.split(/[\s,;]+/).filter(Boolean), time: v.time, enabled: v.enabled, password: pw || null });
-    setPw(''); setHasPw(true);
+    if (!v.encrypt && !(await ask('Копии без пароля: в них база и мастер-ключ панели — ключи доступа ко всем серверам. Кто получит файл, получит и флот. Сохранить без шифрования?'))) return;
+    const r = await api.put<{ hasPassword: boolean }>('/api/v1/settings/backup', { tgIds: v.tgIds.split(/[\s,;]+/).filter(Boolean), time: v.time, enabled: v.enabled, every: v.every, encrypt: v.encrypt, password: v.encrypt ? pw || null : null });
+    setPw(''); setHasPw(r.hasPassword);
     toast('Настройки бэкапа сохранены');
   });
+  const needPw = v.encrypt && !hasPw && pw.length < 10;
   return (
-    <section className="card pad stack">
-      <h2>Бэкапы</h2>
-      <p className="small muted">Каждый день бот присылает копию панели (база и мастер-ключ: серверы, пользователи, конфигурации, настройки) на Telegram ID ниже. Копия зашифрована паролем бэкапа: в ней ключи доступа ко всем серверам. Восстановить — в разделе «Бэкапы»: файл копии и этот пароль. Запишите пароль отдельно: без него копию не открыть.</p>
-      <div className="grid g2">
-        <label className="fld"><span>Telegram ID получателей <Info>По одному в строке: ваш ID (узнать — у бота @userinfobot) или ID группы (с минусом). Получатель должен открыть бота панели и нажать «Старт» — иначе Telegram не даст боту написать первым.</Info></span>
-          <textarea className="inp mono" rows={3} value={v.tgIds} onChange={(e) => setV({ ...v, tgIds: e.target.value })} placeholder="123456789" spellCheck={false} /></label>
-        <label className="fld"><span>Пароль бэкапа <Info>От 10 символов. Хранится в панели зашифрованным, чтобы копии делались сами. Смена пароля действует на новые копии; старые открываются прежним паролем.</Info></span>
-          <input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder={hasPw ? 'задан — оставьте пустым, чтобы не менять' : 'не задан — копии не делаются'} autoComplete="new-password" aria-label="Пароль бэкапа" />
-          {!hasPw && <span className="k" style={{ color: 'var(--warn)' }}>Без пароля бэкапы не делаются.</span>}</label>
+    <section className="card">
+      <div className="card-head"><h2>Бэкапы</h2><a href="#/backups">История бэкапов</a></div>
+      <div className="kv">
+        <span className="kv-k">расписание</span>
+        <div className="kv-v kv-wide">
+          <span className="flex" style={{ gap: 12 }}>
+            <Switch label="Бэкапы по расписанию" on={v.enabled} onChange={(x) => setV({ ...v, enabled: x })} />
+            <Seg value={v.every} label="Как часто" onChange={(x) => setV({ ...v, every: x })} options={[['day', 'каждый день'], ['week', 'раз в неделю'], ['month', 'раз в месяц']]} />
+            <label className="flex mono small" style={{ gap: 8 }}>в<input className="inp mono" style={{ width: 90 }} value={v.time} onChange={(e) => setV({ ...v, time: e.target.value })} aria-label="Время бэкапа, UTC" />UTC</label>
+          </span>
+          <span className="hint">{v.every === 'week' ? 'По понедельникам' : v.every === 'month' ? '1-го числа каждого месяца' : 'Каждый день'}{` в ${v.time} по UTC бот присылает копию панели: базу и мастер-ключ — серверы, пользователей, конфигурации, настройки. Локально хранятся последние 14.`}</span>
+        </div>
+
+        <span className="kv-k">шифрование</span>
+        <div className="kv-v kv-wide">
+          <Seg value={v.encrypt ? 'on' : 'off'} label="Шифрование" onChange={(x) => setV({ ...v, encrypt: x === 'on' })} options={[['on', 'паролем'], ['off', 'без пароля']]} />
+          {v.encrypt ? <>
+            <input className="inp" type="password" style={{ maxWidth: 420 }} value={pw} onChange={(e) => setPw(e.target.value)} placeholder={hasPw ? 'задан — оставьте пустым, чтобы не менять' : 'от 10 символов'} autoComplete="new-password" aria-label="Пароль бэкапа" />
+            {hasPw ? <span className="hint ok">Пароль задан. Смена действует на новые копии; старые открываются прежним.</span>
+              : <span className="hint warn">Без пароля зашифрованные копии не делаются.</span>}
+            <span className="hint">Восстановить — в разделе «Бэкапы»: файл копии и этот пароль. Запишите пароль отдельно: без него копию не открыть.</span>
+          </> : <span className="hint warn">Копия уйдёт открытым архивом: в нём ключи доступа ко всем серверам. Включайте, только если получатели и хранилище надёжны.</span>}
+        </div>
+
+        <label className="kv-k" htmlFor="bk-tg">получатели <Info>По одному в строке: ваш Telegram ID (узнать — у бота @userinfobot) или ID группы (с минусом). Получатель должен открыть бота панели и нажать «Старт» — иначе Telegram не даст боту написать первым.</Info></label>
+        <div className="kv-v">
+          <textarea id="bk-tg" className="inp mono" rows={3} value={v.tgIds} onChange={(e) => setV({ ...v, tgIds: e.target.value })} placeholder="123456789" spellCheck={false} />
+          <span className="hint">Пусто — копии хранятся только на главном сервере.</span>
+        </div>
       </div>
-      <div className="flex">
-        <label className="fld">Ежедневно в (UTC)<input className="inp mono" style={{ width: 120 }} value={v.time} onChange={(e) => setV({ ...v, time: e.target.value })} /></label>
-        <span className="flex small" style={{ marginTop: 22 }}><Switch label="Включено" on={v.enabled} onChange={(x) => setV({ ...v, enabled: x })} />по расписанию</span>
+      <div className="row" style={{ justifyContent: 'flex-start' }}>
+        <button className="btn pri" disabled={busy || needPw} onClick={() => void save()}>Сохранить</button>
+        <ErrorBox error={error} />
       </div>
-      <div className="flex"><button className="btn pri" disabled={busy || (!hasPw && pw.length < 10)} onClick={() => void save()}>Сохранить</button><a href="#/backups">История бэкапов</a></div>
-      <ErrorBox error={error} />
     </section>
   );
 }

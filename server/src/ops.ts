@@ -266,7 +266,7 @@ export class Ops {
   async ensureInbound(t: TemplateRow, s: ServerRow, kind: 'direct' | 'relay', n: NodeSession): Promise<InboundRow> {
     const port = kind === 'relay' ? t.entry_port! : t.port;
     // вход eskadra может принимать Hysteria2: ключи, сертификат и протокол порта — по настройкам входа
-    const sp = kind === 'relay' ? entrySpec(this.vpn.spec(t)) : this.vpn.spec(t);
+    const sp = kind === 'relay' ? entrySpec(this.vpn.spec(t), s.host) : this.vpn.spec(t);
     const proto = protoOf(sp.protocol);
     let ib = this.vpn.inbounds('template_id = ? AND server_id = ? AND kind = ?', t.id, s.id, kind)[0];
     if (!ib) {
@@ -817,7 +817,7 @@ export class Ops {
       if (s.sudo_mode !== 'restricted') throw new Error(`${s.name}: сначала установите nodekit`);
       const port = kind === 'relay' ? t.entry_port! : t.port;
       // вход eskadra может принимать Hysteria2 (sing-box, UDP)
-      const sp = kind === 'relay' ? entrySpec(this.vpn.spec(t)) : this.vpn.spec(t);
+      const sp = kind === 'relay' ? entrySpec(this.vpn.spec(t), s.host) : this.vpn.spec(t);
       const core = PROTOCOLS[sp.protocol].core;
       const proto = protoOf(sp.protocol);
       // Hysteria2 через вход: вход только пересылает UDP ядром ОС — ядро VPN на нём не нужно, 3x-ui не мешает

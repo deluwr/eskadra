@@ -458,14 +458,16 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
       tgIds: z.array(z.string().trim().regex(/^-?\d{5,16}$/, 'Telegram ID — число, например 123456789 (у группы — с минусом)')).max(16),
       time: z.string().regex(/^\d{2}:\d{2}$/),
       enabled: z.boolean(),
+      every: z.enum(['day', 'week', 'month']).default('day'),
+      encrypt: z.boolean().default(true),
       // новый пароль бэкапа; null — оставить прежний
       password: z.string().min(10, 'пароль бэкапа — от 10 символов').max(200).nullable().default(null),
     }).parse(req.body);
     const tgIds = [...new Set(b.tgIds)];
-    if (!b.password && !backupPassword(ctx)) throw new HttpError(400, 'задайте пароль бэкапа — без него копию не зашифровать');
-    saveBackupSettings(ctx, { tgIds, time: b.time, enabled: b.enabled }, b.password);
-    audit(db, who(req), 'backup.settings', undefined, { tgIds, time: b.time, passwordChanged: !!b.password });
-    return { ...backupSettings(db), hasPassword: true };
+    if (b.encrypt && !b.password && !backupPassword(ctx)) throw new HttpError(400, 'задайте пароль бэкапа — без него копию не зашифровать');
+    saveBackupSettings(ctx, { tgIds, time: b.time, enabled: b.enabled, every: b.every, encrypt: b.encrypt }, b.password);
+    audit(db, who(req), 'backup.settings', undefined, { tgIds, time: b.time, every: b.every, encrypt: b.encrypt, passwordChanged: !!b.password });
+    return { ...backupSettings(db), hasPassword: !!backupPassword(ctx) };
   });
 
   // ───── перенос панели на другой сервер ─────
@@ -509,7 +511,8 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   // Восстановление из бэкапа в панели: загрузить копию и приватный ключ age → проверить → подтвердить → перезапуск
   app.post('/api/v1/backups/restore/check', { preHandler: guard(ctx, 'owner', { otp: true }), bodyLimit: 400 * 1024 * 1024 }, async (req) => {
     // secret — пароль бэкапа (для старых копий .age — приватный ключ age)
-    const b = z.object({ file: z.string().min(10), secret: z.string().min(1).max(4000) }).parse(req.body);
+    // без пароля — для копии, сделанной без шифрования (обычный tar.gz)
+    const b = z.object({ file: z.string().min(10), secret: z.string().max(4000).default('') }).parse(req.body);
     let r;
     try { r = await decryptBackup(Buffer.from(b.file, 'base64'), b.secret); } catch (e) { throw new HttpError(400, (e as Error).message); }
     const summary = stageRestore(config.dataDir, r.manifest, r.files);

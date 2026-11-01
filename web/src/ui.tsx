@@ -140,6 +140,7 @@ export const Icon = {
   up: <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M6 15l6-6 6 6" /></svg>,
   down: <svg width="16" height="16" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>,
   moon: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" /></svg>,
+  palette: <svg width="18" height="18" viewBox="0 0 24 24" {...P} aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.6-.8 1.6-1.6 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.7-1.6 1.6-1.6H16a5 5 0 0 0 5-5C21 6.4 17 3 12 3z" /><circle cx="7.5" cy="11.5" r="1" /><circle cx="10" cy="7.5" r="1" /><circle cx="14.5" cy="7.5" r="1" /></svg>,
 };
 
 export const STAGES = ['не подключён', 'подключён', 'настроен', 'проверен', 'защищён'];
@@ -157,13 +158,13 @@ export function StageHelp() {
       {STAGE_STEPS.map(([name, text], i) => (
         <span key={name} className="sh-row"><StagePipBar stage={i + 1} /><b>{name}</b><span>{text}</span></span>
       ))}
-      <span className="sh-legend"><i className="d" /> пройден <i className="c" /> следующий шаг <i /> впереди</span>
+      <span className="sh-legend"><span className="stage-bar"><b className="d">■</b></span> пройден <span className="stage-bar"><b className="c">■</b></span> следующий шаг <span className="stage-bar"><b>■</b></span> впереди</span>
       <span className="k">Для обычной защиты достаточно этапа «настроен».</span>
     </span>
   );
 }
 function StagePipBar({ stage }: { stage: number }) {
-  return <span className="pip" aria-hidden="true">{[1, 2, 3, 4].map((i) => <i key={i} className={i <= stage ? 'd' : i === stage + 1 ? 'c' : ''} />)}</span>;
+  return <span className="stage-bar" aria-hidden="true">[{[1, 2, 3, 4].map((i) => <b key={i} className={i <= stage ? 'd' : i === stage + 1 ? 'c' : ''}>■</b>)}]</span>;
 }
 
 /** Подсказка (i): текст по наведению, фокусу или нажатию — вместо абзацев пояснений в интерфейсе. */
@@ -230,12 +231,11 @@ export function Level({ value }: { value: string }) {
 
 export function StagePip({ stage }: { stage: number }) {
   return (
-    <div>
-      <div className="pip" role="img" aria-label={`этап ${stage} из 4`}>
-        {[1, 2, 3, 4].map((i) => <i key={i} className={i <= stage ? 'd' : i === stage + 1 ? 'c' : ''} />)}
-      </div>
-      <div className="k">{STAGES[stage]}</div>
-    </div>
+    // этап — как в консоли: [■■■□] настроен
+    <span className="stage" role="img" aria-label={`этап ${stage} из 4`}>
+      <span className="stage-bar" aria-hidden="true">[{[1, 2, 3, 4].map((i) => <b key={i} className={i <= stage ? 'd' : i === stage + 1 ? 'c' : ''}>■</b>)}]</span>
+      <span className="stage-t">{STAGES[stage]}</span>
+    </span>
   );
 }
 

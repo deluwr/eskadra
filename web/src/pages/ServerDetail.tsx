@@ -23,7 +23,7 @@ export function ServerDetailPage({ id }: { id: string }) {
       <div className="page-head">
         <div className="stack" style={{ gap: 6 }}>
           <a href="#/servers" className="k">← Серверы</a>
-          <h1><ServerName id={s.id} name={s.name} onSaved={reload} /> <StagePip stage={s.stage} /><Info label="Что значат этапы"><StageHelp /></Info></h1>
+          <h1 className="as-is"><ServerName id={s.id} name={s.name} onSaved={reload} /> <StagePip stage={s.stage} /><Info label="Что значат этапы"><StageHelp /></Info></h1>
           <span className="k">
             <Addr value={s.host} /> · <RoleTag s={s} /> · защита <Level value={s.protection_current} />
             <Info label="Подробности о сервере">
@@ -327,7 +327,7 @@ function ProtectTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
           {LEVELS.map((l) => (
             <button key={l.code} className={`lvl ${s.protection_target === l.code ? 'on' : ''}`} aria-pressed={s.protection_target === l.code} disabled={busy}
               onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { protectionTarget: l.code }); toast(`Уровень защиты: ${LEVEL_LABEL[l.code] ?? l.code}`); onChange(); })}>
-              <span style={{ fontSize: 17, fontWeight: 600 }}>{l.name}</span>
+              <span className="lvl-t">{l.name}</span>
               {l.base && <span className="k">{l.base}</span>}
               <span className="stack" style={{ gap: 6 }}>{l.items.map((x) => <span key={x} className="ctl"><span style={{ width: 14, color: 'var(--ok)', fontWeight: 700 }}>✓</span>{x}</span>)}</span>
             </button>
@@ -481,7 +481,8 @@ function RecoverAccessRow({ d, onChange }: { d: ServerDetail; onChange: () => vo
   const [open, setOpen] = useState(false);
   return (
     <div className="row" style={open ? { flexDirection: 'column', alignItems: 'stretch' } : undefined}>
-      <div className="flex" style={{ justifyContent: 'space-between' }}>
+      {/* как остальные строки вкладки: текст слева, кнопка — у правого края */}
+      <div className="flex" style={{ justifyContent: 'space-between', flex: '1 1 100%', flexWrap: 'wrap', gap: 16 }}>
         <div className="row-text"><b>Восстановить доступ <Info>Пароль root панель не хранит: после подключения она заходит на сервер своим ключом под пользователем fleet, поэтому смена пароля root на её работу не влияет. Восстановление нужно, если ключ панели на сервере пропал (сервер переустановили, ключ удалили) — панель зайдёт с этими данными один раз и снова настроит доступ.</Info></b>
           <span className="k">Логин и пароль root (или SSH-ключ) — используются один раз и не сохраняются.{s.fail_since ? ' Если сервер не отвечает совсем (таймаут), пароль не поможет: проверьте, что сервер включён и SSH открыт.' : ''}</span></div>
         {!open && <button className="btn" onClick={() => setOpen(true)}>Ввести логин и пароль…</button>}

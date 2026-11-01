@@ -30,9 +30,9 @@ export function PortsPage() {
         {d.servers.length < 2 ? <p className="k">Нужно минимум два узла с nodekit.</p> : (
           <div className="table-wrap">
             <table className="mx" aria-label="Матрица связности">
-              <thead><tr><th />{d.servers.map((s) => <th key={s.id}>{s.name}</th>)}</tr></thead>
+              <thead><tr><th />{d.servers.map((s) => <th key={s.id} title={s.name}><span className="mx-name">{s.name}</span></th>)}</tr></thead>
               <tbody>{d.servers.map((a) => (
-                <tr key={a.id}><th className="r" scope="row">{a.name}</th>
+                <tr key={a.id}><th className="r" scope="row" title={a.name}><span className="mx-name">{a.name}</span></th>
                   {d.servers.map((b) => {
                     if (a.id === b.id) return <td key={b.id} className="c-self">—</td>;
                     const c = check(a.id, b.id);

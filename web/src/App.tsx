@@ -15,6 +15,7 @@ import { AuditPage } from './pages/Audit';
 import { HelpPage } from './pages/Help';
 import { CoresPage } from './pages/Cores';
 import { getLang, setLang } from './i18n';
+import { applyFont, applyTheme, FONTS, followSystem, PALETTES, readFont, readTheme, resolveTheme, SYSTEM, type Palette } from './theme';
 
 type Route = { page: string; id?: string };
 const parseHash = (): Route => {
@@ -22,15 +23,16 @@ const parseHash = (): Route => {
   return { page: page || 'overview', id };
 };
 
-type Theme = 'dark' | 'light';
-const readTheme = (): Theme => { try { return localStorage.getItem('eskadra.theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; } };
 
 export interface AuthState { setupNeeded: boolean; loggedIn: boolean; username: string | null; role: string | null; roleName: string | null; perms: string[]; scope: Scope | null; owner: boolean; totp: boolean; created?: { users: number; templates: number } | null; movedTo?: string | null }
 
 export function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [route, setRoute] = useState<Route>(parseHash);
-  const [theme, setTheme] = useState<Theme>(readTheme);
+  const [theme, setTheme] = useState(readTheme);
+  const [themeOpen, setThemeOpen] = useState(false);
+  const [font, setFont] = useState(readFont);
+  useEffect(() => applyFont(font, true), [font]);
   const [ver, setVer] = useState<Ver | null>(null);
   const [otpAsk, setOtpAsk] = useState<((code: string | null) => void) | null>(null);
   const [confirmAsk, setConfirmAsk] = useState<{ text: string; done: (ok: boolean) => void } | null>(null);
@@ -40,11 +42,11 @@ export function App() {
     const off = document.createElement('style');
     off.textContent = '*,*::before,*::after{transition:none !important}';
     document.head.appendChild(off);
-    document.documentElement.dataset.theme = theme;
+    applyTheme(theme, true);
     void getComputedStyle(document.body).opacity;   // принудительный перерасчёт стилей
     requestAnimationFrame(() => off.remove());
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#0D1B26' : '#EEF3F6');
-    try { localStorage.setItem('eskadra.theme', theme); } catch { /* приватный режим */ }
+    // «как в системе»: тема устройства сменилась — схема следом
+    return followSystem(theme, () => applyTheme(theme));
   }, [theme]);
 
   useEffect(() => {
@@ -72,7 +74,7 @@ export function App() {
   const hidden = (page: string) => (page === 'backups' && !can('backups.run')) || (page === 'settings' && !can('settings.edit'));
   const nav: Array<[string, string, ReactNode]> = [
     ['overview', 'Обзор', Icon.overview], ['servers', 'Серверы', Icon.servers], ['configs', 'Конфигурации', Icon.configs], ['cores', 'Ядра', Icon.cores],
-    ['users', 'Пользователи', Icon.users], ['ports', 'Порты и связность', Icon.ports], ['analytics', 'Аналитика', Icon.analytics], ['access', auth.owner ? 'Права и роли' : 'Мой аккаунт', Icon.access],
+    ['users', 'Пользователи', Icon.users], ['ports', 'Порты', Icon.ports], ['analytics', 'Аналитика', Icon.analytics], ['access', auth.owner ? 'Права и роли' : 'Мой аккаунт', Icon.access],
   ];
   const nav2 = ([['backups', 'Бэкапы', Icon.backups], ['audit', 'Аудит', Icon.audit], ['settings', 'Настройки', Icon.settings], ['help', 'Справка', Icon.help]] as Array<[string, string, ReactNode]>)
     .filter(([id]) => !hidden(id));
@@ -80,28 +82,27 @@ export function App() {
 
   return (
     <div className="shell">
-      <aside className="side">
-        <a className="brand" href="#/overview">
-          <span className="brand-mark">{Icon.logo()}</span>
-          <span className="brand-text"><span className="brand-name">Эскадра</span><span className="k mono">{ver ? ver.version : '…'}</span></span>
-        </a>
-        {nav.map(([id, label, icon]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{icon}{label}</a>)}
-        <div className="side-sep" />
-        {nav2.map(([id, label, icon]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{icon}{label}</a>)}
-        <SideFoot ver={ver} owner={auth.role === 'owner'} />
-      </aside>
       <div className="main">
+        {/* навигация — строкой сверху: разделы моноширинным шрифтом, текущий подчёркнут цветом схемы */}
         <header className="topbar">
-          <span style={{ flex: 1 }} />
+          <a className="brand" href="#/overview"><span className="brand-name">eskadra</span><span className="brand-ver">{ver ? ver.version : '…'}</span></a>
+          {/* меню не прячется за край: не помещается рядом с кнопками — уходит второй строкой, на узком экране переносится */}
+          <nav className="topnav" aria-label="Разделы">
+            {nav.map(([id, label]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{label}</a>)}
+            {nav2.map(([id, label]) => <a key={id} className={`nav ${active === id ? 'on' : ''}`} href={`#/${id}`} aria-current={active === id ? 'page' : undefined}>{label}</a>)}
+          </nav>
+          <div className="topbar-end">
+          <SideFoot ver={ver} owner={auth.role === 'owner'} />
           {!auth.totp && <a className="tag warn" href="#/access">2FA не включена</a>}
           <button className="btn ghost sm static no-tr" onClick={() => {
             const next = getLang() === 'en' ? 'ru' : 'en';
             // язык панели: названия профилей в подписках тоже на нём (нужна роль admin; иначе меняется только интерфейс)
             void api.put('/api/v1/settings/lang', { lang: next }).catch(() => undefined).finally(() => setLang(next));
           }} aria-label="Language / Язык" title="Language / Язык">{getLang() === 'en' ? 'RU' : 'EN'}</button>
-          <button className="btn ghost icon" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label="Переключить тему">{theme === 'dark' ? Icon.sun : Icon.moon}</button>
-          <span className="flex who"><span className="tag">{auth.roleName ?? auth.role}</span><span>{auth.username}</span></span>
-          <button className="btn ghost" onClick={logout}>Выйти</button>
+          <button className="btn ghost icon" onClick={() => setThemeOpen(true)} aria-label="Цветовая схема" title="Цветовая схема">{Icon.palette}</button>
+          <span className="who">{auth.username} · {auth.roleName ?? auth.role}</span>
+          <button className="btn ghost sm" onClick={logout}>Выйти</button>
+          </div>
         </header>
         <main className="content">
           <BillingBanner />
@@ -113,7 +114,7 @@ export function App() {
           {route.page === 'overview' && <OverviewPage />}
           {route.page === 'servers' && <ServersPage />}
           {route.page === 'server' && route.id && <ServerDetailPage id={route.id} />}
-          {route.page === 'configs' && <ConfigsPage />}
+          {route.page === 'configs' && <ConfigsPage id={route.id} />}
           {route.page === 'users' && <UsersPage />}
           {route.page === 'ports' && <PortsPage />}
           {route.page === 'access' && <AccessPage auth={auth} onChange={refreshAuth} />}
@@ -128,6 +129,7 @@ export function App() {
         </main>
       </div>
       <Toasts />
+      {themeOpen && <ThemePicker value={theme} onPick={setTheme} font={font} onFont={setFont} onClose={() => setThemeOpen(false)} />}
       {otpAsk && <OtpModal onDone={(code) => { otpAsk(code); setOtpAsk(null); }} />}
       {confirmAsk && (
         <Modal title="Подтверждение" onClose={() => { confirmAsk.done(false); setConfirmAsk(null); }}>
@@ -239,6 +241,42 @@ export function UpdateModal({ ver, onClose, target, rollback }: { ver: Ver; onCl
           <div className="flex"><button className="btn ghost" onClick={onClose}>{failed ? 'Закрыть' : 'Свернуть'}</button></div>
         </>
       )}
+    </Modal>
+  );
+}
+
+/** Выбор цветовой схемы: миниатюры в цветах самой схемы, применяется сразу. */
+function ThemePicker({ value, onPick, font, onFont, onClose }: { value: string; onPick: (id: string) => void; font: string; onFont: (id: string) => void; onClose: () => void }) {
+  const card = (id: string, name: string, p: Palette, sub: string) => (
+    <label key={id} className="theme-card">
+      <input type="radio" name="palette" checked={value === id} onChange={() => onPick(id)} />
+      <span className="theme-mini" data-palette={p.id} aria-hidden="true">
+        <i className="tm-a" /><i className="tm-b" /><span className="tm-row"><i className="tm-c" /><i className="tm-d" /><i className="tm-e" /></span>
+      </span>
+      <span className="theme-name">{name}<span className="k">{sub}</span></span>
+    </label>
+  );
+  const group = (mode: Palette['mode']) => PALETTES.filter((p) => p.mode === mode).map((p) => card(p.id, p.name, p, mode === 'dark' ? 'тёмная' : 'светлая'));
+  return (
+    <Modal size="md" title="Цветовая схема" onClose={onClose}>
+      <p className="k">Схема и шрифт хранятся в этом браузере и применяются сразу.</p>
+      <h3 className="theme-h">Шрифт</h3>
+      <div className="font-grid" role="radiogroup" aria-label="Шрифт">
+        {FONTS.map((f) => (
+          <label key={f.id} className="font-card" style={{ fontFamily: `'${f.id}', monospace` }}>
+            <input type="radio" name="font" checked={font === f.id} onChange={() => onFont(f.id)} />
+            <span>{f.name}</span><span className="font-ok" aria-hidden="true">✓</span>
+          </label>
+        ))}
+      </div>
+      <h3 className="theme-h">Как в системе</h3>
+      <div className="theme-grid" role="radiogroup" aria-label="Цветовая схема">
+        {card(SYSTEM, 'Как в системе', resolveTheme(SYSTEM), 'Пульт, тёмный или светлый')}
+      </div>
+      <h3 className="theme-h">Тёмные</h3>
+      <div className="theme-grid" role="radiogroup" aria-label="Тёмные">{group('dark')}</div>
+      <h3 className="theme-h">Светлые</h3>
+      <div className="theme-grid" role="radiogroup" aria-label="Светлые">{group('light')}</div>
     </Modal>
   );
 }

@@ -125,7 +125,7 @@ export class Vpn {
         if (ib.kind === 'relay' && modes.includes('via')) {
           const targets = this.relayTargets(t).filter((x) => this.userAllows(u, x.id, t.id));
           if (!targets.length) continue;
-          const at = this.clientHost(entrySpec(this.spec(t)), s);
+          const at = this.clientHost(entrySpec(this.spec(t), s.host), s);
           // «вход → авто» — только если авто-выбор выхода у конфигурации включён
           if (this.spec(t).autoEnabled) out.push({ key: `v:${t.id}:auto`, name: `${s.name} → ${L.auto}${suffix}`, mode: 'auto', template: t,
             host: at, port: ib.port, credKey: `v:${t.id}:auto`, inbound: ib, targetName: 'auto' });
@@ -226,7 +226,7 @@ export class Vpn {
 
   /** Настройки, по которым клиент подключается: через вход — настройки inbound'а входа (у eskadra это может быть Hysteria2). */
   profileSpec(p: Profile): Spec {
-    return p.mode === 'direct' ? this.spec(p.template) : entrySpec(this.spec(p.template));
+    return p.mode === 'direct' ? this.spec(p.template) : entrySpec(this.spec(p.template), this.ctx.servers().find((s) => s.id === p.inbound.server_id)?.host);
   }
 
   link(u: UserRow, p: Profile): string {
@@ -267,7 +267,7 @@ export class Vpn {
       const t = this.template(ib.template_id)!;
       const sp = this.spec(t);
       // inbound входа: свой транспорт (XHTTP только для клиентов или только между серверами) или вход за CDN
-      const isp = ib.kind === 'relay' ? entrySpec(sp) : sp;
+      const isp = ib.kind === 'relay' ? entrySpec(sp, server.host) : sp;
       // Hysteria2 через вход (core): sing-box входа отдаёт трафик сюда по локальным SOCKS — порт на выход и на «авто»;
       // пользователей различает sing-box, плечи к выходам — Hysteria2 через sing-box входа (entryLegs)
       // то же у eskadra со входом по Hysteria2
@@ -498,7 +498,7 @@ export class Vpn {
     const relayRules: object[] = [];
     const inbounds: object[] = ibs.map((ib) => {
       const t = this.template(ib.template_id)!;
-      const sp = ib.kind === 'relay' ? entrySpec(this.spec(t)) : this.spec(t);
+      const sp = ib.kind === 'relay' ? entrySpec(this.spec(t), server.host) : this.spec(t);
       const cert = certName(sp, t.id, server.id, server.host);
       const self = sp.sni[0] ?? 'localhost';
       let list: Array<{ name: string; password: string }>;
@@ -573,7 +573,7 @@ export class Vpn {
       .flatMap((ib) => {
         const t = this.template(ib.template_id);
         // inbound Hysteria2 на узле: direct, вход Hysteria2 в режиме core и вход eskadra по Hysteria2
-        const sp = t && (ib.kind === 'relay' ? entrySpec(this.spec(t)) : this.spec(t));
+        const sp = t && (ib.kind === 'relay' ? entrySpec(this.spec(t), server.host) : this.spec(t));
         const r = sp?.protocol === 'hysteria2' && (ib.kind === 'direct' || !natRelayOf(sp)) ? hopRange(sp.hy2Hop) : null;
         return r ? [`${ib.port}:${r[0]}-${r[1]}`] : [];
       });

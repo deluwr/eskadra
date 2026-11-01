@@ -9,7 +9,7 @@ import { getSetting, openDb, setSetting } from './db.js';
 import { config } from './config.js';
 import { loadOrCreateMasterKey, Sealer } from './lib/crypto.js';
 import { Ctx } from './ctx.js';
-import { backupPassword, backupSettings, Backups, saveBackupSettings, snapshotArchive } from './backup.js';
+import { backupPassword, backupSettings, Backups, lastDue, saveBackupSettings, snapshotArchive } from './backup.js';
 import { applyStagedRestore, armRestore, decryptBackup, stageRestore } from './restorelib.js';
 import { decryptWithPassword, encryptWithPassword } from './lib/backupcrypt.js';
 import { LEFTOVER_CLEANUP, prepareMovedDb } from './migrate.js';
@@ -146,4 +146,24 @@ test('перенос: остатки прошлой попытки убираю�
   assert.match(rm, /\/etc\/eskadra\/eskadra\.env/);
   // таймер продления общий с узлом: удаляется только там, где узла нет
   assert.match(LEFTOVER_CLEANUP, /if \[ -x \/usr\/local\/sbin\/fleet-core \]; then[\s\S]*else[\s\S]*eskadra-certbot\.\*\nfi/);
+});
+
+test('бэкап: расписание — каждый день, по понедельникам или 1-го числа в заданное время (UTC)', () => {
+  const now = new Date('2026-11-04T10:00:00Z');   // среда
+  assert.equal(lastDue({ time: '03:00', every: 'day' }, now).toISOString(), '2026-11-04T03:00:00.000Z');
+  assert.equal(lastDue({ time: '03:00', every: 'week' }, now).toISOString(), '2026-11-02T03:00:00.000Z', 'ближайший прошедший понедельник');
+  assert.equal(lastDue({ time: '03:00', every: 'month' }, now).toISOString(), '2026-11-01T03:00:00.000Z');
+  // 1-е число, но время ещё не наступило — прошлый месяц
+  assert.equal(lastDue({ time: '03:00', every: 'month' }, new Date('2026-11-01T01:00:00Z')).toISOString(), '2026-10-01T03:00:00.000Z');
+});
+
+test('бэкап без шифрования: обычный tar.gz без пароля, восстановление открывает его без пароля', async () => {
+  const { dir, ctx } = fixture();
+  saveBackupSettings(ctx, { tgIds: [], time: '03:00', enabled: true, every: 'week', encrypt: false }, null);
+  assert.equal(backupSettings(ctx.db).every, 'week');
+  const bot = { sendBackup: async () => ({ ok: 0, total: 0, errors: [] }) } as never;
+  const r = await new Backups(ctx, bot).run('manual');
+  assert.match(r.file, /\.tar\.gz$/);
+  const { manifest } = await decryptBackup(fs.readFileSync(path.join(dir, 'backups', r.file)), '');
+  assert.ok(manifest.contents.some((c) => c.file === 'master.key'));
 });

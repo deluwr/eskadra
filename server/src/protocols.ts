@@ -37,7 +37,7 @@ export const PROTOCOLS: Record<Protocol, ProtocolInfo> = {
   vmess: { core: 'xray', name: 'VMess', securities: ['tls', 'none'], transports: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, certModes: ['ip', 'domain', 'custom'] },
   trojan: { core: 'xray', name: 'Trojan', securities: ['tls', 'reality'], transports: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, certModes: ['ip', 'domain', 'custom'] },
   shadowsocks: { core: 'xray', name: 'Shadowsocks-2022', securities: ['none'], transports: ['tcp'], relay: true, certModes: [] },
-  hysteria2: { core: 'sing-box', name: 'Hysteria2', securities: ['tls'], transports: [], udp: true, relay: true, natRelay: true, certModes: ['self', 'ip', 'domain', 'custom'] },
+  hysteria2: { core: 'sing-box', name: 'Hysteria2', securities: ['tls'], transports: [], udp: true, relay: true, natRelay: true, certModes: ['ip', 'self', 'domain', 'custom'] },
   mtproto: { core: 'telemt', name: 'MTProto (Telegram)', securities: ['none'], transports: [], relay: false, certModes: [] },
 };
 
@@ -225,7 +225,8 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     serviceName: raw.serviceName || 'grpc',
     xhttpMode: raw.xhttpMode ?? 'auto',
     alpn: raw.alpn ?? (transport === 'grpc' ? ['h2'] : ['h2', 'http/1.1']),
-    certMode: raw.certMode && info.certModes.includes(raw.certMode) ? raw.certMode : (info.certModes[0] ?? 'self'),
+    // Hysteria2, сохранённая до сертификата на IP по умолчанию, была самоподписанной — так и читаем
+    certMode: raw.certMode && info.certModes.includes(raw.certMode) ? raw.certMode : protocol === 'hysteria2' ? 'self' : (info.certModes[0] ?? 'self'),
     domain: raw.domain ?? '',
     domains: raw.domains ?? {},
     ssMethod: raw.ssMethod ?? '2022-blake3-aes-128-gcm',
@@ -276,12 +277,16 @@ export function probePort(templateId: string, exitId: string): number {
 /** «eskadra» со входом по Hysteria2: клиентов на входе принимает sing-box, а не Xray. */
 export const hy2Entry = (sp: Pick<Spec, 'bundle' | 'entryProto'>) => sp.bundle && sp.entryProto === 'hysteria2';
 
+/** Адрес сервера — IP: на него выпускается сертификат Let's Encrypt (режим ip). */
+export const ipHost = (host: string) => /^[0-9.]+$|:/.test(host);
+
 /**
- * Настройки inbound'а входа: у «eskadra» со входом по Hysteria2 — Hysteria2 с самоподписанным сертификатом под
- * сайт маскировки VLESS и её настройками Hysteria2 (obfs, смена портов, полоса, маскировка); у остальных — как есть.
+ * Настройки inbound'а входа: у «eskadra» со входом по Hysteria2 — Hysteria2 с её настройками (obfs, смена портов,
+ * полоса, маскировка) и сертификатом Let's Encrypt на IP входа; вход с адресом-доменом — самоподписанный под сайт
+ * маскировки VLESS (клиенту тогда нужен insecure). У остальных — как есть.
  */
-export function entrySpec(sp: Spec): Spec {
-  if (hy2Entry(sp)) return { ...sp, protocol: 'hysteria2', security: 'tls', certMode: 'self', sni: [sp.sni[0] || 'www.bing.com'], bundle: false, hy2Relay: 'core' };
+export function entrySpec(sp: Spec, entryHost?: string): Spec {
+  if (hy2Entry(sp)) return { ...sp, protocol: 'hysteria2', security: 'tls', certMode: entryHost && ipHost(entryHost) ? 'ip' : 'self', sni: [sp.sni[0] || 'www.bing.com'], bundle: false, hy2Relay: 'core' };
   // вход за CDN: XHTTP + TLS с самоподписанным сертификатом под домен CDN (CDN проверяет его в режиме «Full» без строгой проверки)
   if (sp.cdn) return { ...sp, transport: 'xhttp', security: 'tls', certMode: 'cdn', host: sp.cdn, alpn: ['h2', 'http/1.1'], flow: '' };
   if (sp.entryTransport) return { ...sp, transport: sp.entryTransport, flow: sp.entryTransport === 'tcp' ? sp.tcpFlow : '' };
@@ -339,7 +344,7 @@ export function certName(sp: Spec, templateId: string, serverId: string, host: s
   const tls = sp.security === 'tls' || sp.protocol === 'hysteria2';
   if (!tls) return null;
   switch (sp.certMode) {
-    case 'ip': return /^[0-9.]+$|:/.test(host) ? 'ip' : null;
+    case 'ip': return ipHost(host) ? 'ip' : null;
     case 'domain': { const d = sp.domains[serverId]; return d ? 'dom-' + d.replace(/[^A-Za-z0-9.-]/g, '') : null; }
     case 'custom': return 'tpl-' + templateId;
     case 'cdn': return 'cdn-' + templateId;

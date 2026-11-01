@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
-import { api, ago, can, inScope, quota, refreshMe, type Job, type Server, type Template } from '../api';
-import { RouteMap, exitView, type MapExit } from '../RouteMap';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { api, ago, can, inScope, quota, refreshMe, type Job, type Server, type Template, type User } from '../api';
+import { exitView, type MapExit } from '../RouteMap';
 import { CopyBlock, ErrorBox, Info, Modal, Seg, Switch, Tag, toast, useAsync, usePoll, ask } from '../ui';
 import { getLang } from '../i18n';
 
@@ -17,12 +17,12 @@ type CertMode = 'ip' | 'domain' | 'custom' | 'self';
 
 /** Что поддерживает протокол (как в protocols.ts на сервере). */
 const PROTO: Record<Protocol, { name: string; hint: string; core: string; sec: Security[]; tr: Transport[]; udp?: boolean; relay: boolean; natRelay?: boolean; cert: CertMode[]; port: string }> = {
-  eskadra: { name: 'eskadra', hint: 'всё в одной конфигурации: пользователи подключаются ко входу по VLESS, на выходах VLESS и Hysteria2, вход сам выбирает выход по порядку и переходит на Hysteria2, если VLESS до выхода не отвечает', core: 'Xray + sing-box', sec: ['reality', 'tls'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
+  eskadra: { name: 'Eskadra', hint: 'всё в одной конфигурации: пользователи подключаются ко входу по VLESS, на выходах VLESS и Hysteria2, вход сам выбирает выход по порядку и переходит на Hysteria2, если VLESS до выхода не отвечает', core: 'Xray + sing-box', sec: ['reality', 'tls'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   vless: { name: 'VLESS', hint: 'основной вариант: REALITY без своего сертификата, или TLS', core: 'Xray', sec: ['reality', 'tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'xhttp', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   vmess: { name: 'VMess', hint: 'для старых клиентов; обычно поверх WebSocket + TLS', core: 'Xray', sec: ['tls', 'none'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   trojan: { name: 'Trojan', hint: 'похож на обычный HTTPS; TLS или REALITY', core: 'Xray', sec: ['tls', 'reality'], tr: ['tcp', 'ws', 'grpc', 'httpupgrade'], relay: true, cert: ['ip', 'domain', 'custom'], port: '8443' },
   shadowsocks: { name: 'Shadowsocks-2022', hint: 'простой и быстрый, без TLS', core: 'Xray', sec: ['none'], tr: ['tcp'], relay: true, cert: [], port: '8388' },
-  hysteria2: { name: 'Hysteria2', hint: 'QUIC (UDP), быстрый на плохих сетях', core: 'sing-box', sec: ['tls'], tr: [], udp: true, relay: true, natRelay: true, cert: ['self', 'ip', 'domain', 'custom'], port: '8444' },
+  hysteria2: { name: 'Hysteria2', hint: 'QUIC (UDP), быстрый на плохих сетях', core: 'sing-box', sec: ['tls'], tr: [], udp: true, relay: true, natRelay: true, cert: ['ip', 'self', 'domain', 'custom'], port: '8444' },
   mtproto: { name: 'MTProto (Telegram)', hint: 'прокси только для Telegram, маскировка под HTTPS (fake-TLS)', core: 'telemt', sec: ['none'], tr: [], relay: false, cert: [], port: '443' },
 };
 const STATE_LABEL: Record<string, string> = { active: 'работает', error: 'ошибка', pending: 'выкатывается', deploying: 'выкатывается' };
@@ -38,6 +38,55 @@ const X_HINT: Record<XMode, string> = {
   all: 'XHTTP — и от клиентов до входа, и между входом и выходами.',
   cdn: 'Клиенты подключаются к домену на CDN (например, Cloudflare), CDN — к входу. Адрес входа клиенту не виден, а заблокировать CDN целиком дорого. Между входом и выходами — без изменений.',
 };
+/** Карточки выбора протокола в мастере: короткое описание и пометка. */
+/** Карточки выбора защиты, транспорта и сертификата в мастере. */
+const SEC_PICK: Record<Security, { desc: string; tag?: string; kind?: string }> = {
+  reality: { desc: 'Маскировка под чужой сайт. Домен и сертификат не нужны.', tag: 'rec', kind: 'ok' },
+  tls: { desc: 'Свой сертификат. Для CDN и клиентов, которым важен домен.' },
+  none: { desc: 'Трафик открыт. Когда TLS даёт CDN или прокси.', tag: 'только за CDN', kind: 'warn' },
+};
+const TR_PICK: Record<Transport, { desc: string; tag?: string; kind?: string }> = {
+  tcp: { desc: 'Быстрее всего. С VLESS — вместе с Vision.', tag: 'rec', kind: 'ok' },
+  xhttp: { desc: 'Похож на HTTP-запросы. Когда соединение «замерзает» после первых КБ. Только Xray-клиенты.', tag: 'если режут', kind: 'acc' },
+  grpc: { desc: 'Через CDN и прокси с gRPC. Медленнее TCP.' },
+  ws: { desc: 'Напрямую легко распознаётся. Для старых клиентов через CDN.', tag: 'за CDN', kind: 'warn' },
+  httpupgrade: { desc: 'Как WebSocket, но легче. Для CDN.', tag: 'за CDN', kind: 'warn' },
+};
+const CERT_PICK: Record<CertMode, { label: string; desc: string }> = {
+  ip: { label: "let's encrypt на ip", desc: 'Выпуск и продление сами. Домен не нужен.' },
+  domain: { label: 'свой домен на сервер', desc: 'Для каждого сервера — его домен, A-запись указывает на сервер.' },
+  custom: { label: 'загрузить свой', desc: 'Общий домен или wildcard: fullchain.pem и privkey.pem.' },
+  self: { label: 'самоподписанный', desc: 'Без домена; клиенты подключаются с insecure.' },
+};
+
+/** Строка тонкой настройки (ADVANCED): свёрнута, в заголовке — текущие значения. */
+function Adv({ title, sum, children }: { title: string; sum: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="adv">
+      <button type="button" className="adv-h" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="adv-chev" aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <span className="adv-t">{title}</span>
+        <span className="adv-sum">{sum}</span>
+      </button>
+      {open && <div className="adv-b">{children}</div>}
+    </div>
+  );
+}
+
+const PICK_ORDER: Protocol[] = ['vless', 'eskadra', 'hysteria2', 'trojan', 'vmess', 'shadowsocks', 'mtproto'];
+const PICK: Record<Protocol, { desc: string; tag?: string; kind?: string }> = {
+  vless: { desc: 'Основной выбор. С REALITY — без домена и сертификата.', tag: 'rec', kind: 'ok' },
+  eskadra: { desc: 'VLESS + Hysteria2 с взаимным резервом. Через входной сервер.', tag: 'связка', kind: 'acc' },
+  hysteria2: { desc: 'Быстрее всех на дальних и плохих каналах, если UDP не режут.', tag: 'udp' },
+  trojan: { desc: 'Похож на HTTPS-сайт. Нужен сертификат или REALITY.' },
+  vmess: { desc: 'Для старых клиентов. Обычно WebSocket за CDN.' },
+  shadowsocks: { desc: 'Shadowsocks-2022. Лёгкий, но без маскировки под сайт.', tag: 'запасной', kind: 'warn' },
+  mtproto: { desc: 'Прокси только для Telegram.' },
+};
+const X_LABEL: Record<XMode, string> = { off: 'выкл', on: 'вкл', clients: 'для клиентов', leg: 'между серверами', all: 'везде', cdn: 'через CDN' };
+/** Крупные сайты на чужих адресах: REALITY с ними работает, но имя и адрес сервера не совпадают. */
+const WEAK_SNI = ['www.apple.com', 'apple.com', 'www.google.com', 'www.microsoft.com', 'www.cloudflare.com', 'www.bing.com'];
 /** Тонкая настройка XHTTP (extra Xray): число или диапазон «a-b» строкой; пусто — по умолчанию Xray. */
 type XRange = 'xPaddingBytes' | 'scMaxEachPostBytes' | 'scMinPostsIntervalMs' | 'scMaxBufferedPosts' | 'scStreamUpServerSecs';
 type XmuxKey = 'maxConcurrency' | 'maxConnections' | 'cMaxReuseTimes' | 'hMaxRequestTimes' | 'hMaxReusableSecs' | 'hKeepAlivePeriod';
@@ -131,45 +180,201 @@ const toDraft = (t: Template): Draft => ({
 const describe = (t: Template) => {
   const sp = t.spec;
   const p = protoOf(t);
-  const parts = [p === 'eskadra' ? 'eskadra · VLESS + Hysteria2' : PROTO[p]?.name ?? p];
+  const parts = [p === 'eskadra' ? 'Eskadra · VLESS + Hysteria2' : PROTO[p]?.name ?? p];
   if (PROTO[p]?.sec.length > 1 || sp.security === 'tls') parts.push(SEC_LABEL[sp.security]);
   if (PROTO[p]?.tr.length > 1) parts.push(TR_LABEL[sp.transport]);
   return parts.join(' · ');
 };
 
-export function ConfigsPage() {
+type CfgState = 'ok' | 'draft' | 'new' | 'fail';
+/** Состояние конфигурации в списке: ошибка выката на каком-то сервере, черновик, ещё не выкатывалась или работает. */
+const stateOf = (t: Template): CfgState =>
+  t.inbounds.some((i) => i.state === 'error') ? 'fail' : !t.applied_revision ? 'new' : t.applied_revision < t.revision ? 'draft' : 'ok';
+/** Метки состояния в списке — как в консоли. */
+const ST_MARK: Record<CfgState, string> = { ok: '[ OK ]', draft: '[DRAFT]', new: '[ NEW ]', fail: '[FAIL]' };
+/** Выкат, запущенный из списка: его журнал показывает страница конфигурации, куда переходит список. */
+let handoff: { id: string; job: number } | null = null;
+const passJob = (id: string, job: number) => { handoff = { id, job }; dispatchEvent(new CustomEvent("cfg-job", { detail: handoff })); };
+
+/** Раздел «Конфигурации»: список (#/configs), мастер новой (#/configs/new), страница конфигурации (#/configs/<id>). */
+export function ConfigsPage({ id }: { id?: string }) {
+  return id ? <ConfigPage key={id} id={id} /> : <ConfigList />;
+}
+
+function NewButton() {
+  // новую создаёт роль с правом и без ограничения списка конфигураций; лимит роли — «создано N из M»
+  if (!can('configs.edit') || !inScope('templates', '')) return null;
+  const q = quota('templates');
+  const full = !!q && q.made >= q.max;
+  return (
+    <span className="flex" style={{ gap: 8 }}>
+      {q && <span className="k">создано {q.made} из {q.max}</span>}
+      {full ? <button className="btn pri" disabled title="лимит конфигураций роли исчерпан">+ Новая конфигурация</button>
+        : <a className="btn pri" href="#/configs/new">+ Новая конфигурация</a>}
+    </span>
+  );
+}
+
+function ConfigList() {
+  const { data: templates, reload } = usePoll(() => api.get<Template[]>('/api/v1/templates'), 20_000);
+  const { data: servers } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
+  // сколько пользователей получают конфигурацию; без права смотреть пользователей столбца нет
+  const { data: users } = usePoll(() => api.get<User[]>('/api/v1/users').catch(() => null), 60_000);
+  const [filter, setFilter] = useState<'all' | 'att' | 'draft' | 'fail'>('all');
+  const [q, setQ] = useState('');
+  const [sel, setSel] = useState<string[]>([]);
+  const { busy, error, run } = useAsync();
+  const name = (sid: string) => servers?.find((s) => s.id === sid)?.name ?? sid;
+  const route = (t: Template) => {
+    const exits = t.node_ids.filter((x) => x !== t.entry_id).map(name).join(', ') || '—';
+    return t.entry_id ? `${name(t.entry_id)} → ${exits}` : exits;
+  };
+  // протокол / защита / транспорт — строчными, как в ссылках клиентов
+  const how = (t: Template) => describe(t).replace(/ · /g, ' / ').toLowerCase().replace('eskadra / vless + hysteria2', 'Eskadra / vless + hy2');
+  const warn = (t: Template) => {
+    const err = t.inbounds.find((i) => i.error);
+    if (err) return `${name(err.server_id)}: ${err.error}`;
+    if (t.spec.security === 'reality' && WEAK_SNI.includes(t.sni[0] ?? '')) return `sni ${t.sni[0]} не из сети серверов`;
+    return '';
+  };
+  const userCount = (t: Template) => users?.filter((u) => u.configs.some((c) => c.id === t.id && c.allowed)).length;
+  const all = templates ?? [];
+  const att = (t: Template) => stateOf(t) !== 'ok' || !!warn(t);
+  const count = { all: all.length, att: all.filter(att).length, draft: all.filter((t) => ['draft', 'new'].includes(stateOf(t))).length, fail: all.filter((t) => stateOf(t) === 'fail').length };
+  const needle = q.trim().toLowerCase();
+  const rows = all
+    .filter((t) => filter === 'all' || (filter === 'att' ? att(t) : filter === 'draft' ? ['draft', 'new'].includes(stateOf(t)) : stateOf(t) === 'fail'))
+    .filter((t) => !needle || [t.name, t.core, how(t), route(t), `:${t.port}`].join(' ').toLowerCase().includes(needle));
+  const picked = rows.filter((t) => sel.includes(t.id));
+  const allPicked = rows.length > 0 && picked.length === rows.length;
+  const toggle = (id: string) => setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]);
+  const rollout = (t: Template) => run(async () => {
+    const r = await api.post<{ jobId: number }>(`/api/v1/templates/${t.id}/rollout`);
+    passJob(t.id, r.jobId);
+    toast(`«${t.name}»: выкат начался`, 'info');
+    location.hash = `#/configs/${t.id}`;
+  });
+  // по одной, как и с одной страницы: первая ошибка останавливает
+  const rolloutPicked = async () => {
+    if (!(await ask(`Выкатить по очереди: ${picked.map((t) => t.name).join(', ')}?`))) return;
+    void run(async () => {
+      for (const t of picked) {
+        const { jobId } = await api.post<{ jobId: number }>(`/api/v1/templates/${t.id}/rollout`);
+        let job: Job;
+        do { await new Promise((r) => setTimeout(r, 2000)); job = await api.get<Job>(`/api/v1/jobs/${jobId}`); } while (job.status === 'running');
+        if (job.status !== 'ok') throw new Error(`«${t.name}»: выкат не удался — журнал на странице конфигурации`);
+        toast(`«${t.name}» выкачена`);
+      }
+      setSel([]);
+      void reload();
+    });
+  };
+  const deletePicked = async () => {
+    if (!(await ask(`Снять со всех серверов и удалить: ${picked.map((t) => t.name).join(', ')}? Профили этих конфигураций пропадут из подписок.`))) return;
+    void run(async () => {
+      for (const t of picked) await api.del(`/api/v1/templates/${t.id}`);
+      toast(`Удалено: ${picked.length}`);
+      setSel([]);
+      void reload();
+    });
+  };
+  const q2 = quota('templates');
+  return (
+    <>
+      <div className="cl-head">
+        <h1>Конфигурации</h1>
+        <span className="cl-count">{`${count.all} всего · ${count.all - all.filter((t) => stateOf(t) !== 'ok').length} работают · ${count.att} требуют внимания${q2 ? ` · создано ${q2.made} из ${q2.max}` : ''}`}</span>
+        <NewButton />
+      </div>
+      <div className="list-tools">
+        <Seg value={filter} label="Какие конфигурации показать" onChange={(v) => { setFilter(v); setSel([]); }}
+          options={[['all', `все ${count.all}`], ['att', `внимание ${count.att}`], ['draft', `черновики ${count.draft}`], ['fail', `ошибки ${count.fail}`]]} />
+        <label className="list-search"><span aria-hidden="true">/</span><input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="имя, протокол, сервер" aria-label="Поиск конфигураций" /></label>
+      </div>
+      {picked.length > 0 && (
+        <div className="bulk" role="region" aria-label="Действия с отмеченными">
+          <span className="bulk-n">выбрано: {picked.length}</span>
+          {can('configs.rollout') && <button className="btn sm" disabled={busy} onClick={() => void rolloutPicked()}>Выкатить</button>}
+          {can('configs.delete') && <button className="btn sm danger" disabled={busy} onClick={() => void deletePicked()}>Удалить</button>}
+          <button className="btn ghost sm bulk-off" onClick={() => setSel([])}>Снять выбор</button>
+        </div>
+      )}
+      <ErrorBox error={error} />
+      <section className="card cl-table">
+        <div className="table-wrap">
+          <table>
+            <thead><tr>
+              <th className="cl-cb"><input type="checkbox" aria-label="Отметить все" checked={allPicked} onChange={() => setSel(allPicked ? [] : rows.map((t) => t.id))} /></th>
+              <th>Статус</th><th>Имя</th><th>Протокол / защита / транспорт</th><th>Порт</th><th>Маршрут</th>{users && <th>Польз.</th>}<th><span className="sr">Действия</span></th>
+            </tr></thead>
+            <tbody>
+              {rows.map((t) => {
+                const s = stateOf(t);
+                const w = warn(t);
+                return (
+                  <tr key={t.id} className={sel.includes(t.id) ? 'sel' : ''}>
+                    <td className="cl-cb"><input type="checkbox" aria-label={`Отметить ${t.name}`} checked={sel.includes(t.id)} onChange={() => toggle(t.id)} /></td>
+                    <td><span className={`st st-${s}`}>{ST_MARK[s]}</span></td>
+                    <td><a className="cfg-name" href={`#/configs/${t.id}`}>{t.name}</a><div className="k mono">{t.core.toLowerCase()}</div></td>
+                    <td className="mono">{how(t)}{w && <div className="cl-warn">!! {w}</div>}</td>
+                    <td className="mono muted">:{t.port}{t.entry_id ? <div className="k">вход :{t.entry_port}</div> : null}</td>
+                    <td className="mono muted">{route(t)}</td>
+                    {users && <td className="mono muted">{userCount(t)}</td>}
+                    <td className="cfg-acts">
+                      {(s === 'draft' || s === 'new') && can('configs.rollout') && <button className="btn sm acc" disabled={busy || (!t.node_ids.length && !t.entry_id)} onClick={() => void rollout(t)}>Выкатить</button>}
+                      {s === 'fail' && <a className="btn sm danger" href={`#/configs/${t.id}`}>Журнал</a>}
+                      <a className="btn sm" href={`#/configs/${t.id}`}>Открыть</a>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!rows.length && <tr><td colSpan={users ? 8 : 7} className="empty">{all.length ? 'Ничего не нашлось — измените поиск или фильтр.' : 'Конфигураций пока нет. Создайте первую — мастер проведёт по шагам.'}</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <div className="cl-legend">
+        <span><b className="st st-ok">{ST_MARK.ok}</b> выкачена и работает</span>
+        <span><b className="st st-draft">{ST_MARK.draft}</b> изменения сохранены, серверы на старой версии</span>
+        <span><b className="st st-new">{ST_MARK.new}</b> ещё не выкатывалась</span>
+        <span><b className="st st-fail">{ST_MARK.fail}</b> выкат упал — смотрите журнал</span>
+      </div>
+    </>
+  );
+}
+
+/** Страница одной конфигурации или мастер новой. */
+function ConfigPage({ id }: { id: string }) {
+  const isNew = id === 'new';
   const { data: templates, reload } = usePoll(() => api.get<Template[]>('/api/v1/templates'), 20_000);
   const { data: servers, reload: reloadServers } = usePoll(() => api.get<Server[]>('/api/v1/servers'), null);
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const [jobId, setJobId] = useState<number | null>(null);
-
+  const [draft, setDraft] = useState<Draft | null>(isNew ? empty() : null);
+  const [jobId, setJobId] = useState<number | null>(() => (handoff?.id === id ? handoff.job : null));
   useEffect(() => {
-    if (!draft && templates?.length) setDraft(toDraft(templates[0]!));
-  }, [templates, draft]);
-
-  const current = templates?.find((t) => t.id === draft?.id) ?? null;
+    if (handoff?.id === id) handoff = null;
+    const on = (e: Event) => { const x = (e as CustomEvent<{ id: string; job: number }>).detail; if (x.id === id) { setJobId(x.job); handoff = null; } };
+    addEventListener("cfg-job", on);
+    return () => removeEventListener("cfg-job", on);
+  }, [id]);
+  // новая: после сохранения страница переходит на свой адрес, а выкат стартует чуть позже — журнал передаётся туда
+  const savedId = useRef<string | null>(null);
+  const current = isNew ? null : templates?.find((t) => t.id === id) ?? null;
+  useEffect(() => { if (!isNew && current && !draft) setDraft(toDraft(current)); }, [isNew, current, draft]);
+  const missing = !isNew && templates && !current;
   return (
     <>
       <div className="page-head">
-        <div><h1>Конфигурации</h1><p>Протоколы и порты, по которым подключаются пользователи</p></div>
-        {/* новую создаёт роль с правом и без ограничения списка конфигураций; лимит роли — «создано N из M» */}
-        {can('configs.edit') && inScope('templates', '') && (() => { const q = quota('templates'); const full = !!q && q.made >= q.max; return (
-          <span className="flex" style={{ gap: 8 }}>{q && <span className="k">создано {q.made} из {q.max}</span>}<button className="btn pri" disabled={full} title={full ? 'лимит конфигураций роли исчерпан' : undefined} onClick={() => { setDraft(empty()); setJobId(null); }}>Новая конфигурация</button></span>); })()}
+        <div>
+          <a className="back" href="#/configs">{'< '}Конфигурации</a>
+          <h1 className={isNew ? undefined : 'as-is'}>{isNew ? 'Новая конфигурация' : current?.name ?? '…'}</h1>
+          {current && <p className="mono">{describe(current)} · :{current.port}</p>}
+        </div>
       </div>
-      {/* лента конфигураций: растёт вбок и переносится, редактор под ней — во всю ширину */}
-      <section className="card tpl-list" aria-label="Конфигурации">
-        {templates?.map((t) => (
-          <button key={t.id} className={`tpl ${draft?.id === t.id ? 'on' : ''}`} onClick={() => { setDraft(toDraft(t)); setJobId(null); }}>
-            <span className="flex" style={{ justifyContent: 'space-between', width: '100%' }}><b className="small">{t.name}</b><Tag>{t.core}</Tag></span>
-            <span className="k mono">{describe(t)} · :{t.port}{t.entry_id ? ` · вход :${t.entry_port}` : ''}</span>
-            <span className="flex" style={{ gap: 6 }}><span className="k">серверов: {t.inbounds.filter((i) => i.state === 'active').length}</span>{t.applied_revision < t.revision && <Tag kind="warn">не выкачена</Tag>}</span>
-          </button>
-        ))}
-        {!templates?.length && <p className="k" style={{ padding: 8 }}>Конфигураций пока нет.</p>}
-      </section>
+      {missing && <div className="card pad stack"><h2>Конфигурации нет</h2><p className="k">Её удалили или ссылка неверная. <a href="#/configs">К списку</a></p></div>}
       <div className="stack" style={{ gap: 20 }}>
         {draft && servers && <Editor key={draft.id ?? 'new'} draft={draft} servers={servers} current={current} templates={templates ?? []} onServers={() => void reloadServers()}
-          onSaved={(t) => { void reload(); setDraft(toDraft(t)); }} onRollout={(id) => setJobId(id)} onDeleted={() => { setDraft(null); void reload(); }} />}
+          onSaved={(t) => { void reload(); setDraft(toDraft(t)); if (isNew) { savedId.current = t.id; location.hash = `#/configs/${t.id}`; } }}
+          onRollout={(job) => (isNew && savedId.current ? passJob(savedId.current, job) : setJobId(job))} onDeleted={() => { location.hash = '#/configs'; }} />}
         {jobId && <JobLog id={jobId} onDone={() => void reload()} />}
         {current?.entry_id && current.spec.autoEnabled !== false && current.spec.autoMode !== 'random' && <ExitHealth t={current} />}
         {current && <Preview t={current} servers={servers ?? []} />}
@@ -425,276 +630,470 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   });
   const [pick, setPick] = useState(false);
   const pickProtocol = (p: Protocol) => setD({ ...d, protocol: p, port: PROTO[p].port, st: defaults(p), entryId: PROTO[p].relay ? d.entryId : '' });
+  // «через вход» выбран, а сам вход ещё нет; у Eskadra вход обязателен
+  const [wantEntry, setWantEntry] = useState(false);
+  const viaEntry = info.relay && (esk || !!d.entryId || wantEntry);
+  // порядок выходов важен для «по порядку» и «по нагрузке» — стрелки, когда выходов больше одного
+  const ordered = !!d.entryId && !oneExit && exits.length > 1;
+  // транспорты протокола; REALITY работает только с TCP, gRPC и XHTTP
+  const TR_ORDER: Transport[] = ['tcp', 'xhttp', 'grpc', 'ws', 'httpupgrade'];
+  const trChoices = TR_ORDER.filter((x) => info.tr.includes(x) && (st.security !== 'reality' || ['tcp', 'grpc', 'xhttp'].includes(x)));
+  const pickTransport = (x: Transport) => {
+    if (x === 'xhttp') return setX(chainX ? (hyIn ? 'leg' : 'clients') : 'on');
+    setWantCdn(false);
+    setSt({ transport: x, entryTransport: '', cdn: '' });
+  };
+  const showFp = st.security !== 'none' && d.protocol !== 'hysteria2' && info.sec.length > 0;
+  const showFlow = vless && st.security !== 'none' && (st.transport === 'tcp' || (chainX && st.entryTransport === 'tcp'));
+
+  // мастер: протокол → маршрут (сначала вход, потом выходы) → защита и транспорт → проверка. Дальше не пускает, пока
+  // не заполнен минимум шага; у сохранённой конфигурации открыты все шаги сразу
+  const [step, setStep] = useState(0);
+  const [seen, setSeen] = useState(draft.id ? 3 : 0);
+  // имя не придумали — случайное, не занятое другой конфигурацией
+  const [nameSeed] = useState(() => randomHex(2));
+  const namePh = ((base: string) => { let n = base, i = 0; while (templates.some((t) => t.name === n && t.id !== d.id)) n = `${base}-${++i}`; return n; })(`${d.protocol}-${nameSeed}`);
+  const sniList = d.sni.split(/[\s,]+/).filter(Boolean);
+  // крупный сайт на чужих адресах: имя и адрес сервера не совпадают — по этому признаку DPI замечает REALITY
+  const sniWeak = st.security === 'reality' && info.sec.includes('reality') && WEAK_SNI.includes(sniList[0] ?? '');
+  const portOk = (v: string) => /^\d{1,5}$/.test(v.trim()) && Number(v) > 0 && Number(v) < 65536;
+  const missing = [
+    portOk(d.port) ? '' : 'Укажите порт',
+    viaEntry && !d.entryId ? 'Выберите сервер-вход'
+      : esk && !d.nodeIds.some((id) => id !== d.entryId) ? 'Выберите хотя бы один выход'
+      : !d.nodeIds.length && !d.entryId ? 'Отметьте хотя бы один сервер'
+      : d.entryId && !portOk(d.entryPort) ? 'Укажите порт входа' : '',
+    st.security === 'reality' && info.sec.includes('reality') && !sniList.length ? 'Укажите сайт маскировки (SNI)'
+      : tls && info.cert.length > 0 && st.certMode === 'domain' && !usedIds.every((id) => !!st.domains[id]) ? 'Укажите домен для каждого сервера'
+      : tls && info.cert.length > 0 && st.certMode === 'custom' && !current?.hasCustomCert && !(d.certPem.trim() && d.keyPem.trim()) ? 'Вставьте сертификат и ключ'
+      : xMode === 'cdn' && !st.cdn.trim() ? 'Укажите домен на CDN' : '',
+    '',
+  ];
+  const reach = (i: number) => i <= seen || (i === seen + 1 && missing.slice(0, i).every((m) => !m));
+  const go = (i: number) => {
+    if (!reach(i)) return;
+    // имя можно не придумывать: дальше первого шага — подсказанное
+    if (i > 0 && !d.name) setD({ ...d, name: slugName(namePh) });
+    setStep(i);
+    setSeen(Math.max(seen, i));
+  };
+  const nameOf = (id: string) => servers.find((s) => s.id === id)?.name ?? id;
+  const routeText = d.entryId ? `${nameOf(d.entryId)} → ${exits.map((x) => x.name).join(', ') || '—'}` : exits.map((x) => x.name).join(', ') || '—';
+  const secText = [
+    info.sec.length > 1 || st.security === 'tls' ? SEC_LABEL[st.security] : '',
+    st.security === 'reality' ? sniList[0] ?? '' : tls && info.cert.length > 0 ? CERT_LABEL[st.certMode].replace(/ \(.*\)$/, '') : d.protocol === 'shadowsocks' ? st.ssMethod : d.protocol === 'mtproto' ? st.mtDomain : '',
+  ].filter(Boolean).join(' · ');
+  const trText = [info.tr.length > 1 ? TR_LABEL[st.transport] : '', xUsed ? `XHTTP: ${X_LABEL[xMode]}` : ''].filter(Boolean).join(' · ');
+  const def = defaults(d.protocol);
+  // сколько настроек отличается от значений протокола по умолчанию
+  const changed = (Object.keys(st) as Array<keyof Settings>).filter((k) => !['exitOrder', 'domains', 'exitCapMbps', 'path'].includes(k) && JSON.stringify(st[k]) !== JSON.stringify(def[k])).length;
+  // шаги и краткий итог каждого — как в консоли: «vless :443», «msk-1→2», «reality/tcp»
+  const steps: Array<[string, string]> = [
+    ['Протокол', `${esk ? 'eskadra' : d.protocol} :${d.port}`],
+    ['Маршрут', d.entryId ? `${nameOf(d.entryId)}→${exits.length}` : `${exits.length} × node`],
+    ['Защита', [info.sec.length > 1 || st.security === 'tls' ? st.security : '', info.tr.length > 1 ? (xUsed ? 'xhttp' : st.transport) : ''].filter(Boolean).join('/') || '—'],
+    ['Выкат', pending ? 'черновик' : current?.applied_revision ? 'выкачена' : ''],
+  ];
+  // REVIEW: что уйдёт на серверы; PREFLIGHT: что известно до выката (порт, конфиг и доступность проверяет сам выкат)
+  const review: Array<[string, string, number]> = [
+    ['protocol', `${info.name} · ${d.name || namePh} · :${d.port}`, 0],
+    ['route', routeText + (d.entryId ? ` · вход :${d.entryPort}` : '') + (d.entryId && !nat ? ` · auto=${st.autoEnabled ? st.autoMode : 'off'}` : ''), 1],
+    ['security', secText || '—', 2],
+    ...(trText ? [['transport', trText, 2] as [string, string, number]] : []),
+    ['advanced', changed ? `изменено полей: ${changed}` : 'значения по умолчанию', 2],
+  ];
+  const preflight: Array<['ok' | 'warn' | 'info', string]> = [
+    ...missing.filter(Boolean).map((m) => ['warn', `не хватает: ${m}`] as ['warn', string]),
+    ...(missing.some(Boolean) ? [] : [['ok', 'минимум для работы заполнен'] as ['ok', string]]),
+    ['ok', `${d.entryId ? `вход ${nameOf(d.entryId)}, выходов: ${exits.length}` : `серверов: ${exits.length}`}`],
+    ...(sniWeak ? [['warn', `sni ${sniList[0]} не из сети сервера — выкатить можно, но лучше scan`] as ['warn', string]] : []),
+    ...(tls && st.certMode === 'self' ? [['warn', 'самоподписанный сертификат: клиенты подключаются с insecure — лучше Let\'s Encrypt на IP'] as ['warn', string]] : []),
+    ...(xUsed ? [['warn', 'xhttp понимают только клиенты на Xray: в подписке sing-box этих профилей не будет'] as ['warn', string]] : []),
+    ...(d.protocol === 'shadowsocks' ? [['warn', 'shadowsocks без маскировки — держите как запасной'] as ['warn', string]] : []),
+    ...(!info.udp && d.protocol !== 'mtproto' && !d.entryId && d.port.trim() !== '443' ? [['info', `порт :${d.port} — для маскировки под сайт лучше 443`] as ['info', string]] : []),
+    ['info', 'выкат идёт по одному серверу: проверка конфига, открытие порта, проверка снаружи; ошибка — откат и остановка'],
+  ];
+
+  // минимум для работы и итог — в левой колонке, меняются на ходу
+  const mins: Array<[string, boolean, boolean?]> = [
+    ['протокол/имя/порт', !missing[0]],
+    [viaEntry ? `вход ${d.entryId ? nameOf(d.entryId) : '—'}` : info.relay ? 'подключение напрямую' : 'подключение', !missing[1] && seen >= 1],
+    [`${d.entryId ? 'выходы' : 'серверы'} ${exits.map((x) => x.name).join(' ') || '—'}`, exits.length > 0 || (!!d.entryId && d.nodeIds.includes(d.entryId))],
+    [st.security === 'reality' && info.sec.includes('reality') ? `sni${sniWeak && seen >= 2 ? ' (слабый)' : ''}` : tls && info.cert.length > 0 ? 'сертификат' : d.protocol === 'shadowsocks' ? 'шифр' : 'маскировка', !missing[2] && seen >= 2, sniWeak && seen >= 2],
+  ];
+  const minDone = mins.filter(([, ok]) => ok).length;
+  const summary: Array<[string, string, boolean?]> = [
+    ['protocol', esk ? 'eskadra' : d.protocol],
+    ['name', d.name || namePh],
+    ['port', d.port],
+    ...(info.relay ? [['entry', d.entryId ? `${nameOf(d.entryId)}:${d.entryPort}` : viaEntry ? '—' : 'direct', viaEntry && !d.entryId] as [string, string, boolean]] : []),
+    [d.entryId ? 'exits' : 'nodes', `[${exits.map((x) => x.name).join(', ')}]`, !exits.length && !d.entryId],
+    ...(info.sec.length > 1 ? [['security', st.security] as [string, string]] : []),
+    ...(st.security === 'reality' && info.sec.includes('reality') ? [['sni', sniList[0] ?? '—', sniWeak || !sniList.length] as [string, string, boolean]] : []),
+    ...(tls && info.cert.length > 0 ? [['cert', st.certMode] as [string, string]] : []),
+    ...(info.tr.length > 1 ? [['transport', st.transport + (vless && st.transport === 'tcp' && st.flow ? '+vision' : '') + (xUsed && st.transport !== 'xhttp' ? ' · xhttp' : '')] as [string, string]] : []),
+    ...(st.security !== 'none' && d.protocol !== 'hysteria2' && info.sec.length ? [['utls', d.fingerprint] as [string, string]] : []),
+    ...(d.entryId && !nat ? [['auto', st.autoEnabled ? st.autoMode : 'off'] as [string, string]] : []),
+  ];
+  const describeLine = [esk ? 'eskadra' : d.protocol, info.sec.length > 1 || st.security === 'tls' ? st.security : '', info.tr.length > 1 ? st.transport : '', `:${d.port}`, d.entryId ? `→ ${nameOf(d.entryId)}` : '', exits.length ? `${exits.length} × ${d.entryId ? 'exit' : 'node'}` : ''].filter(Boolean).join(' · ');
+  const LEAD = [
+    'Как клиенты подключаются. От протокола зависит, что спросим дальше — лишних полей не будет.',
+    'Сначала — куда подключаются клиенты, затем — через какие серверы трафик выходит в интернет. Хватит одного сервера.',
+    'Шифрование, маскировка и транспорт.',
+    'Сверьте итог и предупреждения. После выката конфигурация появится у пользователей, которым она выдана.',
+  ];
 
   return (
-    <section className="card pad stack" style={{ gap: 18 }}>
-      <div className="flex" style={{ justifyContent: 'space-between' }}>
-        <h2>{d.id ? d.name : 'Новая конфигурация'}</h2>
-        {current && (pending ? <Tag kind="warn">черновик не выкачен</Tag> : current.applied_revision ? <Tag kind="ok" dot>выкачена</Tag> : <Tag>ещё не выкатывалась</Tag>)}
-      </div>
-
-      <div className="grid g3">
-        <label className="fld"><span>Протокол <Info>{Object.values(PROTO).map((x) => <span key={x.name}><b>{x.name}</b> — {x.hint} ({x.core}).<br /></span>)}Протокол существующей конфигурации не меняется — создайте новую.</Info></span>
-          <select className="inp" value={d.protocol} disabled={!!d.id} onChange={(e) => pickProtocol(e.target.value as Protocol)}>
-            {(Object.keys(PROTO) as Protocol[]).map((p) => <option key={p} value={p}>{PROTO[p].name}</option>)}
-          </select>
-        </label>
-        <label className="fld"><span>Имя <Info>Строчная латиница, цифры и дефис — заглавные, пробелы и кириллица исправляются сами. Имя можно поменять в любой момент.</Info></span><input className="inp mono" value={d.name} onChange={(e) => setD({ ...d, name: slugName(e.target.value) })} placeholder={`${d.protocol}-${st.security === 'none' ? 'plain' : st.security}`} /></label>
-        <label className="fld"><span>Порт ({info.udp ? 'UDP' : 'TCP'}) <Info>Новая конфигурация получает случайный свободный порт; «Случайный» — подобрать другой. Откроется на серверах сам после проверки: не SSH, не занят, в диапазоне группы.{d.protocol === 'mtproto' ? ' Для MTProto лучше 443 — так соединение больше похоже на обычный HTTPS.' : ''}</Info></span>
-          <span className="flex" style={{ gap: 6 }}>
-            <input className="inp mono" style={{ flex: 1 }} value={d.port} onChange={(e) => setD({ ...d, port: e.target.value })} inputMode="numeric" aria-label="Порт" />
-            <button type="button" className="btn sm" title="Случайный свободный порт на серверах конфигурации" onClick={async () => setD(await randomPorts('port'))}>Случайный</button>
-          </span>
-        </label>
-      </div>
-
-      {/* защита: REALITY / TLS / нет */}
-      {info.sec.length > 1 && (
-        <div className="stack" style={{ gap: 8 }}>
-          <span className="k">Защита <Info>REALITY — маскировка под чужой сайт, свой сертификат не нужен. TLS — свой сертификат (Let's Encrypt на IP сервера, домен или загруженный). Без шифрования — только для особых случаев (например, за CDN).</Info></span>
-          <Seg value={st.security} label="Защита" onChange={(v) => setSt({ security: v, flow: v === 'none' ? '' : st.flow, transport: v === 'reality' && !['tcp', 'grpc', 'xhttp'].includes(st.transport) ? 'tcp' : st.transport })}
-            options={info.sec.map((x) => [x, SEC_LABEL[x]] as [Security, string])} />
+    <section className="wz-wrap" aria-label={d.id ? d.name : 'Новая конфигурация'}>
+      <aside className="wz-aside">
+        <div className="wz-steps">
+          <span className="wz-cap">{`// ${d.id ? d.name : 'новая конфигурация'}`}</span>
+          {current && (pending ? <Tag kind="warn">черновик не выкачен</Tag> : current.applied_revision ? <Tag kind="ok" dot>выкачена</Tag> : <Tag>ещё не выкатывалась</Tag>)}
+          <ol aria-label="Шаги">
+            {steps.map(([title, sum], i) => {
+              const done = i < 3 && i <= seen && i !== step && !missing[i];
+              const bad = i <= seen && i !== step && !!missing[i];
+              return (
+                <li key={title}>
+                  <button type="button" className={`wz-step${i === step ? ' cur' : done ? ' done' : bad ? ' bad' : ''}`} disabled={!reach(i)} aria-current={i === step ? 'step' : undefined} onClick={() => go(i)}>
+                    <span aria-hidden="true">{i === step ? '[>]' : done ? '[✓]' : bad ? '[!]' : '[ ]'}</span>
+                    <span className="wz-t">{`0${i + 1}`} <span className="lc">{title}</span></span>
+                    {i <= seen && <span className="wz-sum">{sum}</span>}
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
         </div>
-      )}
-      {st.security === 'reality' && info.sec.includes('reality') && (
-        <div className="fld"><span>Сайт маскировки (SNI) <Info>Чужой сайт с TLS 1.3, под который маскируется сервер: www.apple.com, dl.google.com, www.cloudflare.com, www.samsung.com. Можно несколько через пробел — все имена должны обслуживаться первым сайтом. www.microsoft.com с REALITY не работает. «Подобрать» проверит кандидатов с самого сервера.</Info></span>
-          <span className="flex">
-            <input className="inp mono" style={{ flex: 1 }} value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="www.apple.com" aria-label="Сайт маскировки (SNI)" />
-            <button type="button" className="btn" disabled={!managed.length} onClick={() => setPick(true)}>Подобрать…</button>
-          </span>
+        <div className="wz-box">
+          <div className="wz-box-h"><span>minimum</span><span className="wz-count">{minDone}/{mins.length}</span></div>
+          <div className="wz-bar" aria-hidden="true"><i style={{ width: `${(minDone / mins.length) * 100}%` }} /></div>
+          <ul className="wz-mins">
+            {mins.map(([label, ok, weak]) => <li key={label} title={label} className={weak ? 'weak' : ok ? 'ok' : ''}>{weak ? '~' : ok ? '+' : '-'} {label}</li>)}
+          </ul>
         </div>
+        <div className="wz-box">
+          <div className="wz-box-h"><span>итог</span><span>изменено: {changed}</span></div>
+          <dl className="wz-sumlist">
+            {summary.map(([k, v, warn]) => <div key={k}><dt>{k}</dt><dd className={warn ? 'warn' : ''}>{v}</dd></div>)}
+          </dl>
+        </div>
+        <div className="wz-legend">
+          <span><b className="req">REQUIRED</b> — без этого не выкатится</span>
+          <span><b className="rec">RECOMMENDED</b> — заполнено, проверьте</span>
+          <span><b>ADVANCED</b> — свёрнуто, по нужде</span>
+        </div>
+      </aside>
+
+      <div className="wz-main">
+      <div className="wz-head">
+        <h2>{`0${step + 1}`} <span className="lc">{steps[step]![0]}</span></h2>
+        <span className="mono k">{describeLine}</span>
+      </div>
+      <p className="wz-lead">{LEAD[step]}</p>
+
+      {step === 0 && (
+      <section className="blk">
+        <div className="blk-h req">REQUIRED <span>протокол, имя, порт</span></div>
+        <div className="kv">
+          <span className="kv-k">протокол <span className="req">*</span> <Info>{Object.values(PROTO).map((x) => <span key={x.name}><b>{x.name}</b> — {x.hint} ({x.core}).<br /></span>)}Протокол существующей конфигурации не меняется — создайте новую.</Info></span>
+          <div className="picks" role="radiogroup" aria-label="Протокол">
+            {PICK_ORDER.filter((p) => !d.id || p === d.protocol).map((p) => (
+              <label key={p} className="pick">
+                <input type="radio" name="proto" checked={d.protocol === p} disabled={!!d.id && d.protocol !== p} onChange={() => pickProtocol(p)} />
+                <span className="pick-t">{p === 'shadowsocks' ? 'SS-2022' : p === 'mtproto' ? 'MTProto' : PROTO[p].name}{PICK[p].tag && <span className={`tag ${PICK[p].kind}`}>{PICK[p].tag}</span>}</span>
+                <span className="pick-d">{PICK[p].desc}</span>
+              </label>
+            ))}
+          </div>
+          <label className="kv-k" htmlFor="cfg-name">имя <span className="req">*</span></label>
+          <div className="kv-v">
+            <input id="cfg-name" className="inp mono" value={d.name} onChange={(e) => setD({ ...d, name: slugName(e.target.value) })} placeholder={namePh} />
+            <span className="hint">Видно пользователям в приложении. a-z, 0-9 и дефис — остальное исправится само; пусто — возьмётся подсказанное.</span>
+          </div>
+          <label className="kv-k" htmlFor="cfg-port">порт <span className="mono">{info.udp ? 'udp' : 'tcp'}</span> <span className="req">*</span></label>
+          <div className="kv-v">
+            <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}>
+              <input id="cfg-port" className="inp mono" style={{ flex: 1 }} value={d.port} onChange={(e) => setD({ ...d, port: e.target.value })} inputMode="numeric" />
+              {!info.udp && <button type="button" className="btn" onClick={() => setD({ ...d, port: '443' })}>443</button>}
+              <button type="button" className="btn" title="Случайный свободный порт на серверах конфигурации" onClick={async () => setD(await randomPorts('port'))}>rand</button>
+            </span>
+            {d.port.trim() === '443' && !info.udp ? <span className="hint ok">Обычный порт HTTPS — меньше всего выделяется.</span>
+              : <span className="hint">{info.udp ? 'Порт UDP. Новая конфигурация получает случайный свободный порт.' : 'Свободный порт подобран сам. Для маскировки под сайт лучше 443; со входом этот порт — у выходов.'}</span>}
+          </div>
+        </div>
+      </section>
       )}
-      {tls && info.cert.length > 0 && (
-        <div className="stack" style={{ gap: 8 }}>
-          <label className="fld"><span>Сертификат <Info>Let's Encrypt на IP выпускается на каждом сервере сам и продлевается автоматически (порт 80 на время выпуска). Для домена — A-запись домена должна указывать на сервер. Загруженный сертификат (например, wildcard) раздаётся на все серверы конфигурации.</Info></span>
-            <select className="inp" value={st.certMode} onChange={(e) => setSt({ certMode: e.target.value as CertMode })}>
-              {info.cert.map((m) => <option key={m} value={m}>{CERT_LABEL[m]}</option>)}
-            </select>
-          </label>
-          {st.certMode === 'domain' && (
-            <div className="grid g2">
-              {usedIds.length ? usedIds.map((id) => (
-                <label key={id} className="fld"><span>{`${servers.find((x) => x.id === id)?.name ?? id} — домен`} <Info>Клиенты подключаются к этому серверу по этому домену, и сертификат Let’s Encrypt выпускается на него. A-запись домена должна указывать на сервер.</Info></span>
-                  <input className="inp mono" value={st.domains[id] ?? ''} onChange={(e) => setSt({ domains: { ...st.domains, [id]: e.target.value.trim() } })} placeholder="de.example.com" />
-                </label>
-              )) : <span className="k">Сначала выберите серверы ниже.</span>}
+
+      {step === 1 && <>
+      <section className="blk">
+        <div className="blk-h req">REQUIRED <span>сначала вход, затем выходы</span></div>
+        {!managed.length ? <div className="blk-b"><span className="hint warn">Нет подключённых серверов — добавьте их в разделе «Серверы».</span></div> : (
+        <div className="kv">
+          {info.relay ? <>
+            <span className="kv-k">1 · подключение <span className="req">*</span> <Info>Напрямую — каждый сервер принимает пользователей сам. Через вход — пользователи подключаются к ближнему серверу-входу, а в интернет выходят через выбранные выходы; в подписке появятся профили «вход → выход» и «вход → авто».</Info></span>
+            <div className="picks picks-2" role="radiogroup" aria-label="Подключение">
+              {!esk && <label className="pick">
+                <input type="radio" name="via" checked={!viaEntry} onChange={() => { setWantEntry(false); setD({ ...d, entryId: '' }); }} />
+                <span className="pick-t">напрямую</span>
+                <span className="pick-d">Каждый сервер принимает клиентов сам. Проще всего.</span>
+              </label>}
+              <label className="pick">
+                <input type="radio" name="via" checked={viaEntry} onChange={() => setWantEntry(true)} />
+                <span className="pick-t">через вход{esk && <span className="tag acc">нужен Eskadra</span>}</span>
+                <span className="pick-d">Клиенты — к ближнему серверу, в интернет — через дальние.</span>
+              </label>
             </div>
-          )}
-          {st.certMode === 'custom' && (
-            <div className="stack" style={{ gap: 8 }}>
-              <label className="fld">Домен в сертификате (клиенты проверяют его)<input className="inp mono" value={st.domain} onChange={(e) => setSt({ domain: e.target.value.trim() })} placeholder="vpn.example.com" /></label>
-              {current?.hasCustomCert && !d.certPem && <span className="k">Сертификат загружен. Чтобы заменить — вставьте новый.</span>}
-              <div className="grid g2">
-                <label className="fld">Сертификат (fullchain.pem)<textarea className="inp mono" rows={4} value={d.certPem} onChange={(e) => setD({ ...d, certPem: e.target.value })} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} /></label>
-                <label className="fld">Ключ (privkey.pem)<textarea className="inp mono" rows={4} value={d.keyPem} onChange={(e) => setD({ ...d, keyPem: e.target.value })} placeholder="-----BEGIN PRIVATE KEY-----" spellCheck={false} /></label>
+          </> : <>
+            <span className="kv-k">подключение</span>
+            <span className="hint">{info.name} работает только напрямую: клиенты подключаются к каждому выбранному серверу.</span>
+          </>}
+
+          {viaEntry && <>
+            <span className="kv-k">2 · вход <span className="req">*</span></span>
+            <div className="kv-v kv-wide">
+              <div className="radios" role="radiogroup" aria-label="Сервер-вход">
+                {managed.map((s) => (
+                  <label key={s.id} className="rdo">
+                    <input type="radio" name="entry" checked={d.entryId === s.id} onChange={() => setD({ ...d, entryId: s.id, nodeIds: nat ? d.nodeIds.filter((x) => x !== s.id).slice(0, 1) : d.nodeIds })} />
+                    <span className="mono">{s.name}</span>
+                  </label>
+                ))}
               </div>
+              {d.entryId && <>
+                <div className="flex" style={{ gap: '8px 20px' }}>
+                  <label className="flex mono small" style={{ gap: 8 }}>порт входа
+                    <input className="inp mono" style={{ width: 96 }} inputMode="numeric" value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} aria-label="Порт входа" />
+                    <button type="button" className="btn sm" title="Случайный свободный порт на сервере-входе" onClick={async () => setD(await randomPorts('entry'))}>rand</button>
+                  </label>
+                  {relayState && <Tag kind={relayState.state === 'active' ? 'ok' : relayState.state === 'error' ? 'fail' : 'warn'}>{STATE_LABEL[relayState.state] ?? relayState.state}</Tag>}
+                  {!nat && <label className="cb mono small"><input type="checkbox" checked={d.nodeIds.includes(d.entryId)} onChange={() => toggleNode(d.entryId)} />вход и сам принимает напрямую</label>}
+                </div>
+                {d.entryPort.trim() === '443' ? <span className="hint ok">Клиенты подключаются только к входу — 443 выглядит как обычный HTTPS.</span>
+                  : <span className="hint">Клиенты подключаются только к входу. Для маскировки и CDN лучше 443.</span>}
+              </>}
+              {info.natRelay && <>
+                <Seg value={st.hy2Relay} label="Режим входа Hysteria2" onChange={(v) => setSt({ hy2Relay: v, autoEnabled: v === 'core' })} options={[['core', 'ядра на входе'], ['nat', 'пересылка']]} />
+                <span className="hint">{nat ? 'Пересылка: вход перекидывает UDP ядром системы на один выход, без своего ядра VPN. У выхода нужен IPv4-адрес.' : 'Ядра на входе: вход сам принимает Hysteria2 и выбирает выход — можно несколько выходов и авто-выбор.'}</span>
+              </>}
+              {esk && <>
+                <Seg value={st.entryProto} label="Протокол на входе" onChange={(v) => setSt({ entryProto: v, ...(v === 'hysteria2' && st.autoMode === 'spread' ? { autoMode: 'order' as AutoMode } : {}) })}
+                  options={[['vless', 'vless → резерв hy2'], ['hysteria2', 'hy2 → резерв vless']]} />
+                <span className="hint">VLESS проходит почти везде. Hysteria2 быстрее, если провайдер не режет UDP. Второй протокол — резерв между входом и выходами. Смена меняет ссылки «через вход» — пользователям нужно обновить подписку.</span>
+              </>}
             </div>
-          )}
-          {st.certMode === 'self' && (
-            <label className="fld">Имя в сертификате (SNI)<input className="inp mono" value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="hy.example" /></label>
-          )}
+          </>}
+
+          <span className="kv-k">{info.relay ? (viaEntry ? '3 · выходы' : '2 · серверы') : 'серверы'} <span className="req">*</span></span>
+          <div className="kv-v kv-wide">
+            <ul className="exits">
+              {mapExits.map((x) => {
+                const on = x.state !== 'off';
+                const i = exits.findIndex((e) => e.id === x.id);
+                return (
+                  <li key={x.id} className={`ex${on ? ' on' : ''}`}>
+                    <label className="ex-pick"><input type="checkbox" checked={on} onChange={() => toggleNode(x.id)} /><span className="mono">{x.name}</span></label>
+                    <span className={`ex-note ${x.state}`}>{x.note}</span>
+                    {x.extra}
+                    {ordered && on && <>
+                      <span className="ex-rank">#{i + 1}</span>
+                      <button type="button" className="btn sm ex-mv" disabled={i === 0} aria-label={`${x.name} выше`} onClick={() => move(i, -1)}>↑</button>
+                      <button type="button" className="btn sm ex-mv" disabled={i === exits.length - 1} aria-label={`${x.name} ниже`} onClick={() => move(i, 1)}>↓</button>
+                    </>}
+                  </li>
+                );
+              })}
+            </ul>
+            <span className="hint">{viaEntry ? 'Порядок важен для режима «порядок»: #1 — основной. Входной сервер выходом быть не может.' : 'Клиенты получат по профилю на каждый отмеченный сервер.'}</span>
+            {oneExit && <span className="hint">Пересылка ведёт на один выход: отметка другого заменяет прежний.</span>}
+            {current?.inbounds.filter((ib) => ib.error).map((ib) => <span key={ib.id} className="hint warn">{nameOf(ib.server_id)}{ib.kind === 'hy2' ? ' (Hysteria2)' : ''}: {ib.error}</span>)}
+          </div>
         </div>
-      )}
-      {d.protocol === 'shadowsocks' && (
-        <label className="fld">Шифрование<select className="inp" value={st.ssMethod} onChange={(e) => setSt({ ssMethod: e.target.value })}>
-          {['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305'].map((m) => <option key={m}>{m}</option>)}
-        </select></label>
-      )}
-      {d.protocol === 'mtproto' && (
-        <label className="fld"><span>Домен маскировки <Info>Сайт, под HTTPS которого маскируется прокси (fake-TLS). Неопознанные подключения перенаправляются на него. На одном сервере может быть одна конфигурация MTProto.</Info></span>
-          <input className="inp mono" value={st.mtDomain} onChange={(e) => setSt({ mtDomain: e.target.value.trim() })} placeholder="www.apple.com" />
-        </label>
+        )}
+      </section>
+
+      {d.entryId && info.relay && !nat && (
+      <section className="blk">
+        <div className="blk-h rec">RECOMMENDED <span>предзаполнено</span></div>
+        <div className="kv">
+          <span className="kv-k">авто-выбор выхода <Info>Включён — у пользователей есть профиль «вход → авто»: вход сам выбирает выход и переключает его, если тот перестал отвечать. Выключен — только явные профили «вход → выход». Задержку вход проверяет раз в минуту, скорость панель меряет по расписанию; о каждом переключении бот пишет админам.</Info></span>
+          <div className="kv-v kv-wide">
+            <span className="flex" style={{ gap: 12 }}><Switch label="Авто-выбор выхода" on={st.autoEnabled} onChange={(v) => setSt({ autoEnabled: v })} /><span className="mono small muted">{st.autoEnabled ? 'вход сам переводит трафик на рабочий выход' : 'только явные профили «вход → выход»'}</span></span>
+            {st.autoEnabled && <>
+              <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'качество'], ['order', 'порядок'], ['random', 'случайно'], ...(d.protocol === 'hysteria2' || hyIn ? [] : [['spread', 'нагрузка'] as [AutoMode, string]])]} />
+              <span className="hint">{AUTO_HINT[st.autoMode]}</span>
+              {st.autoMode === 'smart' && (
+                <div className="grid g4 mini">
+                  <label className="fld">задержка ≤, мс<input className="inp mono" inputMode="numeric" value={st.maxRttMs} onChange={(e) => setSt({ maxRttMs: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                  <label className="fld">скорость ≥, Мбит/с<input className="inp mono" inputMode="decimal" value={st.minMbps} onChange={(e) => setSt({ minMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} /></label>
+                  <label className="fld">проверка, мин<input className="inp mono" inputMode="numeric" value={st.checkMin} onChange={(e) => setSt({ checkMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                  <label className="fld"><span>тест, МБ <Info>Сколько скачивать через каждый выход при проверке скорости. 5 МБ раз в 15 минут — около 0,5 ГБ трафика в сутки на выход.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                </div>
+              )}
+              {st.autoMode === 'order' && (
+                <div className="grid g4 mini">
+                  <label className="fld"><span>скорость ≥, Мбит/с <Info>0 — не мерить: только доступность. Иначе выход медленнее порога пропускается — трафик идёт на следующий по порядку. Медленный снова считается быстрым от порога +10%.</Info></span>
+                    <input className="inp mono" inputMode="decimal" value={st.orderMinMbps} onChange={(e) => setSt({ orderMinMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} placeholder="0" /></label>
+                  {st.orderMinMbps > 0 && <>
+                    <label className="fld">мерить каждые, мин<input className="inp mono" inputMode="numeric" value={st.speedEveryMin} onChange={(e) => setSt({ speedEveryMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                    <label className="fld"><span>решать каждые, мин <Info>Выход пропускается или возвращается по медиане замеров за это время. 1 минута — по последнему замеру.</Info></span><input className="inp mono" inputMode="numeric" value={st.decideMin} onChange={(e) => setSt({ decideMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                    <label className="fld">тест, МБ<input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                    <span className="hint" style={{ gridColumn: '1 / -1' }}>{`Трафик на замеры: около ${speedTraffic(st.testMB, st.speedEveryMin)} ГБ в сутки на каждый выход.`}</span>
+                  </>}
+                </div>
+              )}
+              {st.autoMode === 'spread' && (
+                <div className="stack" style={{ gap: 10 }}>
+                  <div className="flex" style={{ justifyContent: 'space-between' }}>
+                    <span className="mono small muted">каналы выходов <Info>Замер идёт на самом сервере: speedtest от Ookla, если он установлен, иначе тестовые файлы Hetzner, OVH и Tele2. На время замера (~25 с) канал занят целиком. Своё значение в поле важнее замера; пусто — по замеру.</Info></span>
+                    <button type="button" className="btn sm" disabled={!!measuring || !exits.length} onClick={() => void measure(exits.map((x) => x.id))}>{measuring ? `Замеряю ${nameOf(measuring)}…` : 'Замерить все'}</button>
+                  </div>
+                  <div className="grid g4 mini">
+                    {exits.map((x) => {
+                      const l = links?.[x.id];
+                      const cap = linkCap(l);
+                      return (
+                        <div key={x.id} className="fld">
+                          <label className="stack" style={{ gap: 4 }}><span>канал {x.name}, Мбит/с</span>
+                            <input className="inp mono" inputMode="numeric" value={st.exitCapMbps[x.id] || ''} placeholder={cap ? `${cap} — по замеру` : 'не замерен'} aria-label={`Канал ${x.name}, Мбит/с`}
+                              onChange={(e) => setSt({ exitCapMbps: { ...st.exitCapMbps, [x.id]: Number(e.target.value.replace(/\D/g, '')) } })} /></label>
+                          <span className="k flex" style={{ gap: 6 }}>
+                            {l ? <span className="mono">{`↓${l.down} ↑${l.up} · ${l.source === 'ookla' ? 'Ookla' : 'зеркала'} · ${ago(l.at)}`}</span> : <span>замера нет</span>}
+                            <button type="button" className="btn ghost sm" disabled={!!measuring} onClick={() => void measure([x.id])}>{measuring === x.id ? 'замеряю…' : 'Замерить'}</button>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="grid g4 mini">
+                    <label className="fld"><span>перевод при загрузке, % <Info>Канал выхода загружен сильнее — самая тяжёлая группа, которая поместится, переводится на выход с запасом. Между переводами — не меньше 3 минут.</Info></span>
+                      <input className="inp mono" inputMode="numeric" value={st.spreadHighPct} onChange={(e) => setSt({ spreadHighPct: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                    <label className="fld"><span>групп пользователей <Info>Больше групп — точнее делится нагрузка, но чаще меняется выход у части пользователей. Для 10–50 пользователей и 2–4 выходов хватает 6.</Info></span>
+                      <input className="inp mono" inputMode="numeric" value={st.spreadGroups} onChange={(e) => setSt({ spreadGroups: Number(e.target.value.replace(/\D/g, '')) })} /></label>
+                  </div>
+                  <span className="flex" style={{ gap: 12 }}><Switch label="Делить канал поровну" on={st.spreadFair} onChange={(v) => setSt({ spreadFair: v })} /><span className="mono small muted">делить канал выхода поровну между соединениями <Info>Пока группы переезжают, перегруженный канал делится честно: на выходах с заданной ёмкостью ставится очередь cake на 95% канала и BBR. Ёмкость указывайте реальную: заниженная — урежет скорость.</Info></span></span>
+                </div>
+              )}
+            </>}
+          </div>
+        </div>
+      </section>
       )}
 
-      <div className="stack" style={{ gap: 12 }}>
-        <h3>Связи <Info>Слева — откуда приходят пользователи: напрямую или через сервер-вход. Справа — серверы этой конфигурации: отметьте нужные. Со входом в подписке появятся профили «вход → сервер» для каждого выхода и «вход → авто».</Info></h3>
-        {!managed.length ? <span className="k">Нет подключённых серверов — добавьте их в разделе «Серверы».</span> : (
-          <RouteMap
-            entry={
-              <>
-                <span className="k">{d.entryId ? 'Relay (вход)' : 'Пользователи'}</span>
-                {info.relay ? (
-                  <select className="inp" value={d.entryId} onChange={(e) => { const v = e.target.value; setD({ ...d, entryId: v, nodeIds: v && nat ? d.nodeIds.filter((x) => x !== v).slice(0, 1) : d.nodeIds }); }} aria-label="Сервер-вход">
-                    {/* у «eskadra» вход обязателен: пользователи подключаются к нему */}
-                    <option value="">{esk ? 'выберите вход' : 'напрямую'}</option>
-                    {managed.map((s) => <option key={s.id} value={s.id}>через {s.name}</option>)}
-                  </select>
-                ) : <span className="small">напрямую <Info>{info.name} не пересылается через вход.</Info></span>}
-                {d.entryId && (
-                  <>
-                    <label className="flex small" style={{ gap: 8 }}>порт<input className="inp mono" style={{ width: 90, minHeight: 34 }} inputMode="numeric" value={d.entryPort} onChange={(e) => setD({ ...d, entryPort: e.target.value })} aria-label="Порт входа" /><button type="button" className="btn ghost sm" title="Случайный свободный порт на сервере-входе" onClick={async () => setD(await randomPorts('entry'))}>Случайный</button>{relayState && <Tag kind={relayState.state === 'active' ? 'ok' : relayState.state === 'error' ? 'fail' : 'warn'}>{STATE_LABEL[relayState.state] ?? relayState.state}</Tag>}</label>
-                    {info.natRelay && (
-                      <Seg value={st.hy2Relay} label="Режим входа Hysteria2" onChange={(v) => setSt({ hy2Relay: v, autoEnabled: v === 'core' })}
-                        options={[['nat', 'пересылка'], ['core', 'ядра на входе']]} />
-                    )}
-                    {info.natRelay && !nat && <span className="small muted">несколько выходов, авто <Info>На входе работают sing-box и Xray: вход сам принимает Hysteria2 (его сертификат), выбирает выход так же, как у VLESS (по порядку, по качеству, случайно), и ведёт трафик на выход по Hysteria2. Нагрузка на вход выше, чем у пересылки; «по нагрузке» недоступно.</Info></span>}
-                    {nat
-                      ? <span className="small muted">один выход <Info>Вход пересылает UDP на выход ядром системы (nft), без своего ядра VPN: клиент подключается к адресу входа, а договаривается с выходом — его сертификат, obfs и пароли. Поэтому выход один, без авто-выбора; диапазон смены портов тоже пересылается на выход. У выхода нужен IPv4-адрес.</Info></span>
-                      : <label className="cb small" style={{ minHeight: 28 }}><input type="checkbox" checked={d.nodeIds.includes(d.entryId)} onChange={() => toggleNode(d.entryId)} />и сам принимает напрямую</label>}
-                  </>
-                )}
-              </>
-            }
-            entryOff={!d.entryId}
-            exits={mapExits}
-            ordered={!!d.entryId && !oneExit && st.autoEnabled && (st.autoMode === 'order' || st.autoMode === 'spread')}
-            onToggle={toggleNode}
-            onMove={(id, dir) => move(exits.findIndex((x) => x.id === id), dir)}
-          />
-        )}
-        {esk && !d.entryId && <div className="alert warn small">«eskadra» работает через вход: выберите сервер-вход слева, выходы — справа.</div>}
-        {current?.inbounds.filter((i) => i.error).map((i) => <div key={i.id} className="alert warn small">{servers.find((s) => s.id === i.server_id)?.name}{i.kind === 'hy2' ? ' (Hysteria2)' : ''}: {i.error}</div>)}
-        {d.entryId && info.relay && info.core === 'Xray' && (
-          <label className="fld" style={{ maxWidth: '68ch' }}><span>Резервное плечо вход → выход <Info>Если основное плечо от входа до выхода (протокол этой конфигурации) перестаёт отвечать — например, его режут между серверами, — вход за ~10 секунд ведёт трафик этого выхода по Hysteria2 и сам возвращается, когда основное снова отвечает. Пользователи по-прежнему подключаются ко входу по этой конфигурации, ссылки не меняются. Нужна конфигурация Hysteria2 на тех же выходах; выходы без неё работают как раньше. На входе дополнительно запускается sing-box.</Info></span>
+      {d.entryId && info.relay && info.core === 'Xray' && (
+      <section className="blk">
+        <div className="blk-h fine">ADVANCED <span>свёрнуто</span></div>
+        <Adv title="резервное плечо" sum={`backup=${templates.find((t) => t.id === st.hy2Leg)?.name ?? 'нет'}`}>
+          <label className="fld" style={{ maxWidth: 420 }}><span>Hysteria2-конфигурация <Info>Если основное плечо от входа до выхода перестаёт отвечать, вход за ~10 секунд ведёт трафик этого выхода по Hysteria2 и сам возвращается, когда основное снова отвечает. Нужна конфигурация Hysteria2 на тех же выходах. На входе дополнительно запускается sing-box.</Info></span>
             <select className="inp" value={st.hy2Leg} onChange={(e) => setSt({ hy2Leg: e.target.value })}>
               <option value="">нет</option>
               {legChoices.map((t) => <option key={t.id} value={t.id}>Hysteria2 «{t.name}»</option>)}
               {st.hy2Leg && !legChoices.some((t) => t.id === st.hy2Leg) && <option value={st.hy2Leg}>недоступна — выберите другую</option>}
             </select>
           </label>
-        )}
-        {d.entryId && info.relay && !nat && (
-          <div className="stack" style={{ gap: 8 }}>
-            <div className="flex" style={{ justifyContent: 'space-between', maxWidth: '68ch' }}>
-              <span className="small"><b>Авто-выбор выхода на сервере</b> <Info>Включён — у пользователей есть профиль «вход → авто»: вход сам выбирает выход и переключает его, если тот перестал отвечать (режимы ниже). Выключен — только явные профили «вход → выход»: пользователь сам выбирает страну, вход не проверяет выходы и ничего не переключает. Выключение убирает «вход → авто» из подписок при следующем обновлении.</Info></span>
-              <Switch label="Авто-выбор выхода на сервере" on={st.autoEnabled} onChange={(v) => setSt({ autoEnabled: v })} />
-            </div>
-            {st.autoEnabled && (<>
-            <span className="k">Профиль «вход → авто» выбирает выход <Info>Задержку вход проверяет сам раз в минуту, скорость скачивания панель меряет по расписанию. Переключение — без разрыва соединений; о каждом переключении бот пишет админам.</Info></span>
-            <Seg value={st.autoMode} label="Выбор выхода" onChange={(v) => setSt({ autoMode: v })} options={[['smart', 'по качеству'], ['order', 'по порядку'], ...(d.protocol === 'hysteria2' || (esk && st.entryProto === 'hysteria2') ? [] : [['spread', 'по нагрузке'] as [AutoMode, string]]), ['random', 'случайно']]} />
-            <span className="small muted" style={{ maxWidth: '68ch' }}>{AUTO_HINT[st.autoMode]}{st.autoMode === 'order' ? ' Порядок — стрелками на схеме.' : st.autoMode === 'spread' ? ' Порядок запасных выходов — стрелками на схеме.' : ''}</span>
-            {st.autoMode === 'smart' && (
-              <div className="grid g4">
-                <label className="fld">Задержка не больше, мс<input className="inp mono" inputMode="numeric" value={st.maxRttMs} onChange={(e) => setSt({ maxRttMs: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                <label className="fld">Скорость не меньше, Мбит/с<input className="inp mono" inputMode="decimal" value={st.minMbps} onChange={(e) => setSt({ minMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} /></label>
-                <label className="fld">Проверять каждые, мин<input className="inp mono" inputMode="numeric" value={st.checkMin} onChange={(e) => setSt({ checkMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при проверке скорости. 5 МБ раз в 15 минут — около 0,5 ГБ трафика в сутки на выход.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-              </div>
-            )}
-            {st.autoMode === 'spread' && (
-              <div className="stack" style={{ gap: 10 }}>
-                <div className="flex" style={{ justifyContent: 'space-between' }}>
-                  <span className="k">Каналы выходов <Info>Замер идёт на самом сервере: если на нём установлен официальный speedtest от Ookla — его результат, иначе 8 потоков к тестовым файлам Hetzner, OVH и Tele2 на скачивание и к Cloudflare и Tele2 на отдачу, 10 секунд после 2 секунд разгона. Ёмкость — меньшее из двух. На время замера (~25 с) канал занят целиком — пользователям этого сервера будет медленнее. Своё значение в поле важнее замера; пусто — по замеру; ни того, ни другого — загрузка выхода не контролируется, группы делятся поровну. Новая ёмкость меняет раскладку групп при следующем выкате.</Info></span>
-                  <button type="button" className="btn sm" disabled={!!measuring || !exits.length} onClick={() => void measure(exits.map((x) => x.id))}>{measuring ? `Замеряю ${servers.find((s) => s.id === measuring)?.name ?? ''}…` : 'Замерить все'}</button>
-                </div>
-                <div className="grid g4">
-                  {exits.map((x) => {
-                    const l = links?.[x.id];
-                    const cap = linkCap(l);
-                    return (
-                      <div key={x.id} className="fld">
-                        <label className="stack" style={{ gap: 4 }}><span>Канал {x.name}, Мбит/с</span>
-                          <input className="inp mono" inputMode="numeric" value={st.exitCapMbps[x.id] || ''} placeholder={cap ? `${cap} — по замеру` : 'не замерен'} aria-label={`Канал ${x.name}, Мбит/с`}
-                            onChange={(e) => setSt({ exitCapMbps: { ...st.exitCapMbps, [x.id]: Number(e.target.value.replace(/\D/g, '')) } })} /></label>
-                        <span className="k flex" style={{ gap: 6, flexWrap: 'wrap' }}>
-                          {l ? <span className="mono" title={l.source === 'ookla' ? `Speedtest by Ookla${l.server ? ` · ${l.server}` : ''}` : `Тестовые файлы Hetzner, OVH, Tele2${l.note ? ` · ${l.note}` : ''}`}>{`↓${l.down} ↑${l.up} · ${l.source === 'ookla' ? 'Ookla' : 'зеркала'} · ${ago(l.at)}`}</span> : <span>замера нет</span>}
-                          <button type="button" className="btn ghost sm" disabled={!!measuring} onClick={() => void measure([x.id])}>{measuring === x.id ? 'замеряю…' : 'Замерить'}</button>
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="grid g4">
-                  <label className="fld"><span>Переводить при загрузке выше, % <Info>Канал выхода загружен сильнее — самая тяжёлая группа, которая поместится, переводится на выход с запасом. Домой группа возвращается, когда дома с ней будет на 20% ниже порога. Между переводами — не меньше 3 минут: нагрузка перетекает с новыми соединениями.</Info></span>
-                    <input className="inp mono" inputMode="numeric" value={st.spreadHighPct} onChange={(e) => setSt({ spreadHighPct: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                  <label className="fld"><span>Групп пользователей <Info>Больше групп — точнее делится нагрузка, но чаще меняется выход у части пользователей. Для 10–50 пользователей и 2–4 выходов хватает 6. Смена числа групп или ёмкостей заново раскладывает пользователей по выходам.</Info></span>
-                    <input className="inp mono" inputMode="numeric" value={st.spreadGroups} onChange={(e) => setSt({ spreadGroups: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                </div>
-                <div className="flex" style={{ justifyContent: 'space-between', maxWidth: '68ch' }}>
-                  <span className="small">Делить канал выхода поровну между соединениями <Info>Пока группы переезжают, перегруженный канал делится честно: у каждого соединения своя доля, видео у остальных идёт в меньшем качестве, а не встаёт. На выходах с заданной ёмкостью ставится очередь cake на 95% канала и BBR; переживает перезагрузку. Ёмкость указывайте реальную: заниженная — урежет скорость. Выключить — снять галочку и выкатить.</Info></span>
-                  <Switch label="Делить канал поровну" on={st.spreadFair} onChange={(v) => setSt({ spreadFair: v })} />
-                </div>
-              </div>
-            )}
-            {st.autoMode === 'order' && (
-              <div className="grid g4">
-                <label className="fld"><span>Скорость не меньше, Мбит/с <Info>0 — не мерить: только доступность. Иначе выход медленнее порога пропускается — трафик идёт на следующий по порядку; тот тоже медленный — на следующий за ним. Медленный снова считается быстрым от порога +10% — без дёрганья на границе. Медленные все — обычный порядок по доступности.</Info></span>
-                  <input className="inp mono" inputMode="decimal" value={st.orderMinMbps} onChange={(e) => setSt({ orderMinMbps: Number(e.target.value.replace(/[^\d.]/g, '')) })} placeholder="0" /></label>
-                {st.orderMinMbps > 0 && <>
-                  <label className="fld">Мерить скорость каждые, мин<input className="inp mono" inputMode="numeric" value={st.speedEveryMin} onChange={(e) => setSt({ speedEveryMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                  <label className="fld"><span>Решать о переключении каждые, мин <Info>Выход пропускается или возвращается по медиане замеров за это время. 1 минута — по последнему замеру, реакция быстрее всего; больше — одна неудачная минута трафик не перекидывает. Само переключение делает Xray на входе за секунды.</Info></span><input className="inp mono" inputMode="numeric" value={st.decideMin} onChange={(e) => setSt({ decideMin: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                  <label className="fld"><span>Объём теста, МБ <Info>Сколько скачивать через каждый выход при замере. Меньше объём — меньше трафика, но замер грубее на быстрых каналах.</Info></span><input className="inp mono" inputMode="numeric" value={st.testMB} onChange={(e) => setSt({ testMB: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-                  <span className="k" style={{ gridColumn: '1 / -1' }}>{`Трафик на замеры: около ${speedTraffic(st.testMB, st.speedEveryMin)} ГБ в сутки на каждый выход.`}</span>
-                </>}
-              </div>
-            )}
-            </>)}
-          </div>
-        )}
-      </div>
-
-      {esk && (
-        <div className="stack" style={{ gap: 8 }}>
-          <span className="k">Входной протокол <Info>Чем пользователи подключаются ко входу. От входа до выхода трафик идёт тем же протоколом, а если он перестал отвечать — другим: примерно за 10 секунд, обратно — сам. VLESS: основной VLESS, резерв Hysteria2. Hysteria2: основной Hysteria2, резерв VLESS; на входе принимает sing-box со своим сертификатом, порт входа — UDP, «по нагрузке» недоступно. Смена протокола меняет ссылки «через вход» у пользователей — пусть обновят подписку.</Info></span>
-          <Seg value={st.entryProto} label="Входной протокол" onChange={(v) => setSt({ entryProto: v, ...(v === 'hysteria2' && st.autoMode === 'spread' ? { autoMode: 'order' as AutoMode } : {}) })}
-            options={[['vless', 'VLESS → резерв Hysteria2'], ['hysteria2', 'Hysteria2 → резерв VLESS']]} />
-        </div>
+          <span className="hint">Упадёт основное плечо между серверами — вход пустит трафик через Hysteria2. Ссылки у пользователей не меняются.</span>
+        </Adv>
+      </section>
       )}
+      </>}
 
-      {esk && (
-        <div className="stack" style={{ gap: 8 }}>
-          <span className="k">{st.entryProto === 'hysteria2' ? 'Hysteria2 на выходах — основное плечо' : 'Hysteria2 на выходах — резерв'} <Info>На каждом выходе рядом с VLESS работает Hysteria2. Пользователям она не выдаётся: по ней вход ведёт трафик до выхода — основным плечом при входе по Hysteria2 или резервным при входе по VLESS (переключение ~10 секунд, возврат — сам). Выкатывается и снимается вместе с этой конфигурацией. Порт UDP — пусто или 0: тот же номер, что у VLESS (TCP и UDP не мешают друг другу).</Info></span>
-          <div className="grid g3">
-            <label className="fld">Порт Hysteria2 (UDP)<input className="inp mono" inputMode="numeric" value={st.hy2Port || ''} placeholder={d.port || '8443'} onChange={(e) => setSt({ hy2Port: Number(e.target.value.replace(/\D/g, '')) })} /></label>
-            <label className="fld"><span>Пароль obfs (salamander) <Info>Дополнительно маскирует QUIC между входом и выходом. Пусто — без obfs.</Info></span><span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ flex: 1 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" title="Случайный пароль obfs" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>Случайный</button></span></label>
-            <label className="fld"><span>Сайт маскировки <Info>Кто подключится к Hysteria2 выхода без пароля (например, сканер), увидит этот сайт — выход проксирует его, как обычный HTTP/3-сайт. Пусто — ответ 404. Лучше брать тот же сайт, что у REALITY: под его имя выпущен сертификат Hysteria2.</Info></span>
-              <span className="flex" style={{ gap: 6 }}>
-                <input className="inp mono" style={{ flex: 1 }} list="esk-masq" value={st.hy2Masquerade} onChange={(e) => setSt({ hy2Masquerade: e.target.value.trim() })} placeholder="https://www.bing.com/" aria-label="Сайт маскировки" />
-                {d.sni.split(/[\s,]+/)[0] && <button type="button" className="btn sm" title="Тот же сайт, что у REALITY (SNI)" onClick={() => setSt({ hy2Masquerade: `https://${d.sni.split(/[\s,]+/)[0]}/` })}>Как SNI</button>}
+      {step === 2 && <>
+      <section className="blk">
+        <div className="blk-h req">REQUIRED <span>{st.security === 'reality' && info.sec.includes('reality') ? 'защита и sni' : tls && info.cert.length ? 'защита и сертификат' : 'защита и маскировка'}</span></div>
+        <div className="kv">
+          {info.sec.length > 1 && <>
+            <span className="kv-k">защита <span className="req">*</span></span>
+            <div className="picks" role="radiogroup" aria-label="Защита">
+              {info.sec.map((x) => (
+                <label key={x} className="pick">
+                  <input type="radio" name="sec" checked={st.security === x} onChange={() => setSt({ security: x, flow: x === 'none' ? '' : st.flow, transport: x === 'reality' && !['tcp', 'grpc', 'xhttp'].includes(st.transport) ? 'tcp' : st.transport })} />
+                  <span className="pick-t">{x}{SEC_PICK[x].tag && <span className={`tag ${SEC_PICK[x].kind}`}>{SEC_PICK[x].tag}</span>}</span>
+                  <span className="pick-d">{SEC_PICK[x].desc}</span>
+                </label>
+              ))}
+            </div>
+          </>}
+
+          {st.security === 'reality' && info.sec.includes('reality') && <>
+            <label className="kv-k" htmlFor="cfg-sni">sni <span className="req">*</span> <Info>Чужой сайт с TLS 1.3 и HTTP/2, под который маскируется сервер. Можно несколько через пробел — все имена должны обслуживаться первым сайтом. www.microsoft.com с REALITY не работает.</Info></label>
+            <div className="kv-v">
+              <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                <input id="cfg-sni" className={`inp mono${sniWeak ? ' warn' : ''}`} style={{ flex: 1 }} value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="сайт из сети сервера" />
+                <button type="button" className="btn" disabled={!managed.length} onClick={() => setPick(true)}>scan…</button>
               </span>
-              <datalist id="esk-masq">{[...new Set([...d.sni.split(/[\s,]+/).filter(Boolean), 'www.bing.com', 'www.apple.com', 'www.microsoft.com', 'www.cloudflare.com', 'www.samsung.com', 'dl.google.com'])].map((h) => <option key={h} value={`https://${h}/`} />)}</datalist>
-            </label>
-            <label className="fld"><span>Смена портов (port hopping) <Info>Диапазон UDP-портов на выходах, например 20000-30000: вход периодически меняет порт плеча. Мешает резать одно UDP-соединение. Пусто — один порт.</Info></span><input className="inp mono" value={st.hy2Hop} onChange={(e) => setSt({ hy2Hop: e.target.value })} placeholder="20000-30000" /></label>
-          </div>
-          {/* серверная сторона Hysteria2 eskadra: inbounds на выходах (клиент — вход) и, при входе по Hysteria2, inbound входа (клиенты — пользователи) */}
-          <div className="flex" style={{ justifyContent: 'space-between', maxWidth: '68ch' }}>
-            <span className="small">BBR вместо Brutal <Info>Серверы Hysteria2 eskadra велят клиентам не учитывать заявленную полосу и работать по BBR: выходы — входу, а при входе по Hysteria2 и вход — пользователям. Бережнее к чужим каналам, но на плече с потерями заметно медленнее. Обычно выключено. Несовместимо с потолком на клиента.</Info></span>
-            <Switch label="BBR вместо Brutal" on={st.hy2IgnoreClientBw} onChange={(v) => setSt({ hy2IgnoreClientBw: v, ...(v ? { hy2ServerUpMbps: 0, hy2ServerDownMbps: 0 } : {}) })} />
-          </div>
-          {!st.hy2IgnoreClientBw && (<>
-            <span className="k">Потолок на одного клиента <Info>Сервер Hysteria2 не даст клиенту больше этой полосы, даже если тот заявит больше. На выходах клиент — вход (плечо до выхода); при входе по Hysteria2 тот же потолок действует на входе для каждого пользователя. 0 — без потолка.</Info></span>
-            <div className="grid g3">
-              <label className="fld">К клиенту, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2ServerUpMbps} onChange={(e) => setSt({ hy2ServerUpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
-              <label className="fld">От клиента, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2ServerDownMbps} onChange={(e) => setSt({ hy2ServerDownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+              <span className="hint">Лучше сайт из той же подсети или ASN, что и сервер, на TLS 1.3 + HTTP/2. scan ищет таких соседей с ваших серверов.</span>
+              {sniWeak && <span className="hint warn">Не из сети сервера — несовпадение IP и SNI заметно DPI. Можно выкатить, но лучше заменить.</span>}
             </div>
-          </>)}
-        </div>
-      )}
+          </>}
 
-      {(d.protocol === 'hysteria2' || esk) && (
-        <div className="stack" style={{ gap: 8 }}>
-          {/* у eskadra клиент Hysteria2 — вход: полоса задаёт Brutal на плече вход → выход, когда трафик идёт по резерву */}
-          {esk ? <span className="k">Скорость клиента <Info>Клиент Hysteria2 у eskadra — сам вход: полоса включает Brutal на плече вход → выход, когда трафик выхода идёт по Hysteria2. Скорость держится и при потерях между странами; без полосы Hysteria2 сбрасывает скорость от потерь — бывает в 10–15 раз медленнее. Ставьте чуть ниже канала между входом и выходом; 0 — без Brutal. Отдача — от входа к выходу, загрузка — от выхода ко входу. При входе по Hysteria2 эта же полоса попадает в ссылки и подписку пользователей.</Info></span>
-          : <span className="k">Скорость клиента <Info>Вшивается в подписку sing-box и в ссылку. С указанной полосой клиент включает Brutal: скорость держится и при потерях на плече между странами. Без неё Hysteria2 сбрасывает скорость от потерь — бывает в 10–15 раз медленнее. Ставьте чуть ниже реального канала пользователя; 0 — клиент решает сам. Полосу из ссылки понимают не все клиенты — в остальных укажите её в настройках вручную.</Info></span>}
-          <div className="grid g3">
-            <label className="fld">Отдача, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2UpMbps} onChange={(e) => setSt({ hy2UpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
-            <label className="fld">Загрузка, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2DownMbps} onChange={(e) => setSt({ hy2DownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
-          </div>
-          {!st.hy2UpMbps && !st.hy2DownMbps && <span><button type="button" className="btn sm" title="Отдача 50, загрузка 200 Мбит/с" onClick={() => setSt({ hy2UpMbps: 50, hy2DownMbps: 200 })}>Типичные 50 / 200</button></span>}
-          {!st.hy2UpMbps !== !st.hy2DownMbps && <span className="k" style={{ color: 'var(--warn)' }}>Укажите обе величины — иначе Brutal не включится.</span>}
-        </div>
-      )}
-
-      {vless && info.tr.includes('xhttp') && (
-        <div className="stack" style={{ gap: 8 }}>
-          <span className="k">XHTTP <Info>Транспорт Xray поверх обычных HTTP-запросов: хуже распознаётся и проходит через CDN. Работают клиенты на Xray (v2rayN, v2rayNG, Happ); клиенты на sing-box XHTTP не умеют — в подписке sing-box такие профили не появятся. Версии Xray на сервере и у клиента лучше держать свежими.</Info></span>
-          <Seg value={xMode} label="XHTTP" onChange={setX}
-            options={!chainX ? [['off', 'выкл'], ['on', 'вкл']]
-              : hyIn ? [['off', 'выкл'], ['leg', 'между серверами']]
-              : [['off', 'выкл'], ['clients', 'для клиентов'], ['leg', 'между серверами'], ['all', 'везде'], ['cdn', 'через CDN']]} />
-          <span className="small muted">{hyIn && xMode === 'leg' ? 'XHTTP — у резервного плеча VLESS между входом и выходами. Клиенты подключаются к входу по Hysteria2, основное плечо — Hysteria2.' : X_HINT[xMode]}</span>
-          {xMode === 'cdn' && (
-            <div className="stack" style={{ gap: 8 }}>
-              <label className="fld"><span>Домен на CDN <Info>Поддомен вашего домена, который CDN проксирует на адрес входа, например vpn.example.com. Клиенты получат его в ссылках и подписке вместо адреса входа.</Info></span>
-                <input className="inp mono" value={st.cdn} onChange={(e) => setSt({ cdn: e.target.value.trim().toLowerCase() })} placeholder="vpn.example.com" aria-label="Домен на CDN" /></label>
-              {!st.cdn && <span className="k" style={{ color: 'var(--warn)' }}>Укажите домен — без него вход за CDN не включится.</span>}
-              {!CDN_PORTS.includes(d.entryPort) && (
-                <span className="k" style={{ color: 'var(--warn)' }}>Cloudflare проксирует только порты {CDN_PORTS.join(', ')} — сейчас у входа {d.entryPort}.{' '}
-                  <button type="button" className="btn sm" onClick={() => setD({ ...d, entryPort: '443' })}>Порт входа 443</button>{' '}
-                  <button type="button" className="btn sm" onClick={() => setD({ ...d, entryPort: '8443' })}>8443</button></span>
+          {tls && info.cert.length > 0 && <>
+            <span className="kv-k">сертификат <span className="req">*</span> <Info>Let's Encrypt на IP выпускается на каждом сервере сам и продлевается автоматически (порт 80 на время выпуска). Для домена — A-запись должна указывать на сервер. Загруженный сертификат раздаётся на все серверы конфигурации.</Info></span>
+            <div className="kv-v kv-wide">
+              <div className="picks picks-col" role="radiogroup" aria-label="Сертификат">
+                {info.cert.map((m) => (
+                  <label key={m} className="pick">
+                    <input type="radio" name="cert" checked={st.certMode === m} onChange={() => setSt({ certMode: m })} />
+                    <span className="pick-t">{CERT_PICK[m].label}{m === 'ip' && <span className="tag ok">rec</span>}</span>
+                    <span className="pick-d">{CERT_PICK[m].desc}</span>
+                  </label>
+                ))}
+              </div>
+              {st.certMode === 'domain' && (
+                <div className="grid g2">
+                  {usedIds.length ? usedIds.map((id) => (
+                    <label key={id} className="fld"><span>{`${nameOf(id)} — домен`}</span>
+                      <input className="inp mono" value={st.domains[id] ?? ''} onChange={(e) => setSt({ domains: { ...st.domains, [id]: e.target.value.trim() } })} placeholder="de.example.com" />
+                    </label>
+                  )) : <span className="hint warn">Сначала выберите серверы на шаге «Маршрут».</span>}
+                </div>
               )}
-              <details className="stack">
-                <summary className="k" style={{ cursor: 'pointer' }}>Как настроить Cloudflare (5 минут)</summary>
+              {st.certMode === 'custom' && (
+                <div className="stack" style={{ gap: 8 }}>
+                  <label className="fld">Домен в сертификате (клиенты проверяют его)<input className="inp mono" value={st.domain} onChange={(e) => setSt({ domain: e.target.value.trim() })} placeholder="vpn.example.com" /></label>
+                  {current?.hasCustomCert && !d.certPem && <span className="hint ok">Сертификат загружен. Чтобы заменить — вставьте новый.</span>}
+                  <div className="grid g2">
+                    <label className="fld">Сертификат (fullchain.pem)<textarea className="inp mono" rows={4} value={d.certPem} onChange={(e) => setD({ ...d, certPem: e.target.value })} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} /></label>
+                    <label className="fld">Ключ (privkey.pem)<textarea className="inp mono" rows={4} value={d.keyPem} onChange={(e) => setD({ ...d, keyPem: e.target.value })} placeholder="-----BEGIN PRIVATE KEY-----" spellCheck={false} /></label>
+                  </div>
+                </div>
+              )}
+              {st.certMode === 'self' && <>
+                <label className="fld">Имя в сертификате (SNI)<input className="inp mono" value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="hy.example" /></label>
+                <span className="hint warn">Клиенты не смогут проверить сервер: в ссылках будет insecure. Лучше Let's Encrypt на IP.</span>
+              </>}
+            </div>
+          </>}
+
+          {d.protocol === 'shadowsocks' && <>
+            <label className="kv-k" htmlFor="cfg-ss">шифр <span className="req">*</span></label>
+            <div className="kv-v">
+              <select id="cfg-ss" className="inp mono" value={st.ssMethod} onChange={(e) => setSt({ ssMethod: e.target.value })}>
+                {['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305'].map((m) => <option key={m}>{m}</option>)}
+              </select>
+              <span className="hint">aes-128 — на серверах с AES-NI, chacha20 — на слабых ARM.</span>
+              <span className="hint warn">Без маскировки под сайт: распознаётся по первым байтам. Держите как запасной вариант.</span>
+            </div>
+          </>}
+
+          {d.protocol === 'mtproto' && <>
+            <label className="kv-k" htmlFor="cfg-mt">fake-tls домен <span className="req">*</span></label>
+            <div className="kv-v">
+              <input id="cfg-mt" className="inp mono" value={st.mtDomain} onChange={(e) => setSt({ mtDomain: e.target.value.trim() })} placeholder="www.apple.com" />
+              <span className="hint">Telegram подключается как будто к этому сайту; неопознанные подключения уходят на него. На одном сервере — одна конфигурация MTProto.</span>
+            </div>
+          </>}
+
+          {xMode === 'cdn' && <>
+            <label className="kv-k" htmlFor="cfg-cdn">cdn домен <span className="req">*</span></label>
+            <div className="kv-v">
+              <input id="cfg-cdn" className="inp mono" value={st.cdn} onChange={(e) => setSt({ cdn: e.target.value.trim().toLowerCase() })} placeholder="vpn.example.com" />
+              <span className="hint">Поддомен в Cloudflare (Proxied) → IP входа. Клиенты получат его вместо адреса входа.</span>
+              {!CDN_PORTS.includes(d.entryPort) && (
+                <span className="hint warn">Cloudflare проксирует только порты {CDN_PORTS.join(', ')} — сейчас у входа {d.entryPort}.{' '}
+                  <button type="button" className="link" onClick={() => setD({ ...d, entryPort: '443' })}>поставить 443</button></span>
+              )}
+              <details className="more">
+                <summary>Как настроить Cloudflare (5 минут)</summary>
                 <ol className="small" style={{ margin: '8px 0 0', paddingLeft: 20, lineHeight: 1.6 }}>
                   <li>Добавьте свой домен в Cloudflare (бесплатный тариф подходит) и смените у регистратора NS-серверы на выданные Cloudflare.</li>
                   <li>DNS → Add record: тип A, имя — поддомен (например, vpn), адрес — IP входа <b className="mono">{entryHost || '—'}</b>, Proxy status — Proxied (оранжевое облако).</li>
@@ -704,138 +1103,223 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
                 </ol>
               </details>
             </div>
-          )}
-          {xUsed && (
-            <details className="stack">
-              <summary className="k" style={{ cursor: 'pointer' }}>Тонкая настройка XHTTP</summary>
-              <div className="stack" style={{ gap: 14, paddingTop: 12 }}>
-                <span className="small muted">Менять не обязательно: пустое поле — значение Xray по умолчанию (показано серым). Число или диапазон «16-32» — из диапазона Xray берёт случайное значение для каждого соединения. Настройки одни на конфигурацию: панель раскладывает их по серверу, плечу вход → выход и ссылкам сама.</span>
-                <div className="grid g3">
-                  <label className="fld"><span>Путь <Info>Путь HTTP-запросов XHTTP — один у сервера и клиентов, в ссылки панель его вписывает сама. Случайный путь не даёт сканерам найти прокси запросом на «/».</Info></span>
-                    <span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ flex: 1 }} value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" aria-label="Путь XHTTP" /><button type="button" className="btn sm" title="Случайный путь" onClick={() => setSt({ path: '/' + randomHex(6) })}>Случайный</button></span></label>
-                  <label className="fld"><span>Host <Info>Заголовок Host запросов. Обычно пусто. У входа за CDN панель ставит домен CDN сама. Нужен, если перед сервером стоит обратный прокси с несколькими сайтами.</Info></span><input className="inp mono" value={st.host} onChange={(e) => setSt({ host: e.target.value.trim() })} placeholder="—" aria-label="Host XHTTP" /></label>
-                  <label className="fld"><span>Режим <Info>auto — сервер принимает все режимы, клиент выбирает сам: с REALITY — stream-one, с TLS — stream-up. packet-up — много коротких POST к серверу и один поток обратно: медленнее, зато проходит где угодно. stream-up — по долгому потоку в каждую сторону. stream-one — один поток в обе стороны. Сервер с конкретным режимом принимает только его (stream-up — ещё и stream-one).</Info></span><select className="inp" value={st.xhttpMode} onChange={(e) => setSt({ xhttpMode: e.target.value })} aria-label="Режим XHTTP">{['auto', 'packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>
-                  {xMode === 'cdn' && <>
-                    <label className="fld"><span>Режим через CDN <Info>Режим в ссылках через CDN. packet-up проходит через любой CDN. stream-up быстрее отдаёт данные от клиента, через Cloudflare — только с включённым Network → gRPC. stream-one через Cloudflare тоже требует gRPC, а у некоторых CDN режется по скорости.</Info></span><select className="inp" value={st.cdnMode} onChange={(e) => setSt({ cdnMode: e.target.value as Settings['cdnMode'] })} aria-label="Режим через CDN">{['packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>
-                    <div className="flex" style={{ justifyContent: 'space-between' }}><span className="small">HTTP/3 до CDN <Info>Клиент подключается к CDN по QUIC (ALPN h3): помогает, если HTTPS к CDN режут или душат, а UDP — нет. В Cloudflare должно быть включено Network → HTTP/3 (with QUIC), обычно оно включено. Вход по-прежнему принимает CDN по TCP.</Info></span><Switch label="HTTP/3 до CDN" on={st.cdnH3} onChange={(v) => setSt({ cdnH3: v })} /></div>
-                  </>}
-                </div>
-                {X_FIELDS.map(({ group, fields }) => (
-                  <div key={group} className="stack" style={{ gap: 8 }}>
-                    <span className="k">{group}</span>
-                    <div className="grid g3">
-                      {fields.map(([k, label, def, hint]) => (
-                        <label key={k} className="fld"><span>{label} <Info>{hint}</Info></span>
-                          <input className="inp mono" value={st.xhttpExtra[k] ?? ''} onChange={(e) => setSt({ xhttpExtra: { ...st.xhttpExtra, [k]: e.target.value.replace(/[^\d-]/g, '') } })} placeholder={def} aria-label={label} /></label>
-                      ))}
-                    </div>
-                    {group === 'Маскировка' && (
-                      <div className="grid g2">
-                        <div className="flex" style={{ justifyContent: 'space-between' }}><span className="small">Без заголовка gRPC <Info>В режимах stream-up и stream-one клиент по умолчанию выдаёт себя за gRPC — так Cloudflare и nginx не задерживают поток. Включите, если CDN или прокси не пропускает такой заголовок.</Info></span><Switch label="Без заголовка gRPC" on={!!st.xhttpExtra.noGRPCHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noGRPCHeader: v } })} /></div>
-                        <div className="flex" style={{ justifyContent: 'space-between' }}><span className="small">Без заголовка SSE <Info>Сервер по умолчанию помечает поток к клиенту как text/event-stream — так CDN его не задерживают. Включите, если этот заголовок мешает.</Info></span><Switch label="Без заголовка SSE" on={!!st.xhttpExtra.noSSEHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noSSEHeader: v } })} /></div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                <div className="stack" style={{ gap: 8 }}>
-                  <span className="k">XMUX <Info>Клиент держит несколько HTTP/2- или HTTP/3-соединений и раскладывает по ним соединения пользователя — анализировать трафик по одному соединению труднее. Действует на клиентов и на плечо вход → выход.</Info></span>
-                  <div className="grid g3">
-                    {XMUX_FIELDS.map(([k, label, def, hint]) => (
-                      <label key={k} className="fld"><span>{label} <Info>{hint}</Info></span>
-                        <input className="inp mono" value={st.xhttpExtra.xmux?.[k] ?? ''} onChange={(e) => setSt({ xhttpExtra: { ...st.xhttpExtra, xmux: { ...st.xhttpExtra.xmux, [k]: e.target.value.replace(/[^\d-]/g, '') } } })} placeholder={def} aria-label={label} /></label>
-                    ))}
-                  </div>
-                  {st.xhttpExtra.xmux?.maxConcurrency && st.xhttpExtra.xmux?.maxConnections && <span className="k" style={{ color: 'var(--warn)' }}>«Потоков на соединение» и «Соединений» вместе не задаются — оставьте одно.</span>}
-                </div>
-                <span className="small muted">Раздельные пути для загрузки и отдачи (downloadSettings) и свои заголовки панель не настраивает: их нужно вписывать в клиент вручную.</span>
-                {Object.keys(cleanExtra(st.xhttpExtra)).length > 0 && <span><button type="button" className="btn sm" onClick={() => setSt({ xhttpExtra: {} })}>Сбросить к умолчаниям Xray</button></span>}
-              </div>
-            </details>
-          )}
+          </>}
+
+          {st.security === 'none' && info.sec.length > 1 && <>
+            <span className="kv-k">внимание</span>
+            <span className="hint warn">Без шифрования трафик открыт. Только если TLS даёт CDN или прокси.</span>
+          </>}
+          {info.sec.length < 2 && !tls && d.protocol !== 'shadowsocks' && d.protocol !== 'mtproto' && <span className="hint">Отдельной защиты у протокола нет.</span>}
         </div>
+      </section>
+
+      {(trChoices.length > 1 || showFp || d.protocol === 'hysteria2' || esk) && (
+      <section className="blk">
+        <div className="blk-h rec">RECOMMENDED <span>предзаполнено</span></div>
+        <div className="kv">
+          {trChoices.length > 1 && <>
+            <span className="kv-k">транспорт <Info>TCP — по умолчанию и быстрее всего. XHTTP — трафик похож на обычные HTTP-запросы, помогает, когда соединение режут; понимают только клиенты на Xray. gRPC, WebSocket, HTTPUpgrade — если сервер за CDN или прокси.</Info></span>
+            <div className="picks" role="radiogroup" aria-label="Транспорт">
+              {trChoices.map((x) => (
+                <label key={x} className="pick">
+                  <input type="radio" name="tr" checked={x === 'xhttp' ? xUsed : !xUsed && st.transport === x} onChange={() => pickTransport(x)} />
+                  <span className="pick-t">{x === 'tcp' && vless && st.security !== 'none' ? 'tcp+vision' : x}{TR_PICK[x].tag && <span className={`tag ${TR_PICK[x].kind}`}>{TR_PICK[x].tag}</span>}</span>
+                  <span className="pick-d">{TR_PICK[x].desc}</span>
+                </label>
+              ))}
+            </div>
+          </>}
+
+          {xUsed && chainX && <>
+            <span className="kv-k">xhttp где</span>
+            <div className="kv-v kv-wide">
+              <Seg value={xMode} label="Где XHTTP" onChange={setX}
+                options={hyIn ? [['leg', 'между серверами']] : [['clients', 'для клиентов'], ['leg', 'между серверами'], ['all', 'везде'], ['cdn', 'через cdn']]} />
+              <span className="hint">{hyIn && xMode === 'leg' ? 'XHTTP — у резервного плеча VLESS между входом и выходами. Клиенты подключаются к входу по Hysteria2.' : X_HINT[xMode]}</span>
+            </div>
+          </>}
+
+          {showFp && <>
+            <label className="kv-k" htmlFor="cfg-fp">utls</label>
+            <div className="kv-v">
+              <select id="cfg-fp" className="inp mono" style={{ maxWidth: 280 }} value={d.fingerprint} onChange={(e) => setD({ ...d, fingerprint: e.target.value })}>{['chrome', 'firefox', 'safari', 'edge', 'random'].map((f) => <option key={f}>{f}</option>)}</select>
+              <span className="hint">chrome — самый частый отпечаток в сети, на нём трафик теряется лучше всего.</span>
+            </div>
+          </>}
+
+          {(d.protocol === 'hysteria2' || esk) && <>
+            <span className="kv-k">hysteria2 <Info>{esk ? 'У Eskadra Hysteria2 работает на выходах рядом с VLESS: по ней вход ведёт трафик до выхода — основным или резервным плечом.' : 'Настройки маскировки QUIC и смены портов. Клиенты получают их из ссылки и подписки.'}</Info></span>
+            <div className="kv-v kv-wide">
+              <span className="flex" style={{ gap: 12 }}>
+                <Switch label="obfs salamander" on={!!st.hy2Obfs} onChange={(v) => setSt({ hy2Obfs: v ? randomHex(16) : '' })} /><span className="mono small">obfs salamander</span>
+                {!!st.hy2Obfs && <span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ width: 260 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>rand</button></span>}
+              </span>
+              <span className="hint">Прячет признаки QUIC в первых пакетах — у большинства провайдеров РФ проходимость выше. Клиенты должны поддерживать obfs.</span>
+              <span className="flex" style={{ gap: 12 }}>
+                <Switch label="port hopping" on={!!st.hy2Hop.trim()} onChange={(v) => setSt({ hy2Hop: v ? '20000-30000' : '' })} /><span className="mono small">port hopping</span>
+                {!!st.hy2Hop.trim() && <input className="inp mono" style={{ width: 160 }} value={st.hy2Hop} onChange={(e) => setSt({ hy2Hop: e.target.value })} placeholder="20000-30000" aria-label="Диапазон портов" />}
+              </span>
+              <span className="hint">Клиент периодически меняет UDP-порт из диапазона — одно соединение сложнее задушить. Диапазон откройте и во внешнем файрволе хостера.</span>
+            </div>
+          </>}
+        </div>
+      </section>
       )}
 
-      {(info.tr.length > 0 || d.protocol === 'hysteria2') && (
-        <details className="stack">
-          <summary className="k" style={{ cursor: 'pointer' }}>Дополнительно</summary>
-          <div className="stack" style={{ gap: 14, paddingTop: 12 }}>
-            {info.tr.length > 1 && (
-              <div className="stack" style={{ gap: 8 }}>
-                <span className="k">Транспорт <Info>TCP — по умолчанию и быстрее всего. WebSocket, gRPC, HTTPUpgrade — если сервер за CDN или прокси. XHTTP — новый транспорт Xray (только VLESS, в sing-box-подписке не поддерживается).</Info></span>
-                <Seg value={st.transport} label="Транспорт" onChange={(v) => setSt({ transport: v, ...(v === 'tcp' || v === 'xhttp' ? {} : { entryTransport: '' as const }), ...(v === 'xhttp' && (!st.path || st.path === '/') ? { path: '/' + randomHex(6) } : {}) })}
-                  options={info.tr.filter((x) => st.security !== 'reality' || ['tcp', 'grpc', 'xhttp'].includes(x)).map((x) => [x, TR_LABEL[x]] as [Transport, string])} />
-                {chainX && (st.entryTransport || st.cdn) && <span className="small muted">Это транспорт выходов и плеча вход → выход; у входа — {st.cdn ? 'XHTTP через CDN' : TR_LABEL[st.entryTransport as Transport]} (опция XHTTP выше).</span>}
-              </div>
-            )}
-            {['ws', 'httpupgrade'].includes(st.transport) && !xUsed && (
-              <div className="grid g3">
-                <label className="fld">Путь<input className="inp mono" value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" /></label>
-                <label className="fld">Host (необязательно)<input className="inp mono" value={st.host} onChange={(e) => setSt({ host: e.target.value.trim() })} /></label>
-              </div>
-            )}
-            {st.transport === 'grpc' && <label className="fld">Имя сервиса gRPC<input className="inp mono" value={st.serviceName} onChange={(e) => setSt({ serviceName: e.target.value.trim() })} /></label>}
+      <section className="blk">
+        <div className="blk-h fine">ADVANCED <span>пусто = значение ядра; без причины не трогать — нестандартное выделяется</span></div>
+        {xUsed && (
+          <Adv title="xhttp" sum={`mode=${st.xhttpMode} path=${st.path || '/'}`}>
+            <span className="hint">Пустое поле — значение Xray по умолчанию (серым). Число или диапазон «16-32» — Xray берёт случайное значение для каждого соединения.</span>
             <div className="grid g3">
-              {vless && st.security !== 'none' && (st.transport === 'tcp' || (chainX && st.entryTransport === 'tcp')) && (
-                <label className="fld">Flow<select className="inp" value={st.flow} onChange={(e) => setSt({ flow: e.target.value })}><option value="xtls-rprx-vision">xtls-rprx-vision</option><option value="">нет</option></select></label>
-              )}
-              {st.security !== 'none' && d.protocol !== 'hysteria2' && (
-                <label className="fld">Отпечаток клиента (uTLS)<select className="inp" value={d.fingerprint} onChange={(e) => setD({ ...d, fingerprint: e.target.value })}>{['chrome', 'firefox', 'safari', 'edge', 'random'].map((f) => <option key={f}>{f}</option>)}</select></label>
-              )}
-              {st.security === 'tls' && d.protocol !== 'hysteria2' && (
-                <span className="fld">ALPN
-                  <span className="flex">{['h2', 'http/1.1'].map((a) => <label key={a} className="cb small"><input type="checkbox" checked={st.alpn.includes(a)} onChange={() => setSt({ alpn: st.alpn.includes(a) ? st.alpn.filter((x) => x !== a) : [...st.alpn, a] })} />{a}</label>)}</span>
-                </span>
-              )}
-              {d.protocol === 'hysteria2' && <label className="fld"><span>Пароль obfs (salamander) <Info>Дополнительно маскирует QUIC. Пусто — без obfs. Клиенты должны поддерживать obfs.</Info></span><span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ flex: 1 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" title="Случайный пароль obfs" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>Случайный</button></span></label>}
+              <label className="fld"><span>path <Info>Путь HTTP-запросов XHTTP — один у сервера и клиентов. Случайный путь не даёт сканерам найти прокси запросом на «/».</Info></span>
+                <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}><input className="inp mono" style={{ flex: 1 }} value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" aria-label="Путь XHTTP" /><button type="button" className="btn sm" onClick={() => setSt({ path: '/' + randomHex(6) })}>rand</button></span></label>
+              <label className="fld"><span>host <Info>Заголовок Host запросов. Обычно пусто; у входа за CDN панель ставит домен CDN сама.</Info></span><input className="inp mono" value={st.host} onChange={(e) => setSt({ host: e.target.value.trim() })} placeholder="—" aria-label="Host XHTTP" /></label>
+              <label className="fld"><span>mode <Info>auto — клиент выбирает сам: с REALITY — stream-one, с TLS — stream-up. packet-up — медленнее, зато проходит где угодно.</Info></span><select className="inp mono" value={st.xhttpMode} onChange={(e) => setSt({ xhttpMode: e.target.value })} aria-label="Режим XHTTP">{['auto', 'packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>
+              {xMode === 'cdn' && <>
+                <label className="fld"><span>mode через cdn <Info>packet-up проходит через любой CDN. stream-up и stream-one через Cloudflare — только с включённым Network → gRPC.</Info></span><select className="inp mono" value={st.cdnMode} onChange={(e) => setSt({ cdnMode: e.target.value as Settings['cdnMode'] })} aria-label="Режим через CDN">{['packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>
+                <span className="flex" style={{ gap: 10, alignSelf: 'end', minHeight: 38 }}><Switch label="HTTP/3 до CDN" on={st.cdnH3} onChange={(v) => setSt({ cdnH3: v })} /><span className="mono small">http/3 до cdn</span></span>
+              </>}
             </div>
-            {d.protocol === 'hysteria2' && <>
-              <div className="grid g3">
-                <label className="fld"><span>Сайт маскировки <Info>Кто подключится без пароля (например, сканер), увидит этот сайт — сервер проксирует его, как обычный HTTP/3-сайт. Пусто — ответ 404. Лучше брать сайт под то же имя, что в SNI.</Info></span><input className="inp mono" value={st.hy2Masquerade} onChange={(e) => setSt({ hy2Masquerade: e.target.value })} placeholder="https://www.bing.com/" /></label>
-                <label className="fld"><span>Смена портов (port hopping) <Info>Диапазон UDP-портов, например 20000-30000: сервер принимает на любом из них, клиент периодически меняет порт. Мешает резать или душить одно UDP-соединение. На сервере диапазон перенаправляется на порт конфигурации; у хостера с внешним файрволом откройте диапазон и там. Клиенты получают его из подписки sing-box и из ссылки (параметр mport). Пусто — один порт.</Info></span><input className="inp mono" value={st.hy2Hop} onChange={(e) => setSt({ hy2Hop: e.target.value })} placeholder="20000-30000" /></label>
-                {st.hy2Hop.trim() && <label className="fld">Менять порт каждые, с<input className="inp mono" inputMode="numeric" value={st.hy2HopInterval} onChange={(e) => setSt({ hy2HopInterval: Number(e.target.value.replace(/\D/g, '')) })} /></label>}
-              </div>
-              <div className="flex" style={{ justifyContent: 'space-between' }}>
-                <span className="small">BBR вместо Brutal <Info>Сервер велит клиентам не учитывать заявленную полосу и работать по BBR. Бережнее к чужим каналам, но на плече с потерями заметно медленнее. Обычно выключено.</Info></span>
-                <Switch label="BBR вместо Brutal" on={st.hy2IgnoreClientBw} onChange={(v) => setSt({ hy2IgnoreClientBw: v, ...(v ? { hy2ServerUpMbps: 0, hy2ServerDownMbps: 0 } : {}) })} />
-              </div>
-              {!st.hy2IgnoreClientBw && (
-                <div className="stack" style={{ gap: 8 }}>
-                  <span className="k">Потолок на одного клиента <Info>Сервер не даст клиенту больше этой полосы, даже если тот заявит больше. Защищает канал сервера от одного жадного клиента. 0 — без потолка.</Info></span>
-                  <div className="grid g3">
-                    <label className="fld">К клиенту, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2ServerUpMbps} onChange={(e) => setSt({ hy2ServerUpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
-                    <label className="fld">От клиента, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2ServerDownMbps} onChange={(e) => setSt({ hy2ServerDownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
-                  </div>
+            {X_FIELDS.map(({ group, fields }) => (
+              <div key={group} className="stack" style={{ gap: 8 }}>
+                <span className="mono small muted">{group}</span>
+                <div className="grid g3">
+                  {fields.map(([k, label, def, hint]) => (
+                    <label key={k} className="fld"><span>{label} <Info>{hint}</Info></span>
+                      <input className="inp mono" value={st.xhttpExtra[k] ?? ''} onChange={(e) => setSt({ xhttpExtra: { ...st.xhttpExtra, [k]: e.target.value.replace(/[^\d-]/g, '') } })} placeholder={def} aria-label={label} /></label>
+                  ))}
                 </div>
-              )}
-              <span className="k">Буферы UDP на серверах с Hysteria2 увеличиваются до 16 МБ сами — без этого QUIC упирается в них на высоких скоростях.</span>
-            </>}
-            {d.protocol !== 'hysteria2' && (
-              <div className="flex" style={{ justifyContent: 'space-between' }}>
-                <span className="small">Sniffing <Info>Ядро определяет домен назначения по трафику — нужно для маршрутизации по доменам. Обычно включено.</Info></span>
-                <Switch label="Sniffing" on={st.sniffing} onChange={(v) => setSt({ sniffing: v })} />
+                {group === 'Маскировка' && (
+                  <span className="flex" style={{ gap: '8px 24px' }}>
+                    <span className="flex" style={{ gap: 10 }}><Switch label="Без заголовка gRPC" on={!!st.xhttpExtra.noGRPCHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noGRPCHeader: v } })} /><span className="mono small">без заголовка grpc</span></span>
+                    <span className="flex" style={{ gap: 10 }}><Switch label="Без заголовка SSE" on={!!st.xhttpExtra.noSSEHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noSSEHeader: v } })} /><span className="mono small">без заголовка sse</span></span>
+                  </span>
+                )}
               </div>
-            )}
-            <div className="flex" style={{ justifyContent: 'space-between' }}>
-              <span className="small">ECH <Info>Encrypted Client Hello — скрывает имя сайта в рукопожатии. Опционально; профиль с ECH получают только клиенты с поддержкой.</Info></span>
-              <Switch label="ECH" on={d.ech} onChange={(v) => setD({ ...d, ech: v })} />
+            ))}
+            <span className="hint">Раздельные пути для загрузки и отдачи (downloadSettings) и свои заголовки панель не настраивает: их вписывают в клиент вручную.</span>
+          </Adv>
+        )}
+        {xUsed && (
+          <Adv title="xmux" sum={Object.values(st.xhttpExtra.xmux ?? {}).some(Boolean) ? 'изменено' : 'по умолчанию'}>
+            <span className="hint">Клиент держит несколько HTTP/2- или HTTP/3-соединений и раскладывает по ним соединения пользователя. Не раздувайте число соединений: всплеск из десятка TLS-соединений разом — известный повод для блокировки.</span>
+            <div className="grid g3">
+              {XMUX_FIELDS.map(([k, label, def, hint]) => (
+                <label key={k} className="fld"><span>{label} <Info>{hint}</Info></span>
+                  <input className="inp mono" value={st.xhttpExtra.xmux?.[k] ?? ''} onChange={(e) => setSt({ xhttpExtra: { ...st.xhttpExtra, xmux: { ...st.xhttpExtra.xmux, [k]: e.target.value.replace(/[^\d-]/g, '') } } })} placeholder={def} aria-label={label} /></label>
+              ))}
             </div>
+            {st.xhttpExtra.xmux?.maxConcurrency && st.xhttpExtra.xmux?.maxConnections && <span className="hint warn">«Потоков на соединение» и «Соединений» вместе не задаются — оставьте одно.</span>}
+            {Object.keys(cleanExtra(st.xhttpExtra)).length > 0 && <span><button type="button" className="btn sm" onClick={() => setSt({ xhttpExtra: {} })}>Сбросить xhttp к умолчаниям Xray</button></span>}
+          </Adv>
+        )}
+        {!xUsed && ['ws', 'httpupgrade'].includes(st.transport) && (
+          <Adv title={st.transport} sum={`path=${st.path || '/'}`}>
+            <div className="grid g3">
+              <label className="fld">path<input className="inp mono" value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" /></label>
+              <label className="fld"><span>host <Info>Нужен, если перед сервером обратный прокси с несколькими сайтами.</Info></span><input className="inp mono" value={st.host} onChange={(e) => setSt({ host: e.target.value.trim() })} placeholder="—" /></label>
+            </div>
+          </Adv>
+        )}
+        {!xUsed && st.transport === 'grpc' && (
+          <Adv title="grpc" sum={`serviceName=${st.serviceName}`}>
+            <label className="fld" style={{ maxWidth: 320 }}>serviceName<input className="inp mono" value={st.serviceName} onChange={(e) => setSt({ serviceName: e.target.value.trim() })} /></label>
+          </Adv>
+        )}
+        <Adv title="handshake" sum={[showFlow ? `flow=${st.flow ? 'vision' : 'нет'}` : '', st.security === 'tls' && d.protocol !== 'hysteria2' ? `alpn=${st.alpn.join(',') || '—'}` : '', `ech=${d.ech ? 'on' : 'off'}`].filter(Boolean).join(' ')}>
+          <div className="grid g3">
+            {showFlow && <label className="fld"><span>flow <Info>Vision работает только с TCP. У XHTTP панель снимает его сама.</Info></span><select className="inp mono" value={st.flow} onChange={(e) => setSt({ flow: e.target.value })}><option value="xtls-rprx-vision">xtls-rprx-vision</option><option value="">нет</option></select></label>}
+            {st.security === 'tls' && d.protocol !== 'hysteria2' && (
+              <span className="fld">alpn
+                <span className="flex">{['h2', 'http/1.1'].map((a) => <label key={a} className="cb mono small"><input type="checkbox" checked={st.alpn.includes(a)} onChange={() => setSt({ alpn: st.alpn.includes(a) ? st.alpn.filter((x) => x !== a) : [...st.alpn, a] })} />{a}</label>)}</span>
+              </span>
+            )}
           </div>
-        </details>
-      )}
+          <span className="flex" style={{ gap: 10 }}><Switch label="ECH" on={d.ech} onChange={(v) => setD({ ...d, ech: v })} /><span className="mono small">ech</span><Info>Encrypted Client Hello — скрывает имя сайта в рукопожатии. Профиль с ECH получают только клиенты с поддержкой.</Info></span>
+        </Adv>
+        {(d.protocol === 'hysteria2' || esk) && (
+          <Adv title={esk ? 'hysteria2 на выходах' : 'hysteria2'} sum={[esk && st.hy2Port ? `port=${st.hy2Port}` : '', `masq=${st.hy2Masquerade ? st.hy2Masquerade.replace(/^https?:\/\//, '').replace(/\/$/, '') : '404'}`, st.hy2Hop.trim() ? `hop=${st.hy2HopInterval}s` : ''].filter(Boolean).join(' ')}>
+            <div className="grid g3">
+              {esk && <label className="fld"><span>порт hysteria2 (udp) <Info>Пусто или 0 — тот же номер, что у VLESS (TCP и UDP не мешают друг другу).</Info></span><input className="inp mono" inputMode="numeric" value={st.hy2Port || ''} placeholder={d.port || '8443'} onChange={(e) => setSt({ hy2Port: Number(e.target.value.replace(/\D/g, '')) })} /></label>}
+              <label className="fld"><span>сайт маскировки <Info>Кто подключится без пароля (например, сканер), увидит этот сайт — сервер проксирует его как обычный HTTP/3-сайт. Пусто — ответ 404.</Info></span>
+                <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                  <input className="inp mono" style={{ flex: 1 }} list="hy2-masq" value={st.hy2Masquerade} onChange={(e) => setSt({ hy2Masquerade: e.target.value.trim() })} placeholder="https://www.bing.com/" aria-label="Сайт маскировки" />
+                  {esk && sniList[0] && <button type="button" className="btn sm" title="Тот же сайт, что у REALITY (SNI)" onClick={() => setSt({ hy2Masquerade: `https://${sniList[0]}/` })}>как sni</button>}
+                </span>
+                <datalist id="hy2-masq">{[...new Set([...sniList, 'www.bing.com', 'www.apple.com', 'www.cloudflare.com', 'www.samsung.com', 'dl.google.com'])].map((h) => <option key={h} value={`https://${h}/`} />)}</datalist>
+              </label>
+              {st.hy2Hop.trim() && <label className="fld">менять порт каждые, с<input className="inp mono" inputMode="numeric" value={st.hy2HopInterval} onChange={(e) => setSt({ hy2HopInterval: Number(e.target.value.replace(/\D/g, '')) })} /></label>}
+            </div>
+            <span className="hint">Буферы UDP на серверах с Hysteria2 увеличиваются до 16 МБ сами — без этого QUIC упирается в них на высоких скоростях.</span>
+          </Adv>
+        )}
+        {(d.protocol === 'hysteria2' || esk) && (
+          <Adv title="полоса" sum={`cc=${st.hy2IgnoreClientBw ? 'bbr' : 'brutal'} client=${st.hy2UpMbps || 0}/${st.hy2DownMbps || 0}`}>
+            <span className="flex" style={{ gap: 10 }}><Switch label="BBR вместо Brutal" on={st.hy2IgnoreClientBw} onChange={(v) => setSt({ hy2IgnoreClientBw: v, ...(v ? { hy2ServerUpMbps: 0, hy2ServerDownMbps: 0 } : {}) })} /><span className="mono small">bbr вместо brutal</span><Info>Brutal держит заявленную скорость на каналах с потерями; BBR бережнее, но на плече с потерями заметно медленнее. Несовместимо с потолком на клиента.</Info></span>
+            <div className="grid g4 mini">
+              <label className="fld"><span>клиент: отдача, Мбит/с <Info>{esk ? 'Клиент Hysteria2 у Eskadra — сам вход: полоса включает Brutal на плече вход → выход. Ставьте чуть ниже канала между входом и выходом; 0 — без Brutal.' : 'Вшивается в подписку и ссылку: с полосой клиент включает Brutal. Ставьте чуть ниже реального канала пользователя; 0 — клиент решает сам.'}</Info></span><input className="inp mono" inputMode="numeric" value={st.hy2UpMbps} onChange={(e) => setSt({ hy2UpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+              <label className="fld">клиент: загрузка, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2DownMbps} onChange={(e) => setSt({ hy2DownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+              {!st.hy2IgnoreClientBw && <>
+                <label className="fld"><span>потолок к клиенту <Info>Сервер не даст клиенту больше этой полосы, даже если тот заявит больше. 0 — без потолка.</Info></span><input className="inp mono" inputMode="numeric" value={st.hy2ServerUpMbps} onChange={(e) => setSt({ hy2ServerUpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+                <label className="fld">потолок от клиента<input className="inp mono" inputMode="numeric" value={st.hy2ServerDownMbps} onChange={(e) => setSt({ hy2ServerDownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
+              </>}
+            </div>
+            {!st.hy2UpMbps && !st.hy2DownMbps && <span><button type="button" className="btn sm" title="Отдача 50, загрузка 200 Мбит/с" onClick={() => setSt({ hy2UpMbps: 50, hy2DownMbps: 200 })}>типичные 50 / 200</button></span>}
+            {!st.hy2UpMbps !== !st.hy2DownMbps && <span className="hint warn">Укажите обе величины — иначе Brutal не включится.</span>}
+          </Adv>
+        )}
+        {d.protocol !== 'hysteria2' && (
+          <Adv title="ядро" sum={`sniffing=${st.sniffing ? 'on' : 'off'}`}>
+            <span className="flex" style={{ gap: 10 }}><Switch label="Sniffing" on={st.sniffing} onChange={(v) => setSt({ sniffing: v })} /><span className="mono small">sniffing</span></span>
+            <span className="hint">Ядро определяет домен назначения по трафику — нужно для маршрутизации по доменам. Обычно включено.</span>
+          </Adv>
+        )}
+      </section>
+      </>}
+
+      {step === 3 && <>
+      <section className="blk">
+        <div className="blk-h">REVIEW <span>что уйдёт на серверы</span></div>
+        <dl className="wz-review">
+          {review.map(([k, v, i]) => (
+            <div key={k}><dt>{k}</dt><dd className="mono">{v}</dd><button type="button" className="btn sm" onClick={() => setStep(i)}>Изменить</button></div>
+          ))}
+        </dl>
+      </section>
+      <section className="blk">
+        <div className="blk-h">PREFLIGHT <span>проверки перед выкатом</span></div>
+        <ul className="pf">
+          {preflight.map(([kind, text]) => <li key={text} className={`pf-${kind}`}><span aria-hidden="true">{kind === 'ok' ? '[ok]' : kind === 'warn' ? '[!!]' : '[..]'}</span> {text}</li>)}
+        </ul>
+      </section>
+      </>}
+
+      <div className="wz-nav">
+        {step > 0 && <button type="button" className="btn" onClick={() => setStep(step - 1)}>{'< '}<span className="lc">{steps[step - 1]![0]}</span></button>}
+        <a className="wz-cancel" href="#/configs">{d.id ? 'к списку' : 'отмена'}</a>
+        <span className="wz-miss">{missing[step]}</span>
+        {step < 3 && <button type="button" className="btn pri" disabled={!!missing[step]} onClick={() => go(step + 1)}>далее: <span className="lc">{steps[step + 1]![0]}</span>{' >'}</button>}
+        {step === 3 && !d.id && <>
+          {can('configs.edit') && <button type="button" className="btn" disabled={busy || !d.name} onClick={() => void save()}>сохранить черновик</button>}
+          {can('configs.rollout') && can('configs.edit') && <button type="button" className="btn pri" disabled={busy || !d.name || missing.some(Boolean)} onClick={() => void rollout()}>{'сохранить и выкатить >'}</button>}
+        </>}
+      </div>
 
       <ErrorBox error={error} />
-      <div className="savebar">
+      {!!d.id && <div className="savebar">
         {/* кнопки по правам роли: сохранить — configs.edit, выкатить — configs.rollout (с изменениями — оба), удалить — configs.delete */}
-        {can('configs.rollout') && (can('configs.edit') || (!dirty && d.id)) && <button className="btn pri" disabled={busy || !d.name || (!d.nodeIds.length && !d.entryId)} onClick={() => void rollout()}>{dirty || !d.id ? 'Сохранить и выкатить' : 'Выкатить'}</button>}
+        {can('configs.rollout') && (can('configs.edit') || (!dirty && d.id)) && <button className="btn pri" disabled={busy || !d.name || (!d.nodeIds.length && !d.entryId) || missing.some(Boolean)} onClick={() => void rollout()}>{dirty || !d.id ? 'Сохранить и выкатить' : 'Выкатить'}</button>}
         {can('configs.edit') && <button className="btn" disabled={busy || !d.name || (!dirty && !!d.id)} onClick={() => void save()}>Сохранить черновик</button>}
         {!can('configs.edit') && !can('configs.rollout') && <span className="k">Только просмотр: у роли нет прав менять и выкатывать конфигурации.</span>}
         <Info>Выкат идёт по одному серверу: проверка конфига на сервере, открытие порта, проверка снаружи. Ошибка — откат и остановка. Черновик сохраняется в панели, серверы его не получают.</Info>
         {dirty && d.id && <><span className="dirty"><span className="dot" />Есть несохранённые изменения</span><button className="btn ghost sm" onClick={() => setD(draft)}>Отменить</button></>}
         <span className="spacer" />
         {d.id && can('configs.delete') && <button className="btn ghost sm" style={{ color: 'var(--fail)' }} disabled={busy} onClick={async () => { if (await ask(`Снять «${d.name}» со всех серверов и удалить? Профили этой конфигурации пропадут из подписок.`)) void run(async () => { await api.del(`/api/v1/templates/${d.id}`); toast(`«${d.name}» удалена`); onDeleted(); }); }}>Удалить</button>}
-      </div>
+      </div>}
       {pick && <SniPicker servers={managed} prefer={[...d.nodeIds, ...(d.entryId ? [d.entryId] : [])]} current={d.sni.split(/[\s,]+/).filter(Boolean)}
         onPick={(domain) => { setD({ ...d, sni: domain }); setPick(false); toast(`Сайт маскировки: ${domain}. Сохраните и выкатите конфигурацию`, 'info'); }} onClose={() => setPick(false)} />}
+      </div>
     </section>
   );
 }
