@@ -68,6 +68,12 @@ case "${1:-}" in
   # лимит устройств: кто с каких IP онлайн; замена правил маршрутизации на ходу (stdin — JSON)
   xray-online)   exec /usr/local/sbin/fleet-core online ;;
   xray-rules)    exec /usr/local/sbin/fleet-core rules ;;
+  # базы панели для правил Xray (ext:eskadra-….dat): файл — base64 в stdin, сверка по SHA-256
+  geo-put)       [[ "${2:?name}" =~ ^eskadra-[a-z0-9-]{1,40}\.dat$ ]] || deny name; [[ "${3:?sha256}" =~ ^[0-9a-f]{64}$ ]] || deny sha256
+                 exec /usr/local/sbin/fleet-core geo-put "$2" "$3" ;;
+  geo-prune)     for a in "${@:2}"; do [[ "$a" =~ ^eskadra-[a-z0-9-]{1,40}\.dat$ ]] || deny name; done
+                 exec /usr/local/sbin/fleet-core geo-prune "${@:2}" ;;
+  geo-list)      exec /usr/local/sbin/fleet-core geo-list ;;
   singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;
   singbox-net)   [[ "${2:?hops}" =~ ^(-|[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}(,[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}){0,15})$ ]] || deny hops
                  exec /usr/local/sbin/fleet-core singbox-net "$2" ;;

@@ -79,7 +79,7 @@ function ScopePick({ label, hint, all, value, onChange }: { label: string; hint:
     <div className="ublock stack">
       <span className="flex" style={{ justifyContent: 'space-between' }}>
         <h3>{label} <Info>{hint}</Info></h3>
-        <span className="flex" style={{ gap: 6 }}>
+        <span className="flex" style={{ gap: 8 }}>
           <button type="button" className={`btn sm ${value === null ? 'pri' : 'ghost'}`} aria-pressed={value === null} onClick={() => onChange(null)}>Все</button>
           <button type="button" className={`btn sm ${value !== null ? 'pri' : 'ghost'}`} aria-pressed={value !== null} onClick={() => onChange(value ?? [])}>Выбранные</button>
         </span>

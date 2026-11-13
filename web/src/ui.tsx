@@ -220,7 +220,7 @@ export const ROLE_LABEL: Record<string, string> = { entry: 'Relay', relay: 'Rela
 export const roleLabel = (s: { role: string; mgmt_mode?: string }) => (s.mgmt_mode === 'local' ? ROLE_LABEL.control! : ROLE_LABEL[s.role] ?? s.role);
 /** Роль и, отдельно, канал управления через туннель. */
 export function RoleTag({ s }: { s: { role: string; mgmt_mode?: string } }) {
-  return <span className="flex" style={{ gap: 6 }}>{roleLabel(s)}{s.mgmt_mode === 'tunnel' && <span className="tag info" title="Панель управляет сервером через служебный туннель VLESS-REALITY">туннель</span>}</span>;
+  return <span className="flex" style={{ gap: 8 }}>{roleLabel(s)}{s.mgmt_mode === 'tunnel' && <span className="tag info" title="Панель управляет сервером через служебный туннель VLESS-REALITY">туннель</span>}</span>;
 }
 
 /** Уровни защиты хоста одним словом. */
@@ -331,7 +331,7 @@ export function TgBind({ tgId, linkUrl, onSaveId, onChanged, canEdit = true }: {
   return (
     <>
       {tgId ? (
-        <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}>
+        <span className="flex" style={{ gap: 8, flexWrap: 'nowrap' }}>
           <Tag kind="ok" dot>привязан</Tag>
           <button className="btn ghost sm" onClick={() => setOpen(true)}>Изменить</button>
         </span>
@@ -374,7 +374,7 @@ function TgBindModal({ tgId, linkUrl, onSaveId, onClose, onChanged }: { tgId: st
       )}
       <details className="more" open={!!error || undefined}>
         <summary>Ввести Telegram ID вручную</summary>
-        <form className="flex" style={{ marginTop: 10 }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await onSaveId(manual.trim() || null); done(manual.trim() ? 'Telegram ID сохранён' : 'Telegram отвязан'); }); }}>
+        <form className="flex" style={{ marginTop: 12 }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await onSaveId(manual.trim() || null); done(manual.trim() ? 'Telegram ID сохранён' : 'Telegram отвязан'); }); }}>
           <input className="inp mono" style={{ flex: 1, minWidth: 140 }} inputMode="numeric" value={manual} onChange={(e) => setManual(e.target.value.replace(/\D/g, ''))} placeholder="ID — бот присылает его на /start" aria-label="Telegram ID" />
           <button className="btn" disabled={busy || manual === (tgId ?? '')}>Сохранить</button>
         </form>

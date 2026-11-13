@@ -62,6 +62,13 @@ export function listRoles(db: Db): RoleInfo[] {
 }
 
 export const can = (r: RoleInfo, p: Perm | 'owner') => r.owner || (p !== 'owner' && r.perms.includes(p));
+
+/**
+ * Роль с лимитом пользователей на администратора (как у реселлера) видит и меняет только тех пользователей, которых
+ * создал сам этот администратор: иначе один реселлер мог бы удалить или отключить клиентов другого (или owner).
+ */
+export const ownUsersOnly = (r: RoleInfo) => !r.owner && r.scope.maxUsers !== null;
+export const userVisible = (r: RoleInfo, adminId: number, createdBy: number | null | undefined) => !ownUsersOnly(r) || createdBy === adminId;
 export const inScope = (list: string[] | null, id: string) => !list || list.includes(id);
 
 /** Список «выдано» с учётом области: вне области — как было, в области — как прислали. null — «все». */

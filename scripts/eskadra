@@ -43,6 +43,16 @@ envline() { grep -v '^#' "$ENVF" | xargs; }
 cli() { runuser -u eskadra -- env $(envline) "$NODE" "$APP/cli.js" "$@"; }
 tui() { runuser -u eskadra -- env $(envline) "$NODE" "$APP/tui.js" "$@"; }
 
+# Каталог $DATA принадлежит eskadra — процесс панели может подложить в нём симлинк на любой системный файл.
+# Поэтому root здесь ничего не открывает и не chown'ит в $DATA сам: чтение и запись идут от имени eskadra,
+# и подложенный симлинк даёт панели ровно те права, что у неё уже есть.
+as_panel() { runuser -u eskadra -- "$@"; }
+panel_put() {  # panel_put ФАЙЛ РЕЖИМ < данные — атомарная замена файла от имени eskadra
+  as_panel sh -c 'umask 077; t="$1.new.$$"; cat > "$t" && chmod "$2" "$t" && mv -f "$t" "$1"' _ "$1" "$2"
+}
+panel_log_reset() { as_panel sh -c 'umask 027; : > "$1"' _ "$1"; }
+panel_log() { as_panel sh -c 'cat >> "$1"' _ "$1"; }   # panel_log ФАЙЛ < строки
+
 public_ip() {
   local ip; ip="$(cli executor 2>/dev/null | cut -d, -f1)"
   [ -n "$ip" ] || ip="$(curl -4fsS --max-time 6 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
@@ -309,10 +319,8 @@ EOF
 cmd_cert_deploy() {  # deploy-hook certbot: новый сертификат → панель (она перечитывает его сама)
   local live="$LE/live/eskadra"
   [ -s "$live/fullchain.pem" ] || die "нет сертификата Let's Encrypt"
-  install -o eskadra -g eskadra -m 644 "$live/fullchain.pem" "$DATA/tls/cert.pem.new"
-  install -o eskadra -g eskadra -m 600 "$live/privkey.pem" "$DATA/tls/key.pem.new"
-  mv "$DATA/tls/key.pem.new" "$DATA/tls/key.pem"
-  mv "$DATA/tls/cert.pem.new" "$DATA/tls/cert.pem"
+  panel_put "$DATA/tls/key.pem" 600 < "$live/privkey.pem"
+  panel_put "$DATA/tls/cert.pem" 644 < "$live/fullchain.pem"
 }
 
 legacy_le_drop() {  # убрать сертификат Эскадры из общего /etc/letsencrypt (так было до v0.5.5)
@@ -423,7 +431,7 @@ cmd_cert() {
     letsencrypt|le) shift; cmd_letsencrypt "${1:-}" "${2:-}" ;;
     set)
       [ -f "${2:-}" ] && [ -f "${3:-}" ] || die "eskadra cert set <fullchain.pem> <privkey.pem>"
-      install -o eskadra -g eskadra -m 644 "$2" "$DATA/tls/cert.pem"; install -o eskadra -g eskadra -m 600 "$3" "$DATA/tls/key.pem"
+      panel_put "$DATA/tls/cert.pem" 644 < "$2"; panel_put "$DATA/tls/key.pem" 600 < "$3"
       restart ;;
     *) die "eskadra cert show | letsencrypt [ip|domain <домен>] | set <cert> <key>" ;;
   esac
@@ -440,9 +448,11 @@ menu_cert() {
 xui_present() { [ -d /usr/local/x-ui ] || [ -d /etc/x-ui ] || systemctl cat x-ui.service >/dev/null 2>&1; }
 
 remove_xui() {
-  local d; d="$DATA/backup"; install -d -m 700 "$d"
+  # $DATA пишет панель: не chmod'им чужой каталог по симлинку (mkdir -p существующий не трогает)
+  # и не перезаписываем существующий файл (set -C: O_EXCL, на симлинке тоже отказ)
+  local d; d="$DATA/backup"; [ -L "$d" ] && rm -f "$d"; mkdir -p -m 700 "$d"
   local f; f="$d/x-ui-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
-  tar -czf "$f" /etc/x-ui /usr/local/x-ui/bin/config.json 2>/dev/null || true
+  ( set -C; tar -czf - /etc/x-ui /usr/local/x-ui/bin/config.json 2>/dev/null > "$f" ) || true
   systemctl disable --now x-ui 2>/dev/null || true
   rm -rf /usr/local/x-ui /etc/x-ui
   rm -f /etc/systemd/system/x-ui.service /usr/bin/x-ui
@@ -487,37 +497,49 @@ cmd_conflicts() {
 cmd_update() {
   local repo; repo="$(cat "$PREFIX/app/REPO" 2>/dev/null || true)"
   [ -n "$repo" ] || die "неизвестен репозиторий релизов"
-  ESKADRA_REPO="$repo" ESKADRA_VERSION="${1:-latest}" bash <(curl -fsSL "https://raw.githubusercontent.com/$repo/main/scripts/install.sh")
+  # установщик — из тега той же версии, а не из ветки main: туда могут попасть изменения до релиза (или чужие)
+  local ver="${1:-latest}" ref
+  if [ "$ver" = latest ]; then
+    ref="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null || true)"
+  else
+    ref="v${ver#v}"
+  fi
+  [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "не удалось определить версию релиза ($ver)"
+  ESKADRA_REPO="$repo" ESKADRA_VERSION="$ref" bash <(curl -fsSL "https://raw.githubusercontent.com/$repo/$ref/scripts/install.sh")
 }
 
 # Root-помощник обновления (юнит eskadra-update.path): кнопка «Обновить» в панели кладёт запрос с версией,
 # помощник запускает обычное обновление и пишет журнал, который панель показывает. От панели — только версия.
 cmd_update_apply() {
-  local dir="$DATA/update" req ver code=0
+  local dir="$DATA/update" req ver code=0 json
   req="$dir/request.json"
-  [ -f "$req" ] || return 0
-  ver="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","latest"))' "$req" 2>/dev/null || echo latest)"
+  # запрос читается и удаляется от имени панели: root не идёт по подложенному симлинку
+  json="$(as_panel cat "$req" 2>/dev/null)" || return 0
+  as_panel rm -f "$req" || true
+  jget() { printf '%s' "$json" | python3 -c 'import json,sys
+v = json.load(sys.stdin).get(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "")
+print(",".join(v) if isinstance(v, list) else v)' "$@" 2>/dev/null || true; }
+  ver="$(jget version latest)"; [ -n "$ver" ] || ver=latest
   # выпуск сертификата панели из «Сервиса подписок»: домен панели и адрес подписок в одном сертификате
   local action doms subh
-  action="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("action",""))' "$req" 2>/dev/null || true)"
+  action="$(jget action)"
   if [ "$action" = cert ]; then
-    doms="$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1])).get("domains",[])))' "$req" 2>/dev/null || true)"
-    subh="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("subHost",""))' "$req" 2>/dev/null || true)"
-    rm -f "$req"
+    doms="$(jget domains)"
+    subh="$(jget subHost)"
     [[ "$doms" =~ ^[A-Za-z0-9.,-]{4,1000}$ ]] || doms=""
     [[ "$subh" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || subh=""
-    : > "$dir/log"; chown eskadra:eskadra "$dir/log"; chmod 640 "$dir/log"
-    echo "start $(date -Is) cert $doms" >> "$dir/log"
-    if [ -n "$doms" ]; then ( ESKADRA_SUB_HOST="$subh" cmd_letsencrypt domain "$doms" ) >> "$dir/log" 2>&1 || code=$?; else echo "неверный список доменов" >> "$dir/log"; code=1; fi
-    echo "exit=$code" >> "$dir/log"
+    panel_log_reset "$dir/log"
+    echo "start $(date -Is) cert $doms" | panel_log "$dir/log"
+    if [ -n "$doms" ]; then ( ESKADRA_SUB_HOST="$subh" cmd_letsencrypt domain "$doms" ) 2>&1 | panel_log "$dir/log" || code=$?
+    else echo "неверный список доменов" | panel_log "$dir/log"; code=1; fi
+    echo "exit=$code" | panel_log "$dir/log"
     return 0
   fi
-  rm -f "$req"
   [[ "$ver" =~ ^(latest|v?[0-9]+\.[0-9]+\.[0-9]+)$ ]] || ver=latest
-  : > "$dir/log"; chown eskadra:eskadra "$dir/log"; chmod 640 "$dir/log"
-  echo "start $(date -Is) $ver" >> "$dir/log"
-  ( cmd_update "$ver" ) >> "$dir/log" 2>&1 || code=$?
-  echo "exit=$code" >> "$dir/log"
+  panel_log_reset "$dir/log"
+  echo "start $(date -Is) $ver" | panel_log "$dir/log"
+  ( cmd_update "$ver" ) 2>&1 | panel_log "$dir/log" || code=$?
+  echo "exit=$code" | panel_log "$dir/log"
 }
 
 # ───────────────────────── главный сервер как узел ─────────────────────────
@@ -526,20 +548,20 @@ cmd_update_apply() {
 # Делает ровно то, что bootstrap-сниппет узла, но ключ панели пускается только с 127.0.0.1.
 # Принимает от панели только id и публичный ключ строгого формата — никаких команд.
 cmd_self_node_apply() {
-  local dir="$DATA/selfnode" req out id pubkey port fp line
+  local dir="$DATA/selfnode" req out id pubkey port fp line json
   req="$dir/request.json"; out="$dir/result.json"
-  [ -f "$req" ] || return 0
-  id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$req" 2>/dev/null || true)"
-  pubkey="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pubkey",""))' "$req" 2>/dev/null || true)"
-  rm -f "$req"
+  # запрос читается и удаляется, ответ пишется — от имени панели (см. as_panel)
+  json="$(as_panel cat "$req" 2>/dev/null)" || return 0
+  as_panel rm -f "$req" || true
+  id="$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+  pubkey="$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("pubkey",""))' 2>/dev/null || true)"
   reply() {  # reply true|false [порт отпечаток | сообщение]
     python3 -c 'import json,sys
 ok = sys.argv[2] == "true"
 r = {"id": sys.argv[1], "ok": ok}
 if ok: r.update(sshPort=int(sys.argv[3]), hostKeyFp=sys.argv[4])
 else: r["error"] = sys.argv[3]
-print(json.dumps(r))' "$id" "$@" > "$out.new"
-    chown eskadra:eskadra "$out.new"; mv "$out.new" "$out"
+print(json.dumps(r))' "$id" "$@" | panel_put "$out" 600
   }
   [[ "$id" =~ ^srv-[a-z0-9x]{4,16}$ ]] || { reply false "неверный id"; return 0; }
   [[ "$pubkey" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{60,80}=*\ fleet-panel/${id}$ ]] || { reply false "неверный ключ"; return 0; }

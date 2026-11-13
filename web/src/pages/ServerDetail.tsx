@@ -21,7 +21,7 @@ export function ServerDetailPage({ id }: { id: string }) {
   return (
     <>
       <div className="page-head">
-        <div className="stack" style={{ gap: 6 }}>
+        <div className="stack" style={{ gap: 8 }}>
           <a href="#/servers" className="k">← Серверы</a>
           <h1 className="as-is"><ServerName id={s.id} name={s.name} onSaved={reload} /> <StagePip stage={s.stage} /><Info label="Что значат этапы"><StageHelp /></Info></h1>
           <span className="k">
@@ -64,7 +64,7 @@ function ServerName({ id, name, onSaved }: { id: string; name: string; onSaved: 
   const [edit, setEdit] = useState(false);
   const [v, setV] = useState(name);
   const { busy, error, run } = useAsync();
-  if (!edit) return <span className="flex" style={{ gap: 6, display: 'inline-flex' }}>{name}<button className="btn ghost sm" aria-label="Переименовать" onClick={() => { setV(name); setEdit(true); }}>✎</button></span>;
+  if (!edit) return <span className="flex" style={{ gap: 8, display: 'inline-flex' }}>{name}<button className="btn ghost sm" aria-label="Переименовать" onClick={() => { setV(name); setEdit(true); }}>✎</button></span>;
   return (
     <form className="flex" style={{ display: 'inline-flex' }} onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.patch(`/api/v1/servers/${id}`, { name: v.trim() }); setEdit(false); toast('Имя сохранено'); onSaved(); }); }}>
       <input className="inp" style={{ width: 220, fontSize: 18 }} value={v} onChange={(e) => setV(e.target.value)} autoFocus maxLength={64} aria-label="Имя сервера" />
@@ -272,10 +272,10 @@ function TwinMerge({ s, twin }: { s: Server; twin: NonNullable<Server['twin']> }
     location.hash = `#/servers/${r.server.id}`;
   });
   return (
-    <div className="alert fail stack" style={{ gap: 10 }}>
+    <div className="alert fail stack" style={{ gap: 12 }}>
       <span><b>{`«${s.name}» и «${twin.name}» — один и тот же сервер.`}</b> У них одинаковый ключ хоста: это одна машина, записанная в панели дважды. У каждой записи свои конфигурации, а выкат переписывает конфиг сервера целиком, поэтому выкат одной записи стирает конфигурации другой. Пока записи не объединены, выкат на этот сервер не запускается.</span>
       <span className="k">{`После объединения останется одна запись: конфигурации, пользователи и пароли обеих — без изменений. Адрес — ${ip ?? s.host}: конфигурации с сертификатом на IP ходят на него, со «своим доменом» — на свой домен.`}</span>
-      <div className="flex" style={{ alignItems: 'flex-end', gap: 10 }}>
+      <div className="flex" style={{ alignItems: 'flex-end', gap: 12 }}>
         <span className="stack" style={{ gap: 4 }}><span className="k">Какое имя оставить</span>
           <Seg label="Имя сервера" value={name} onChange={setName} options={[[s.name, s.name], [twin.name, twin.name]]} />
         </span>
@@ -329,7 +329,7 @@ function ProtectTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) 
               onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { protectionTarget: l.code }); toast(`Уровень защиты: ${LEVEL_LABEL[l.code] ?? l.code}`); onChange(); })}>
               <span className="lvl-t">{l.name}</span>
               {l.base && <span className="k">{l.base}</span>}
-              <span className="stack" style={{ gap: 6 }}>{l.items.map((x) => <span key={x} className="ctl"><span style={{ width: 14, color: 'var(--ok)', fontWeight: 700 }}>✓</span>{x}</span>)}</span>
+              <span className="stack" style={{ gap: 8 }}>{l.items.map((x) => <span key={x} className="ctl"><span style={{ width: 14, color: 'var(--ok)', fontWeight: 600 }}>✓</span>{x}</span>)}</span>
             </button>
           ))}
         </div>
@@ -361,7 +361,7 @@ function ProtectSteps({ d, onChange }: { d: ServerDetail; onChange: () => void }
   );
 
   return (
-    <section className="card pad stack" style={{ gap: 18 }}>
+    <section className="card pad stack" style={{ gap: 20 }}>
       <h2>Как включить</h2>
       {s.ufw_active ? <div className="alert warn">На сервере включён ufw/firewalld — он мешает правилам Эскадры. Выключите его на вкладке «Хост».</div> : null}
       {plan?.lint.map((l) => <div key={l} className="alert fail">{l}</div>)}
@@ -417,7 +417,7 @@ function Checklist({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
     <div className="stack" style={{ gap: 4 }}>
       <span className="k">{done} из {d.checklist.total}{d.checklist.passedAt ? ' · пройдено' : ''}</span>
       {d.checklist.items.map((i) => (
-        <label key={i.id} className="cb" style={{ borderTop: '1px solid var(--line)', padding: '6px 0', alignItems: 'flex-start' }}>
+        <label key={i.id} className="cb" style={{ borderTop: '1px solid var(--line)', padding: '8px 0', alignItems: 'flex-start' }}>
           <input type="checkbox" disabled={i.auto} checked={i.auto ? i.done : !!marks[i.id]} onChange={(e) => setMarks({ ...marks, [i.id]: e.target.checked })} />
           <span>{i.title}{i.auto && <span className="k"> · авто</span>}</span>
         </label>
@@ -433,7 +433,7 @@ function KeyOnly({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
   const [pending, setPending] = useState(false);
   const s = d.server;
   return (
-    <div className="row" style={{ padding: '14px 0 0' }}>
+    <div className="row" style={{ padding: '16px 0 0' }}>
       <div className="row-text"><b>Вход по SSH только по ключам <Info>Пароли для SSH выключаются. Включается с таймером: если за 3 минуты не подтвердить, что вход работает, сервер вернёт как было. Включайте, только если входите на сервер своим ключом.</Info></b></div>
       {s.key_only ? <Tag kind="ok">включено</Tag> : pending ? (
         <div className="flex"><button className="btn pri" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/key-only`, { action: 'confirm' }); setPending(false); onChange(); })}>Вход работает — подтвердить</button>
@@ -540,7 +540,7 @@ function AccessTab({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
           <GroupSelect value={s.group_name} onSave={(g) => void patch({ group: g })} />
         </div>
       </div>
-      <div style={{ padding: '0 20px 14px' }}><ErrorBox error={error} /></div>
+      <div style={{ padding: '0 20px 16px' }}><ErrorBox error={error} /></div>
     </section>
   );
 }
@@ -551,7 +551,7 @@ function TunnelVia({ s, onSaved, saveLabel = 'Сохранить' }: { s: Server
   const [v, setV] = useState<Via>({ kind: 'direct' });
   const { busy, error, run } = useAsync();
   return (
-    <div className="stack" style={{ gap: 10 }}>
+    <div className="stack" style={{ gap: 12 }}>
       <ViaPicker value={v} onChange={setV} exclude={s.id} mgmtMode="tunnel" mode="tunnel" />
       <div className="flex">
         <button className="btn pri sm" disabled={busy || !viaReady(v)} onClick={() => void run(async () => { await api.patch(`/api/v1/servers/${s.id}`, { mgmtVia: viaOnly(v) }); toast(v.kind === 'direct' ? 'Туннель идёт напрямую' : 'Туннель пойдёт через прокси'); onSaved(); })}>{saveLabel}</button>
@@ -655,7 +655,7 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
           </div>
         </div>
       )}
-      {(mode === 'tunnel' || mode === 'inbound') && !ask && <details className="more"><summary>{s.mgmt.via ? 'Изменить прокси канала' : 'Панель не достаёт до сервера совсем? Пустить канал через другой сервер'}</summary><div style={{ marginTop: 10 }}><TunnelVia s={s} onSaved={onChange} /></div></details>}
+      {(mode === 'tunnel' || mode === 'inbound') && !ask && <details className="more"><summary>{s.mgmt.via ? 'Изменить прокси канала' : 'Панель не достаёт до сервера совсем? Пустить канал через другой сервер'}</summary><div style={{ marginTop: 12 }}><TunnelVia s={s} onSaved={onChange} /></div></details>}
       {switched && (
         <div className="stack">
           <b className="small">Перенастроить доступ</b>
@@ -672,7 +672,7 @@ function MgmtRow({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
 function GroupSelect({ value, onSave }: { value: string; onSave: (v: string) => void }) {
   const { data } = usePoll(() => api.get<Array<{ name: string }>>('/api/v1/groups'), null);
   return (
-    <span className="flex" style={{ gap: 6 }}>
+    <span className="flex" style={{ gap: 8 }}>
       <select className="inp" style={{ width: 'auto' }} value={value} onChange={(e) => onSave(e.target.value)} aria-label="Группа">
         {(data ?? [{ name: value }]).map((g) => <option key={g.name} value={g.name}>{g.name}</option>)}
       </select>
@@ -686,7 +686,7 @@ function Terminal({ id }: { id: string }) {
   const [out, setOut] = useState('');
   const { busy, error, run } = useAsync();
   return (
-    <div style={{ padding: '0 20px 14px' }} className="stack">
+    <div style={{ padding: '0 20px 16px' }} className="stack">
       <form className="flex" onSubmit={(e) => { e.preventDefault(); void run(async () => { const r = await api.post<{ code: number; stdout: string; stderr: string }>(`/api/v1/servers/${id}/exec`, { command: cmd }); setOut(`$ ${cmd}\n${r.stdout}${r.stderr}[exit ${r.code}]`); }); }}>
         <input className="inp mono" style={{ flex: 1 }} value={cmd} onChange={(e) => setCmd(e.target.value)} placeholder="команда (без PTY, пишется в аудит)" aria-label="Команда" />
         <button className="btn" disabled={busy || !cmd}>Выполнить</button>
@@ -723,7 +723,7 @@ function SosTab({ d }: { d: ServerDetail }) {
         <div className="card pad stack">
           <h3>Команда для KVM хостера</h3>
           <span className="k">Если панель потеряла доступ: войдите в консоль хостера как fleetadmin и наберите:</span>
-          {d.kvmCommand ? <><code style={{ padding: '10px 12px', fontSize: 14 }}>{d.kvmCommand}</code><div><CopyButton text={d.kvmCommand} /></div></> : <span className="k">Сначала задайте адрес исполнителя.</span>}
+          {d.kvmCommand ? <><code style={{ padding: '12px 12px', fontSize: 14 }}>{d.kvmCommand}</code><div><CopyButton text={d.kvmCommand} /></div></> : <span className="k">Сначала задайте адрес исполнителя.</span>}
         </div>
         <div className="card pad stack">
           <h3>Консольный пользователь fleetadmin</h3>
@@ -986,7 +986,7 @@ function CoreRows({ d, onChange }: { d: ServerDetail; onChange: () => void }) {
               <b>{label}</b><span className="k">{xui ? `из 3x-ui${s.cores.xui?.version ? ' ' + s.cores.xui.version : ''}` : v ? v : 'не установлено'}</span>
               {st && (st.active ? <Tag kind="ok" dot>работает</Tag> : <Tag kind={st.manualOff ? 'warn' : 'fail'} dot>{st.manualOff ? 'остановлен вручную' : 'не работает'}</Tag>)}
             </span>
-            <span className="flex" style={{ gap: 6 }}>
+            <span className="flex" style={{ gap: 8 }}>
               {!xui && !v && managed && (
                 <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${core}/update`, {}); onChange(); })}>{busy ? 'Ставлю…' : 'Установить'}</button>
               )}
@@ -1093,7 +1093,7 @@ function PaidRow({ s, onSave, busy }: { s: Server; onSave: (body: { paidUntil: s
         <span className="k">{s.paid_until ? `${ruDate(s.paid_until)}${left !== null ? ` · ${paidLeftText(left)}` : ''}` : 'Не указано — срок оплаты не отслеживается.'}</span></div>
       <div className="flex">
         <input className="inp mono" type="date" style={{ width: 'auto' }} value={date} onChange={(e) => setDate(e.target.value)} aria-label="Оплачен до" />
-        <label className="flex small" style={{ gap: 6 }}>напомнить за<input className="inp mono" style={{ width: 60 }} inputMode="numeric" value={warn} onChange={(e) => setWarn(e.target.value.replace(/\D/g, ''))} aria-label="Напомнить за, дней" />дн.</label>
+        <label className="flex small" style={{ gap: 8 }}>напомнить за<input className="inp mono" style={{ width: 60 }} inputMode="numeric" value={warn} onChange={(e) => setWarn(e.target.value.replace(/\D/g, ''))} aria-label="Напомнить за, дней" />дн.</label>
         <button className="btn" disabled={busy || !changed || (!!date && !/^\d{4}-\d{2}-\d{2}$/.test(date))} onClick={() => onSave({ paidUntil: date || null, paidWarnDays: Math.min(60, Math.max(1, Number(warn) || 5)) })}>Сохранить</button>
         {s.paid_until && <button className="btn ghost sm" disabled={busy} onClick={() => onSave({ paidUntil: null })}>Не следить</button>}
       </div>

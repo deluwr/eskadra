@@ -416,8 +416,8 @@ export function CoresPanel() {
     const old = s.outdated.includes(k);
     return (
       <span className="stack" style={{ gap: 4 }}>
-        <span className="flex" style={{ gap: 6 }}><span className="mono small">{c.version}</span>{old && <Tag kind="warn">устарел</Tag>}</span>
-        <span className="flex" style={{ gap: 6 }}>
+        <span className="flex" style={{ gap: 8 }}><span className="mono small">{c.version}</span>{old && <Tag kind="warn">устарел</Tag>}</span>
+        <span className="flex" style={{ gap: 8 }}>
           {old && can('cores.manage') && <button className="btn sm" disabled={busy} onClick={() => void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/update`, { version: data.pins[k] ?? 'latest' }); void reload(); })}>Обновить</button>}
           {c.previous && can('cores.manage') && <button className="btn ghost sm" disabled={busy} onClick={async () => { if (await ask(`Вернуть ${k} ${c.previous} на ${s.name}?`)) void run(async () => { await api.post(`/api/v1/servers/${s.id}/cores/${k}/rollback`); void reload(); }); }}>Откат на {c.previous}</button>}
         </span>
@@ -813,7 +813,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
           </div>
           <label className="kv-k" htmlFor="cfg-port">порт <span className="mono">{info.udp ? 'udp' : 'tcp'}</span> <span className="req">*</span></label>
           <div className="kv-v">
-            <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}>
+            <span className="flex" style={{ gap: 8, flexWrap: 'nowrap' }}>
               <input id="cfg-port" className="inp mono" style={{ flex: 1 }} value={d.port} onChange={(e) => setD({ ...d, port: e.target.value })} inputMode="numeric" />
               {!info.udp && <button type="button" className="btn" onClick={() => setD({ ...d, port: '443' })}>443</button>}
               <button type="button" className="btn" title="Случайный свободный порт на серверах конфигурации" onClick={async () => setD(await randomPorts('port'))}>rand</button>
@@ -943,7 +943,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
                 </div>
               )}
               {st.autoMode === 'spread' && (
-                <div className="stack" style={{ gap: 10 }}>
+                <div className="stack" style={{ gap: 12 }}>
                   <div className="flex" style={{ justifyContent: 'space-between' }}>
                     <span className="mono small muted">каналы выходов <Info>Замер идёт на самом сервере: speedtest от Ookla, если он установлен, иначе тестовые файлы Hetzner, OVH и Tele2. На время замера (~25 с) канал занят целиком. Своё значение в поле важнее замера; пусто — по замеру.</Info></span>
                     <button type="button" className="btn sm" disabled={!!measuring || !exits.length} onClick={() => void measure(exits.map((x) => x.id))}>{measuring ? `Замеряю ${nameOf(measuring)}…` : 'Замерить все'}</button>
@@ -957,7 +957,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
                           <label className="stack" style={{ gap: 4 }}><span>канал {x.name}, Мбит/с</span>
                             <input className="inp mono" inputMode="numeric" value={st.exitCapMbps[x.id] || ''} placeholder={cap ? `${cap} — по замеру` : 'не замерен'} aria-label={`Канал ${x.name}, Мбит/с`}
                               onChange={(e) => setSt({ exitCapMbps: { ...st.exitCapMbps, [x.id]: Number(e.target.value.replace(/\D/g, '')) } })} /></label>
-                          <span className="k flex" style={{ gap: 6 }}>
+                          <span className="k flex" style={{ gap: 8 }}>
                             {l ? <span className="mono">{`↓${l.down} ↑${l.up} · ${l.source === 'ookla' ? 'Ookla' : 'зеркала'} · ${ago(l.at)}`}</span> : <span>замера нет</span>}
                             <button type="button" className="btn ghost sm" disabled={!!measuring} onClick={() => void measure([x.id])}>{measuring === x.id ? 'замеряю…' : 'Замерить'}</button>
                           </span>
@@ -1017,7 +1017,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
           {st.security === 'reality' && info.sec.includes('reality') && <>
             <label className="kv-k" htmlFor="cfg-sni">sni <span className="req">*</span> <Info>Чужой сайт с TLS 1.3 и HTTP/2, под который маскируется сервер. Можно несколько через пробел — все имена должны обслуживаться первым сайтом. www.microsoft.com с REALITY не работает.</Info></label>
             <div className="kv-v">
-              <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}>
+              <span className="flex" style={{ gap: 8, flexWrap: 'nowrap' }}>
                 <input id="cfg-sni" className={`inp mono${sniWeak ? ' warn' : ''}`} style={{ flex: 1 }} value={d.sni} onChange={(e) => setD({ ...d, sni: e.target.value })} placeholder="сайт из сети сервера" />
                 <button type="button" className="btn" disabled={!managed.length} onClick={() => setPick(true)}>scan…</button>
               </span>
@@ -1152,7 +1152,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
             <div className="kv-v kv-wide">
               <span className="flex" style={{ gap: 12 }}>
                 <Switch label="obfs salamander" on={!!st.hy2Obfs} onChange={(v) => setSt({ hy2Obfs: v ? randomHex(16) : '' })} /><span className="mono small">obfs salamander</span>
-                {!!st.hy2Obfs && <span className="flex" style={{ gap: 6 }}><input className="inp mono" style={{ width: 260 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>rand</button></span>}
+                {!!st.hy2Obfs && <span className="flex" style={{ gap: 8 }}><input className="inp mono" style={{ width: 260 }} value={st.hy2Obfs} onChange={(e) => setSt({ hy2Obfs: e.target.value })} aria-label="Пароль obfs" /><button type="button" className="btn sm" onClick={() => setSt({ hy2Obfs: randomHex(16) })}>rand</button></span>}
               </span>
               <span className="hint">Прячет признаки QUIC в первых пакетах — у большинства провайдеров РФ проходимость выше. Клиенты должны поддерживать obfs.</span>
               <span className="flex" style={{ gap: 12 }}>
@@ -1173,12 +1173,12 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
             <span className="hint">Пустое поле — значение Xray по умолчанию (серым). Число или диапазон «16-32» — Xray берёт случайное значение для каждого соединения.</span>
             <div className="grid g3">
               <label className="fld"><span>path <Info>Путь HTTP-запросов XHTTP — один у сервера и клиентов. Случайный путь не даёт сканерам найти прокси запросом на «/».</Info></span>
-                <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}><input className="inp mono" style={{ flex: 1 }} value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" aria-label="Путь XHTTP" /><button type="button" className="btn sm" onClick={() => setSt({ path: '/' + randomHex(6) })}>rand</button></span></label>
+                <span className="flex" style={{ gap: 8, flexWrap: 'nowrap' }}><input className="inp mono" style={{ flex: 1 }} value={st.path} onChange={(e) => setSt({ path: e.target.value })} placeholder="/" aria-label="Путь XHTTP" /><button type="button" className="btn sm" onClick={() => setSt({ path: '/' + randomHex(6) })}>rand</button></span></label>
               <label className="fld"><span>host <Info>Заголовок Host запросов. Обычно пусто; у входа за CDN панель ставит домен CDN сама.</Info></span><input className="inp mono" value={st.host} onChange={(e) => setSt({ host: e.target.value.trim() })} placeholder="—" aria-label="Host XHTTP" /></label>
               <label className="fld"><span>mode <Info>auto — клиент выбирает сам: с REALITY — stream-one, с TLS — stream-up. packet-up — медленнее, зато проходит где угодно.</Info></span><select className="inp mono" value={st.xhttpMode} onChange={(e) => setSt({ xhttpMode: e.target.value })} aria-label="Режим XHTTP">{['auto', 'packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>
               {xMode === 'cdn' && <>
                 <label className="fld"><span>mode через cdn <Info>packet-up проходит через любой CDN. stream-up и stream-one через Cloudflare — только с включённым Network → gRPC.</Info></span><select className="inp mono" value={st.cdnMode} onChange={(e) => setSt({ cdnMode: e.target.value as Settings['cdnMode'] })} aria-label="Режим через CDN">{['packet-up', 'stream-up', 'stream-one'].map((m) => <option key={m}>{m}</option>)}</select></label>
-                <span className="flex" style={{ gap: 10, alignSelf: 'end', minHeight: 38 }}><Switch label="HTTP/3 до CDN" on={st.cdnH3} onChange={(v) => setSt({ cdnH3: v })} /><span className="mono small">http/3 до cdn</span></span>
+                <span className="flex" style={{ gap: 12, alignSelf: 'end', minHeight: 38 }}><Switch label="HTTP/3 до CDN" on={st.cdnH3} onChange={(v) => setSt({ cdnH3: v })} /><span className="mono small">http/3 до cdn</span></span>
               </>}
             </div>
             {X_FIELDS.map(({ group, fields }) => (
@@ -1192,8 +1192,8 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
                 </div>
                 {group === 'Маскировка' && (
                   <span className="flex" style={{ gap: '8px 24px' }}>
-                    <span className="flex" style={{ gap: 10 }}><Switch label="Без заголовка gRPC" on={!!st.xhttpExtra.noGRPCHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noGRPCHeader: v } })} /><span className="mono small">без заголовка grpc</span></span>
-                    <span className="flex" style={{ gap: 10 }}><Switch label="Без заголовка SSE" on={!!st.xhttpExtra.noSSEHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noSSEHeader: v } })} /><span className="mono small">без заголовка sse</span></span>
+                    <span className="flex" style={{ gap: 12 }}><Switch label="Без заголовка gRPC" on={!!st.xhttpExtra.noGRPCHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noGRPCHeader: v } })} /><span className="mono small">без заголовка grpc</span></span>
+                    <span className="flex" style={{ gap: 12 }}><Switch label="Без заголовка SSE" on={!!st.xhttpExtra.noSSEHeader} onChange={(v) => setSt({ xhttpExtra: { ...st.xhttpExtra, noSSEHeader: v } })} /><span className="mono small">без заголовка sse</span></span>
                   </span>
                 )}
               </div>
@@ -1236,14 +1236,14 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
               </span>
             )}
           </div>
-          <span className="flex" style={{ gap: 10 }}><Switch label="ECH" on={d.ech} onChange={(v) => setD({ ...d, ech: v })} /><span className="mono small">ech</span><Info>Encrypted Client Hello — скрывает имя сайта в рукопожатии. Профиль с ECH получают только клиенты с поддержкой.</Info></span>
+          <span className="flex" style={{ gap: 12 }}><Switch label="ECH" on={d.ech} onChange={(v) => setD({ ...d, ech: v })} /><span className="mono small">ech</span><Info>Encrypted Client Hello — скрывает имя сайта в рукопожатии. Профиль с ECH получают только клиенты с поддержкой.</Info></span>
         </Adv>
         {(d.protocol === 'hysteria2' || esk) && (
           <Adv title={esk ? 'hysteria2 на выходах' : 'hysteria2'} sum={[esk && st.hy2Port ? `port=${st.hy2Port}` : '', `masq=${st.hy2Masquerade ? st.hy2Masquerade.replace(/^https?:\/\//, '').replace(/\/$/, '') : '404'}`, st.hy2Hop.trim() ? `hop=${st.hy2HopInterval}s` : ''].filter(Boolean).join(' ')}>
             <div className="grid g3">
               {esk && <label className="fld"><span>порт hysteria2 (udp) <Info>Пусто или 0 — тот же номер, что у VLESS (TCP и UDP не мешают друг другу).</Info></span><input className="inp mono" inputMode="numeric" value={st.hy2Port || ''} placeholder={d.port || '8443'} onChange={(e) => setSt({ hy2Port: Number(e.target.value.replace(/\D/g, '')) })} /></label>}
               <label className="fld"><span>сайт маскировки <Info>Кто подключится без пароля (например, сканер), увидит этот сайт — сервер проксирует его как обычный HTTP/3-сайт. Пусто — ответ 404.</Info></span>
-                <span className="flex" style={{ gap: 6, flexWrap: 'nowrap' }}>
+                <span className="flex" style={{ gap: 8, flexWrap: 'nowrap' }}>
                   <input className="inp mono" style={{ flex: 1 }} list="hy2-masq" value={st.hy2Masquerade} onChange={(e) => setSt({ hy2Masquerade: e.target.value.trim() })} placeholder="https://www.bing.com/" aria-label="Сайт маскировки" />
                   {esk && sniList[0] && <button type="button" className="btn sm" title="Тот же сайт, что у REALITY (SNI)" onClick={() => setSt({ hy2Masquerade: `https://${sniList[0]}/` })}>как sni</button>}
                 </span>
@@ -1256,7 +1256,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
         )}
         {(d.protocol === 'hysteria2' || esk) && (
           <Adv title="полоса" sum={`cc=${st.hy2IgnoreClientBw ? 'bbr' : 'brutal'} client=${st.hy2UpMbps || 0}/${st.hy2DownMbps || 0}`}>
-            <span className="flex" style={{ gap: 10 }}><Switch label="BBR вместо Brutal" on={st.hy2IgnoreClientBw} onChange={(v) => setSt({ hy2IgnoreClientBw: v, ...(v ? { hy2ServerUpMbps: 0, hy2ServerDownMbps: 0 } : {}) })} /><span className="mono small">bbr вместо brutal</span><Info>Brutal держит заявленную скорость на каналах с потерями; BBR бережнее, но на плече с потерями заметно медленнее. Несовместимо с потолком на клиента.</Info></span>
+            <span className="flex" style={{ gap: 12 }}><Switch label="BBR вместо Brutal" on={st.hy2IgnoreClientBw} onChange={(v) => setSt({ hy2IgnoreClientBw: v, ...(v ? { hy2ServerUpMbps: 0, hy2ServerDownMbps: 0 } : {}) })} /><span className="mono small">bbr вместо brutal</span><Info>Brutal держит заявленную скорость на каналах с потерями; BBR бережнее, но на плече с потерями заметно медленнее. Несовместимо с потолком на клиента.</Info></span>
             <div className="grid g4 mini">
               <label className="fld"><span>клиент: отдача, Мбит/с <Info>{esk ? 'Клиент Hysteria2 у Eskadra — сам вход: полоса включает Brutal на плече вход → выход. Ставьте чуть ниже канала между входом и выходом; 0 — без Brutal.' : 'Вшивается в подписку и ссылку: с полосой клиент включает Brutal. Ставьте чуть ниже реального канала пользователя; 0 — клиент решает сам.'}</Info></span><input className="inp mono" inputMode="numeric" value={st.hy2UpMbps} onChange={(e) => setSt({ hy2UpMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
               <label className="fld">клиент: загрузка, Мбит/с<input className="inp mono" inputMode="numeric" value={st.hy2DownMbps} onChange={(e) => setSt({ hy2DownMbps: Number(e.target.value.replace(/\D/g, '')) })} placeholder="0" /></label>
@@ -1271,7 +1271,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
         )}
         {d.protocol !== 'hysteria2' && (
           <Adv title="ядро" sum={`sniffing=${st.sniffing ? 'on' : 'off'}`}>
-            <span className="flex" style={{ gap: 10 }}><Switch label="Sniffing" on={st.sniffing} onChange={(v) => setSt({ sniffing: v })} /><span className="mono small">sniffing</span></span>
+            <span className="flex" style={{ gap: 12 }}><Switch label="Sniffing" on={st.sniffing} onChange={(v) => setSt({ sniffing: v })} /><span className="mono small">sniffing</span></span>
             <span className="hint">Ядро определяет домен назначения по трафику — нужно для маршрутизации по доменам. Обычно включено.</span>
           </Adv>
         )}
@@ -1388,8 +1388,8 @@ function ExitHealth({ t }: { t: Template }) {
         </table>
       </div>
       {order
-        ? !!data?.rows.length && !data.rows.some((r) => r.ok) && <div className="k" style={{ padding: '10px 20px' }}>Ни один выход не отвечает — вход держит трафик на первом по порядку.</div>
-        : !data?.selected && !!data?.rows.length && <div className="k" style={{ padding: '10px 20px' }}>Выход не закреплён: Xray выбирает по наименьшей задержке.</div>}
+        ? !!data?.rows.length && !data.rows.some((r) => r.ok) && <div className="k" style={{ padding: '12px 20px' }}>Ни один выход не отвечает — вход держит трафик на первом по порядку.</div>
+        : !data?.selected && !!data?.rows.length && <div className="k" style={{ padding: '12px 20px' }}>Выход не закреплён: Xray выбирает по наименьшей задержке.</div>}
       <div style={{ padding: '0 20px' }}><ErrorBox error={error} /></div>
     </section>
   );
@@ -1433,7 +1433,7 @@ function SpreadHealth({ t, data, busy, error, check }: { t: Template; data: Heal
         </table>
       </div>
       {st && st.groups.some((g) => g.cur !== g.home) && (
-        <div className="k" style={{ padding: '10px 20px' }}>{`Переведены группы: ${st.groups.filter((g) => g.cur !== g.home).map((g) => g.g + 1).join(', ')}. Вернутся на свои выходы, когда там освободится место.`}</div>
+        <div className="k" style={{ padding: '12px 20px' }}>{`Переведены группы: ${st.groups.filter((g) => g.cur !== g.home).map((g) => g.g + 1).join(', ')}. Вернутся на свои выходы, когда там освободится место.`}</div>
       )}
       <div style={{ padding: '0 20px' }}><ErrorBox error={error} /></div>
     </section>

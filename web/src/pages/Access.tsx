@@ -75,7 +75,7 @@ function OwnerAccess({ auth, onChange }: { auth: AuthState; onChange: () => void
             {created && <div className="alert warn">Временный пароль для <code>{created.username}</code>: <code>{created.password}</code> — покажется один раз. <CopyButton text={created.password} /></div>}
           </form>
         )}
-        <div style={{ padding: '0 20px 14px' }}><ErrorBox error={error} /></div>
+        <div style={{ padding: '0 20px 16px' }}><ErrorBox error={error} /></div>
       </section>
       <RolesCard isOwner={isOwner} onChange={() => { void reload(); void reloadRoles(); }} />
     </>
@@ -100,7 +100,7 @@ function MySecurity({ auth, onChange }: { auth: AuthState; onChange: () => void 
             {!setup ? <div><button className="btn pri" disabled={busy} onClick={() => void run(async () => setSetup(await api.post('/api/v1/me/2fa/setup')))}>Настроить 2FA</button></div> : (
               <div className="stack">
                 <span className="small">Добавьте ключ в приложение-аутентификатор (Aegis, 2FAS, Google Authenticator) вручную или ссылкой:</span>
-                <code style={{ padding: 10 }}>{setup.secret}</code>
+                <code style={{ padding: 12 }}>{setup.secret}</code>
                 <div className="flex"><CopyButton text={setup.secret} label="Копировать ключ" /><CopyButton text={setup.uri} label="Копировать otpauth-ссылку" /></div>
                 <form className="flex" onSubmit={(e) => { e.preventDefault(); void run(async () => { await api.post('/api/v1/me/2fa/enable', { code }); setSetup(null); onChange(); }); }}>
                   <input className="inp mono" style={{ width: 140 }} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} placeholder="6 цифр" aria-label="Код" /><button className="btn pri" disabled={code.length !== 6}>Включить</button></form>

@@ -34,6 +34,11 @@ const shq = (s: string) => `'${s.split("'").join(`'"'"'`)}'`;
 
 export interface MoveTarget {
   host: string; sshPort: number; user: string; password?: string; privateKey?: string;
+  /**
+   * Отпечаток ed25519-ключа SSH нового сервера (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). На новый сервер уходят
+   * пароль root, база и мастер-ключ: с отпечатком подменить сервер посередине (провайдер, ТСПУ) не выйдет.
+   */
+  hostKeyFp?: string;
   /** сертификат новой панели: Let's Encrypt на IP или на домен (A-запись домена уже должна вести на новый сервер) */
   tls: 'ip' | 'domain'; domain?: string;
 }
@@ -96,19 +101,24 @@ export async function movePanel(ctx: Ctx, t: MoveTarget, log: (l: string) => voi
 
   // ── 1. вход на новый сервер ──
   let fp = '';
+  const want = t.hostKeyFp ? 'SHA256:' + t.hostKeyFp.trim().replace(/^SHA256:/i, '').replace(/=+$/, '') : null;
   const client: SshClient = await new Promise((resolve, reject) => {
     const c = new Client();
     c.on('ready', () => resolve(c));
-    c.on('error', (e) => reject(new Error(`SSH ${t.user}@${ip}:${t.sshPort}: ${e.message}`)));
+    c.on('error', (e) => reject(new Error(want && fp && fp !== want
+      ? `ключ SSH сервера ${fp} не совпал с указанным ${want} — соединение прервано, пароль и данные не отправлены`
+      : `SSH ${t.user}@${ip}:${t.sshPort}: ${e.message}`)));
     c.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => finish(prompts.map(() => t.password ?? '')));
     c.connect({
       host: ip, port: t.sshPort, username: t.user, readyTimeout: 20_000, tryKeyboard: !t.privateKey,
       ...(t.privateKey ? { privateKey: t.privateKey } : { password: t.password }),
-      hostVerifier: (key: Buffer) => { fp = fingerprintOf(key).fp; return true; },
+      // с отпечатком — только ed25519 и только этот ключ (проверка до отправки пароля); без него — ключ пишется в журнал
+      ...(want ? { algorithms: { serverHostKey: ['ssh-ed25519'] } } : {}),
+      hostVerifier: (key: Buffer) => { fp = fingerprintOf(key).fp; return !want || fp === want; },
     });
   });
   try {
-    log(`вход ${t.user}@${ip}:${t.sshPort} выполнен, ключ сервера ${fp}`);
+    log(`вход ${t.user}@${ip}:${t.sshPort} выполнен, ключ сервера ${fp}${want ? ' (совпал с указанным)' : ' — отпечаток не указан, сверьте его с ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub на новом сервере'}`);
     const exec = (cmd: string, stdin: Buffer | string = '', timeoutMs = 120_000) => new Promise<{ code: number | null; out: string }>((resolve, reject) => {
       client.exec(cmd, (err, stream) => {
         if (err) return reject(err);

@@ -82,6 +82,8 @@ import { parseCertStatus, type TlsState } from './certs.js';
 import { cfOriginFor, installCf } from './tlsissue.js';
 import { pruneTemplateRefs } from './prune.js';
 import { twinOf, twinText } from './twins.js';
+import { ruDirectOn } from './rudirect.js';
+import { pruneRuGeo, syncRuGeo } from './rugeo.js';
 import { parseSections } from './preflight.js';
 
 export interface JobHandle { id: number; log: (line: string) => void; finish: (s: 'ok' | 'failed') => void }
@@ -349,6 +351,11 @@ export class Ops {
         }
       }
     }
+    // «Российские сайты напрямую»: списки на узел до сборки конфига (rugeo.ts), правила ссылаются только на доставленное
+    if (!xuiMode && ruDirectOn(this.ctx.db, s.id)) {
+      await this.ensureKit(s, n, log);
+      await syncRuGeo(this.ctx, s, n, log);
+    }
     for (const core of ['xray', 'sing-box', 'telemt'] as const) {
       if (core === 'xray' && xuiMode) continue;
       const cfg = core === 'xray' ? this.vpn.renderXray(s) : core === 'sing-box' ? this.vpn.renderSingbox(s) : this.vpn.renderTelemt(s);
@@ -376,6 +383,8 @@ export class Ops {
     }
     this.ctx.updateServer(s.id, { config_dirty: 0 });
     if (!xuiMode) setSetting(this.ctx.db, `applied.${s.id}`, renderHash(this.vpn, s));
+    // конфиг применён — прежние списки российских сайтов, кроме предыдущего (на него ссылается резервный конфиг), не нужны
+    if (!xuiMode) await pruneRuGeo(this.ctx, s, n).catch(() => undefined);
     // блокировки устройств вошли в конфиг — на ходу узел догоняет только их изменения (Workers.devices)
     if (!xuiMode) setSetting(this.ctx.db, `limits.applied.${s.id}`, limitsSig(this.ctx));
     // перезапуск Xray сбрасывает переключение балансировщика — возвращаем выбранные выходы «Авто» входа

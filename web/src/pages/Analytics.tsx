@@ -72,7 +72,7 @@ export function AnalyticsPage() {
       <div className="page-head">
         <div><h1>Аналитика</h1><p>Нагрузка серверов за двое суток и выгрузка журналов для разбора</p></div>
       </div>
-      <section className="card pad stack" style={{ gap: 10 }}>
+      <section className="card pad stack" style={{ gap: 12 }}>
         <h2>Диагностика для разбора <Info>Один файл Markdown: серверы и конфигурации (без ключей и паролей), события панели, проверки выходов, нагрузка по часам и журналы служб с каждого сервера. Журналы сжимаются на самих серверах: одинаковые строки схлопнуты («N× первый…последний»), адреса пользователей замаскированы, строки подключений пропущены. Файл можно целиком передать нейросети с вопросом, что пошло не так.</Info></h2>
         <div className="flex">
           <select className="inp" style={{ width: 'auto' }} value={hours} onChange={(e) => setHours(e.target.value)} aria-label="За сколько часов">

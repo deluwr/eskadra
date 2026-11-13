@@ -61,7 +61,7 @@ export function HostStatsPanel({ url, pollMs = 3000 }: { url: string; pollMs?: n
       <div className="hs-foot k">
         <span>{`работает ${upFor(st.uptimeSec)}`}</span>
         {st.load && <span>{`нагрузка ${st.load.map((x) => x.toFixed(2)).join(' ')}`}</span>}
-        {st.ips.length > 0 && <span className="flex" style={{ gap: 6 }}>адреса {st.ips.map((ip) => <Addr key={ip} value={ip} />)}</span>}
+        {st.ips.length > 0 && <span className="flex" style={{ gap: 8 }}>адреса {st.ips.map((ip) => <Addr key={ip} value={ip} />)}</span>}
         {err && <span style={{ color: 'var(--warn)' }}>{err}</span>}
       </div>
     </div>

@@ -10,7 +10,7 @@ import { Ops, coresOff } from './ops.js';
 import { effectiveLimits, json, period, Vpn } from './vpn.js';
 import { saveUser, subBase, userBody } from './routes/users.js';
 import { createBody, createServer } from './routes/servers.js';
-import { can as canRole, inScope, roleOf, type Perm, type RoleInfo } from './roles.js';
+import { can as canRole, inScope, roleOf, userVisible, type Perm, type RoleInfo } from './roles.js';
 import { botProxyOptions } from './botproxy.js';
 
 export type Button = { text: string; callback_data?: string; url?: string };
@@ -89,7 +89,12 @@ export class AdminFlows {
   }
 
   private vpn() { return new Vpn(this.ctx); }
-  private user(id: string) { return this.ctx.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined; }
+  /** Пользователь, если он виден админу (роль «только свои» не видит чужих — как в панели). */
+  private user(id: string, a?: AdminRow) {
+    const u = this.ctx.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as (UserRow & { created_by?: number | null }) | undefined;
+    if (u && a && !userVisible(roleOf(this.ctx.db, a.role), a.id, u.created_by ?? null)) return undefined;
+    return u;
+  }
 
   // ───── текстовые команды и пошаговый ввод ─────
 
@@ -98,7 +103,7 @@ export class AdminFlows {
     const [head, ...rest] = text.trim().split(/\s+/);
     const cmd = head!.replace(/@.*$/, '').toLowerCase();
     if (cmd === '/cancel') { this.flows.delete(chatId); await this.io.send(chatId, 'Ввод прерван.'); return true; }
-    if (cmd === '/users') { this.flows.delete(chatId); await this.io.show(chatId, this.usersScreen(0)); return true; }
+    if (cmd === '/users') { this.flows.delete(chatId); await this.io.show(chatId, this.usersScreen(0, a)); return true; }
     if (cmd === '/servers') { this.flows.delete(chatId); await this.io.show(chatId, this.serversScreen(a)); return true; }
     if (cmd === '/notify') { await this.io.show(chatId, this.notifyScreen(a)); return true; }
     if (cmd === '/adduser') {
@@ -136,23 +141,25 @@ export class AdminFlows {
         return true;
       }
       // пользователи
-      case 'ul': await toast(); await this.io.show(chatId, this.usersScreen(Number(args[0] ?? 0)), mid); return true;
+      case 'ul': await toast(); await this.io.show(chatId, this.usersScreen(Number(args[0] ?? 0), a), mid); return true;
       case 'uadd':
         if (!this.may(a, 'users.edit')) return toast('Роли не разрешено добавлять пользователей').then(() => true);
         await toast();
         this.flows.set(chatId, { kind: 'user', step: 'name', data: {}, exp: Date.now() + 15 * 60_000 });
         await this.io.send(chatId, 'Имя нового пользователя (латиница, цифры, дефис):\n/cancel — отмена');
         return true;
-      case 'uc': { const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true); await toast(); await this.io.show(chatId, this.userCard(a, u), mid); return true; }
+      case 'uc': { const u = this.user(args[0]!, a); if (!u) return toast('Пользователь не найден').then(() => true); await toast(); await this.io.show(chatId, this.userCard(a, u), mid); return true; }
       case 'usub': {
-        const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
+        const u = this.user(args[0]!, a); if (!u) return toast('Пользователь не найден').then(() => true);
+        if (!this.may(a, 'users.edit')) return toast('Ссылки доступа видит роль, которой можно менять пользователей').then(() => true);
         const base = subBase(this.ctx);
         await toast();
         await this.io.send(chatId, base ? `Подписка <b>${esc(u.name)}</b>:\n<code>${esc(`${base}/s/${u.sub_token}`)}</code>\n\nОткрытая в браузере, ссылка показывает QR, срок и лимиты.` : 'Сервис подписок не настроен: задайте адрес в разделе «Пользователи» панели.');
         return true;
       }
       case 'ulnk': {
-        const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
+        const u = this.user(args[0]!, a); if (!u) return toast('Пользователь не найден').then(() => true);
+        if (!this.may(a, 'users.edit')) return toast('Ссылки доступа видит роль, которой можно менять пользователей').then(() => true);
         const ps = this.vpn().profiles(u);
         await toast();
         if (!ps.length) { await this.io.show(chatId, { text: `У ${esc(u.name)} нет профилей: выкатите конфигурацию на доступные ему серверы.`, kb: [[back(`uc:${u.id}`)]] }, mid); return true; }
@@ -160,14 +167,15 @@ export class AdminFlows {
         return true;
       }
       case 'ul1': {
-        const u = this.user(args[0]!); const vpn = this.vpn(); const p = u && vpn.profiles(u)[Number(args[1])];
+        if (!this.may(a, 'users.edit')) return toast('Нет доступа').then(() => true);
+        const u = this.user(args[0]!, a); const vpn = this.vpn(); const p = u && vpn.profiles(u)[Number(args[1])];
         if (!u || !p) return toast('Профиль не найден — откройте список заново').then(() => true);
         await toast();
         await this.io.send(chatId, `<b>${esc(p.name)}</b> · ${esc(u.name)}\n<code>${esc(vpn.link(u, p))}</code>`);
         return true;
       }
       case 'utpl': case 'usrv': {
-        const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
+        const u = this.user(args[0]!, a); if (!u) return toast('Пользователь не найден').then(() => true);
         if (act === 'utpl' && args[1]) {
           if (!this.may(a, 'users.edit', { template: args[1] })) return toast('Эта конфигурация вне вашей роли').then(() => true);
           const all = this.vpn().userTemplates().map((t) => t.id);
@@ -183,7 +191,7 @@ export class AdminFlows {
         return true;
       }
       case 'uon': {
-        const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
+        const u = this.user(args[0]!, a); if (!u) return toast('Пользователь не найден').then(() => true);
         if (!this.may(a, 'users.edit')) return toast('Роли не разрешено менять пользователей').then(() => true);
         const st = u.status === 'active' ? 'disabled' : 'active';
         db.prepare(`UPDATE users SET status = ?, disabled_reason = ? WHERE id = ?`).run(st, st === 'disabled' ? 'отключён в боте' : null, u.id);
@@ -194,19 +202,19 @@ export class AdminFlows {
         return true;
       }
       case 'udel': {
-        const u = this.user(args[0]!); if (!u) return toast('Пользователь не найден').then(() => true);
+        const u = this.user(args[0]!, a); if (!u) return toast('Пользователь не найден').then(() => true);
         if (!this.may(a, 'users.delete')) return toast('Роли не разрешено удалять пользователей').then(() => true);
         await toast();
         await this.io.show(chatId, { text: `Удалить <b>${esc(u.name)}</b>? Его подписка и ссылки перестанут работать.`, kb: [[cb('Удалить', `udelok:${u.id}`), back(`uc:${u.id}`, 'Отмена')]] }, mid);
         return true;
       }
       case 'udelok': {
-        const u = this.user(args[0]!); if (!u || !this.may(a, 'users.delete')) return toast('Нет доступа').then(() => true);
+        const u = this.user(args[0]!, a); if (!u || !this.may(a, 'users.delete')) return toast('Нет доступа').then(() => true);
         db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
         this.vpn().markDirty();
         audit(db, a.username, 'user.delete', u.id, { name: u.name, via: 'bot' });
         await toast('Удалён');
-        await this.io.show(chatId, this.usersScreen(0), mid);
+        await this.io.show(chatId, this.usersScreen(0, a), mid);
         return true;
       }
       // серверы
@@ -267,8 +275,9 @@ export class AdminFlows {
 
   // ───── пользователи ─────
 
-  private usersScreen(page: number): Screen {
-    const users = this.vpn().users();
+  private usersScreen(page: number, a: AdminRow): Screen {
+    const r = roleOf(this.ctx.db, a.role);
+    const users = this.vpn().users().filter((u) => userVisible(r, a.id, (u as UserRow & { created_by?: number | null }).created_by ?? null));
     const from = page * PAGE;
     const list = users.slice(from, from + PAGE);
     const nav: Button[] = [];

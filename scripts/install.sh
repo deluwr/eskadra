@@ -176,7 +176,18 @@ install_app
 
 NOLOGIN="$(command -v nologin || echo /bin/false)"   # /usr/sbin/nologin в Debian, /sbin/nologin в RHEL
 id eskadra >/dev/null 2>&1 || useradd --system --home-dir "$DATA" --shell "$NOLOGIN" eskadra
-install -d -m 700 -o eskadra -g eskadra "$DATA" "$DATA/tls"
+install -d -m 700 -o eskadra -g eskadra "$DATA"
+# Подкаталоги $DATA: его пишет панель, и при обновлении (кнопка в панели) там может лежать подложенный симлинк.
+# install -d -o/-m пошёл бы по нему и отдал eskadra чужой каталог — поэтому mkdir (на симлинке — отказ) и chown -h.
+data_dir() {  # data_dir РЕЖИМ КАТАЛОГ…
+  local m="$1" d; shift
+  for d; do
+    if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then rm -f "$d"; fi
+    mkdir -m "$m" "$d" 2>/dev/null || true
+    chown -h eskadra:eskadra "$d"
+  done
+}
+data_dir 700 "$DATA/tls"
 install -d -m 755 "$ETC"
 
 IP="$(public_ip)"
@@ -210,7 +221,7 @@ if [ -n "${ESKADRA_RESTORE:-}" ] && [ "$FRESH" = 1 ]; then
   SECRET="$(mktemp)"; printf 'move' > "$SECRET"   # архив переноса не зашифрован: он шёл по SSH
   FLEET_DATA="$DATA" "$PREFIX/node/bin/node" "$PREFIX/app/server/dist/restore.js" "$ESKADRA_RESTORE" "$SECRET" "$DATA" || die "данные переноса не распакованы"
   rm -f "$SECRET" "$ESKADRA_RESTORE"
-  chown eskadra:eskadra "$DATA/fleet.db" "$DATA/master.key"; chmod 600 "$DATA/fleet.db" "$DATA/master.key"
+  chown -h eskadra:eskadra "$DATA/fleet.db" "$DATA/master.key"; chmod 600 "$DATA/fleet.db" "$DATA/master.key"
   date -u +%FT%TZ > "$SETUP_MARK"
 fi
 
@@ -240,7 +251,7 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
 # Помощник «главный сервер как узел»: панель (без root) кладёт запрос, root-юнит добавляет её ключ на этом хосте
-install -d -m 700 -o eskadra -g eskadra "$DATA/selfnode"
+data_dir 700 "$DATA/selfnode"
 cat > /etc/systemd/system/eskadra-selfnode.service <<EOF
 [Unit]
 Description=Eskadra: panel access to this host (self node)
@@ -257,7 +268,7 @@ PathChanged=$DATA/selfnode/request.json
 WantedBy=multi-user.target
 EOF
 # Помощник обновления: кнопка «Обновить» в панели кладёт запрос, root-юнит запускает eskadra update
-install -d -m 750 -o eskadra -g eskadra "$DATA/update"
+data_dir 750 "$DATA/update"
 cat > /etc/systemd/system/eskadra-update.service <<EOF
 [Unit]
 Description=Eskadra: update requested from the panel

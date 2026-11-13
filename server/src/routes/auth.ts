@@ -13,6 +13,8 @@ import { audit } from '../lib/audit.js';
 import { movedTo } from '../migrate.js';
 
 export const COOKIE = 'fleet_session';
+/** Хэш несуществующего пароля: проверка для неизвестного логина занимает столько же, сколько для настоящего. */
+const DUMMY_HASH = hashPassword(randomToken());
 
 const creds = z.object({
   username: z.string().trim().min(3).max(64).regex(/^[a-zA-Z0-9_.-]+$/),
@@ -97,23 +99,37 @@ export async function authRoutes(app: FastifyInstance, ctx: Ctx) {
     return { ok: true };
   });
 
+  // Перебор паролей: 10 неудач с адреса или 20 на логин (перебор с многих адресов) за 15 минут — пауза
+  const WINDOW = 15 * 60_000;
   const fails = new Map<string, { n: number; at: number }>();
+  const failsOf = (k: string) => { const f = fails.get(k); return f && Date.now() - f.at < WINDOW ? f.n : 0; };
+  const fail = (k: string) => {
+    if (fails.size > 10_000) for (const [key, v] of fails) if (Date.now() - v.at >= WINDOW) fails.delete(key);
+    fails.set(k, { n: failsOf(k) + 1, at: Date.now() });
+  };
+  // код 2FA при входе — одноразовый: подсмотренный или выманенный код второй раз не пустит
+  const usedOtp = new Map<string, number>();
   app.post('/api/v1/auth/login', async (req, reply) => {
-    const f = fails.get(req.ip);
-    if (f && f.n >= 10 && Date.now() - f.at < 15 * 60_000) return reply.code(429).send({ error: 'слишком много попыток, подождите 15 минут' });
-    const body = z.object({ username: z.string(), password: z.string(), otp: z.string().optional() }).parse(req.body);
+    const body = z.object({ username: z.string().max(64), password: z.string().max(256), otp: z.string().max(16).optional() }).parse(req.body);
+    const ipKey = `ip:${req.ip}`, userKey = `user:${body.username.toLowerCase()}`;
+    if (failsOf(ipKey) >= 10 || failsOf(userKey) >= 20) return reply.code(429).send({ error: 'слишком много попыток, подождите 15 минут' });
     const row = db.prepare('SELECT id, pw_hash, totp_enabled, totp_sealed FROM admins WHERE username = ?').get(body.username) as AdminRow | undefined;
     const bad = () => {
-      fails.set(req.ip, { n: (f && Date.now() - f.at < 15 * 60_000 ? f.n : 0) + 1, at: Date.now() });
+      fail(ipKey); fail(userKey);
       audit(db, body.username, 'admin.login_failed', undefined, { ip: req.ip });
       return reply.code(401).send({ error: 'неверный логин или пароль' });
     };
-    if (!row || !verifyPassword(body.password, row.pw_hash)) return bad();
+    // нет такого логина — всё равно считаем scrypt: по времени ответа не узнать, какие логины существуют
+    const pwOk = verifyPassword(body.password, row?.pw_hash ?? DUMMY_HASH);
+    if (!row || !pwOk) return bad();
     if (row.totp_enabled) {
       if (!body.otp) return reply.code(428).send({ error: 'нужен код 2FA', kind: 'otp' });
-      if (!verifyTotp(ctx.open(row.totp_sealed!), body.otp)) return bad();
+      const key = `${row.id}:${body.otp}`;
+      for (const [k, at] of usedOtp) if (Date.now() - at > 120_000) usedOtp.delete(k);
+      if (usedOtp.has(key) || !verifyTotp(ctx.open(row.totp_sealed!), body.otp)) return bad();
+      usedOtp.set(key, Date.now());
     }
-    fails.delete(req.ip);
+    fails.delete(ipKey); fails.delete(userKey);
     db.prepare(`DELETE FROM sessions WHERE expires_at <= datetime('now')`).run();
     startSession(db, req, reply, row.id);
     audit(db, body.username, 'admin.login', undefined, { ip: req.ip });

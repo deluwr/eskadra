@@ -45,6 +45,8 @@ export class SubService {
 
   private limited(ip: string): boolean {
     const now = Date.now();
+    // счётчики старше минуты не нужны: иначе таблица растёт с каждым новым адресом (сканеры, ботнеты)
+    if (this.hits.size > 10_000) for (const [k, v] of this.hits) if (now - v.at > 60_000) this.hits.delete(k);
     const h = this.hits.get(ip);
     if (!h || now - h.at > 60_000) { this.hits.set(ip, { n: 1, at: now }); return false; }
     return ++h.n > 30;
@@ -65,6 +67,13 @@ export class SubService {
     const port = ensureSubPort(this.ctx);
     const tls = this.tls();
     const app = (tls ? Fastify({ logger: false, trustProxy: false, https: tls }) : Fastify({ logger: false, trustProxy: false })) as unknown as FastifyInstance;
+    // ссылка подписки — секрет: не уходит в Referer, страницу нельзя встроить во фрейм, ответы не кэшируются
+    app.addHook('onSend', async (_req, reply) => {
+      reply.header('X-Frame-Options', 'DENY');
+      reply.header('X-Content-Type-Options', 'nosniff');
+      reply.header('Referrer-Policy', 'no-referrer');
+      reply.header('Cache-Control', 'no-store');
+    });
     const vpn = new Vpn(this.ctx);
     const notFound = (reply: { code: (c: number) => { type: (t: string) => { send: (b: string) => unknown } } }) =>
       reply.code(404).type('text/plain').send('not found');

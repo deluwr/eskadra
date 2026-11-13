@@ -288,6 +288,9 @@ export class Bot {
         case 'exc': {
           const t = new Vpn(this.ctx).template(arg ?? '');
           if (!t) return toast('Конфигурация не найдена');
+          // как в панели: проверка выходов — право «выкатывать» и конфигурация в области роли
+          const role = roleOf(this.ctx.db, admin.role);
+          if (!canRole(role, 'configs.rollout') || (role.scope.templates && !role.scope.templates.includes(t.id))) return toast('Роли не разрешено проверять выходы');
           await toast('Проверяю выходы…');
           await this.show(chatId, { text: `Проверяю выходы «${esc(t.name)}»…` }, mid);
           const r = await new Ops(this.ctx).checkExits(t, () => undefined).catch((e: Error) => ({ error: e.message }));

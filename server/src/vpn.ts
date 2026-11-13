@@ -4,6 +4,8 @@ import { getSetting } from './db.js';
 import { activeBotProxy, botCredKey, mgmtCredKey } from './botproxy.js';
 import { blockedDevices, limitRules } from './devices.js';
 import { blocksOf, needsSniff, singboxBlockRules, xrayBlockRules } from './blocks.js';
+import { ruDirectOn, xrayRuDirectRules } from './rudirect.js';
+import { ruGeoOnNode, ruIpFileOf } from './rugeo.js';
 import { spreadBal, spreadCaps, spreadChain, spreadGroupOf, spreadHomes, spreadLoop, spreadLoopIn } from './spread.js';
 import { certName, entrySpec, hinPort, hopRange, hy2Entry, hy2InboundExtra, legPort, link as protoLink, natRelayOf, type LinkTarget, probePort, singboxOutbound, specOf, telemtConfig, tlsServerName, xrayClient, xrayInbound, xrayOutbound, type Spec } from './protocols.js';
 
@@ -246,6 +248,9 @@ export class Vpn {
     if (!ibs.length) return null;
     const users = this.users(true);
     const blocks = blocksOf(this.db);
+    // «Российские сайты напрямую» на этом входе: теги inbound'ов, чей трафик идёт на выходы (relay и SOCKS Hysteria2)
+    const ru = ruDirectOn(this.db, server.id);
+    const ruTags: string[] = [];
     const inbounds: object[] = [
       { tag: 'api', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } },
     ];
@@ -274,12 +279,14 @@ export class Vpn {
       const hy = ib.kind === 'relay' && (sp.protocol === 'hysteria2' || hy2Entry(sp));
       const hin = (route: string) => {
         const tag = `hin-${ib.id}-${route}`;
+        if (ru) ruTags.push(tag);
         inbounds.push({ tag, listen: '127.0.0.1', port: hinPort(ib.id, route), protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' },
-          ...(needsSniff(blocks) ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {}) });
+          ...(needsSniff(blocks) || ru ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {}) });
         return tag;
       };
       let clients = ib.kind === 'direct' ? this.directClients(server, t, users) : [];
       if (ib.kind === 'relay') {
+        if (ru && !hy) ruTags.push(`in-${ib.id}`);
         const targets = this.relayTargets(t);
         // выходы, для которых собран outbound: на них ссылаются балансировщики
         const pairs = targets.flatMap((x) => {
@@ -392,7 +399,7 @@ export class Vpn {
         privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : undefined,
         cert: certName(isp, t.id, server.id, server.host),
         ssServerKey: ib.public_key ?? undefined,
-        forceSniff: needsSniff(blocks),
+        forceSniff: needsSniff(blocks) || (ru && ib.kind === 'relay'),
       }));
     }
     return {
@@ -415,8 +422,14 @@ export class Vpn {
       policy: { levels: { '0': { statsUserUplink: true, statsUserDownlink: true, statsUserOnline: true } }, system: { statsInboundUplink: false } },
       inbounds,
       outbounds,
-      routing: { domainStrategy: 'IPOnDemand', rules: [...head, ...tagRules([...(opts.limits === false ? [] : limitRules(blockedDevices(this.ctx))), ...rules], 'r0')], balancers },
+      routing: { domainStrategy: 'IPOnDemand', rules: [...head, ...tagRules([...(opts.limits === false ? [] : limitRules(blockedDevices(this.ctx))), ...xrayRuDirectRules(ruTags, this.ruExt(server, ru)), ...rules], 'r0')], balancers },
     };
+  }
+
+  /** Набор runetfreedom, который лежит на этом входе (rugeo.ts), — дополнение к правилам по базам ядра. */
+  private ruExt(server: ServerRow, ru: boolean): { file: string; ipFile: string } | null {
+    const file = ru ? ruGeoOnNode(this.ctx, server.id) : null;
+    return file ? { file, ipFile: ruIpFileOf(file) } : null;
   }
 
   /**

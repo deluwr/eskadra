@@ -209,10 +209,49 @@ declare module 'fastify' {
 }
 
 /**
+ * Область роли на любом изменяющем запросе к серверу или конфигурации — даже там, где отдельного права не нужно
+ * (проверка входа, preflight, статус): роль с областью не трогает чужие серверы. Просмотр (GET) — как раньше.
+ */
+export function scopeHook(ctx: Ctx) {
+  return async (req: FastifyRequest, reply: FastifyReply) => {
+    const a = req.admin;
+    if (!a || req.method === 'GET') return;
+    const id = (req.params as { id?: string } | undefined)?.id;
+    if (!id) return;
+    const role = roleOf(ctx.db, a.role);
+    const url = req.routeOptions.url ?? '';
+    if (/\/api\/v1\/servers\/:id/.test(url) && !inScope(role.scope.servers, id)) return reply.code(403).send({ error: `сервер вне области роли «${role.name}»` });
+    if (/\/api\/v1\/templates\/:id/.test(url) && !inScope(role.scope.templates, id)) return reply.code(403).send({ error: `конфигурация вне области роли «${role.name}»` });
+  };
+}
+
+/**
  * Проверка права роли (roles.ts) и, для чувствительных операций, кода 2FA (заголовок X-Fleet-OTP).
  * Маршрут конкретного сервера или конфигурации (/servers/:id, /templates/:id) — ещё и в пределах области роли.
  * Если у админа 2FA не включена, операция разрешена, но UI показывает предупреждение (§14.3).
  */
+/**
+ * Код 2FA для действия: 5 неверных кодов за 15 минут — пауза 15 минут. Без лимита сессия, украденная без телефона,
+ * подобрала бы код перебором за минуты (в окне ±30 с подходят 3 кода из миллиона). Пустой код (первый запрос, после
+ * которого интерфейс спрашивает код) попыткой не считается.
+ */
+const OTP_WINDOW = 15 * 60_000;
+const otpFails = new Map<number, { n: number; at: number }>();
+export function checkOtp(adminId: number, secret: string | null, code: string): 'ok' | 'need' | 'locked' {
+  const f = otpFails.get(adminId);
+  const n = f && Date.now() - f.at < OTP_WINDOW ? f.n : 0;
+  if (n >= 5) return 'locked';
+  if (!code) return 'need';
+  if (secret && verifyTotp(secret, code)) { otpFails.delete(adminId); return 'ok'; }
+  otpFails.set(adminId, { n: n + 1, at: Date.now() });
+  return 'need';
+}
+export function otpReply(reply: FastifyReply, r: 'need' | 'locked') {
+  return r === 'locked'
+    ? reply.code(429).send({ error: 'слишком много неверных кодов 2FA — подождите 15 минут' })
+    : reply.code(428).send({ error: 'нужен код 2FA', kind: 'otp' });
+}
+
 export function guard(ctx: Ctx, need: Perm | 'owner', opts: { otp?: boolean } = {}) {
   return async (req: FastifyRequest, reply: FastifyReply) => {
     const a = req.admin;
@@ -225,8 +264,8 @@ export function guard(ctx: Ctx, need: Perm | 'owner', opts: { otp?: boolean } = 
     if (id && /\/api\/v1\/templates\/:id/.test(url) && !inScope(role.scope.templates, id)) return reply.code(403).send({ error: `конфигурация вне области роли «${role.name}»` });
     // консольная сессия создаётся root-ом на самом сервере (eskadra) — код 2FA там не спрашиваем
     if (opts.otp && a.totp && !a.console) {
-      const code = String(req.headers['x-fleet-otp'] ?? '');
-      if (!a.totpSecret || !verifyTotp(a.totpSecret, code)) return reply.code(428).send({ error: 'нужен код 2FA', kind: 'otp' });
+      const r = checkOtp(a.id, a.totpSecret, String(req.headers['x-fleet-otp'] ?? ''));
+      if (r !== 'ok') return otpReply(reply, r);
     }
   };
 }

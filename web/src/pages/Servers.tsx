@@ -111,7 +111,7 @@ function AddServerForm({ onCreated, onCancel }: { onCreated: (id: string) => voi
       )}
 
       <fieldset className="stack" style={{ border: 0, padding: 0, margin: 0 }}>
-        <legend className="k" style={{ marginBottom: 6 }}>Канал управления <Info>Как панель будет ходить на сервер после настройки. Если главный сервер в РФ — выбирайте туннель: прямой SSH через границу может резаться. Через сервер — панель заходит на другой сервер флота и через него открывает SSH к новому (и первичная настройка тоже идёт через него); команды выполняет сама панель.</Info></legend>
+        <legend className="k" style={{ marginBottom: 8 }}>Канал управления <Info>Как панель будет ходить на сервер после настройки. Если главный сервер в РФ — выбирайте туннель: прямой SSH через границу может резаться. Через сервер — панель заходит на другой сервер флота и через него открывает SSH к новому (и первичная настройка тоже идёт через него); команды выполняет сама панель.</Info></legend>
         <div className="choice">
           <label>
             <input type="radio" name="mgmt" value="direct" checked={f.mgmtMode === 'direct'} onChange={set('mgmtMode')} />

@@ -729,7 +729,8 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
     return target;
   };
 
-  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/plan', async (req) => {
+  // план сохраняется в сервер и затем применяется — менять его может только тот, кто управляет защитой
+  app.post<{ Params: { id: string } }>('/api/v1/servers/:id/fw/plan', { preHandler: guard(ctx, 'servers.protect') }, async (req) => {
     const r = ctx.server(req.params.id);
     const plan = renderPlan(ctx, r, levelOf(r, req.body));
     ctx.updateServer(r.id, { fw_plan: plan.text, fw_plan_hash: sha256hex(plan.text) });

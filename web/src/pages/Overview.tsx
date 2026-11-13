@@ -62,7 +62,7 @@ export function OverviewPage() {
                 <div>
                   <div className="route-title"><span className="term-hash" aria-hidden="true">##</span><b>{d.routes.length ? 'Без входа' : 'Серверы'}</b><span>пользователи подключаются к ним напрямую</span></div>
                   <div className="flex">{loose.map((s) => (
-                    <a key={s.id} className={`rm-exit ${s.fail_since ? 'fail' : 'ok'}`} href={`#/server/${s.id}`} style={{ padding: '0 14px', gap: 10, color: 'var(--text)', textDecoration: 'none' }}>
+                    <a key={s.id} className={`rm-exit ${s.fail_since ? 'fail' : 'ok'}`} href={`#/server/${s.id}`} style={{ padding: '0 16px', gap: 12, color: 'var(--text)', textDecoration: 'none' }}>
                       <span className="rm-name">{s.name}</span><span className="rm-note">{s.fail_since ? 'нет связи' : ago(s.last_seen_at)}</span>
                     </a>
                   ))}</div>
@@ -83,7 +83,7 @@ export function OverviewPage() {
 
           <section className="card">
             <div className="card-head"><h2>Главный сервер <Info>Хост, где работает панель (он же исполнитель, если панель ходит на узлы отсюда). Обновляется каждые 3 секунды.</Info></h2><span className="k">вживую</span></div>
-            <div style={{ padding: '16px 20px 18px' }}><HostStatsPanel url="/api/v1/stats/main" /></div>
+            <div style={{ padding: '16px 20px 20px' }}><HostStatsPanel url="/api/v1/stats/main" /></div>
           </section>
 
           <section className="card">

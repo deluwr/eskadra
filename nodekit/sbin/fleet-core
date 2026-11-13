@@ -70,6 +70,40 @@ EOF
 
 exe_of() { echo "$LIB/$1/$2/$1"; }
 
+# Базы, которые раздаёт панель (ext:eskadra-….dat в правилах Xray, например «Российские сайты напрямую»): лежат
+# отдельно от версий ядра, в каталог каждой версии — ссылки (Xray ищет базы рядом с бинарником, XRAY_LOCATION_ASSET)
+GEO="$LIB/xray-geo"
+geo_name_ok() { [[ "$1" =~ ^eskadra-[a-z0-9-]{1,40}\.dat$ ]]; }
+geo_link() {  # geo_link <каталог версии Xray>
+  local d="$1" f
+  for f in "$GEO"/eskadra-*.dat; do [ -f "$f" ] && ln -sfn "$f" "$d/$(basename "$f")"; done
+  for f in "$d"/eskadra-*.dat; do [ -L "$f" ] && [ ! -e "$f" ] && rm -f "$f"; done
+  return 0
+}
+geo_link_all() { local d; for d in "$LIB"/xray/*/; do [ -x "$d/xray" ] && geo_link "${d%/}"; done; return 0; }
+cmd_geo_put() {  # geo-put <имя> <sha256>: stdin — файл в base64
+  local name="$1" sha="$2" tmp
+  geo_name_ok "$name" || die "bad name"
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
+  install -d -m 755 "$GEO"
+  tmp="$(mktemp "$GEO/.put.XXXXXX")"
+  base64 -d > "$tmp" 2>/dev/null || { rm -f "$tmp"; die "bad base64"; }
+  echo "$sha  $tmp" | sha256sum -c --quiet - >/dev/null 2>&1 || { rm -f "$tmp"; die "sha256 mismatch"; }
+  chmod 644 "$tmp"; mv -f "$tmp" "$GEO/$name"
+  geo_link_all
+  echo "ok $name"
+}
+cmd_geo_prune() {  # geo-prune <оставить>…: убрать остальные базы панели (и ссылки на них)
+  local f k keep
+  for f in "$GEO"/eskadra-*.dat; do
+    [ -f "$f" ] || continue
+    keep=0; for k in "$@"; do [ "$(basename "$f")" = "$k" ] && keep=1; done
+    [ "$keep" = 1 ] || rm -f "$f"
+  done
+  geo_link_all
+  echo ok
+}
+
 link_to() {  # переключить /usr/local/bin/eskadra-<core> на версию и переписать юнит
   local core="$1" v="$2" bin; bin="$(bin_of "$core")"
   ln -sfn "$(exe_of "$core" "$v")" "$bin.new" && mv -T "$bin.new" "$bin"
@@ -121,6 +155,7 @@ cmd_install() {
       install -m 755 "$tmp"/sing-box-*/sing-box "$dest.new/sing-box"
     fi
     rm -rf "$dest"; mv "$dest.new" "$dest"
+    [ "$core" = xray ] && geo_link "$dest"
   fi
   drop_rejected() { [ "$v" = "$prev" ] || rm -rf "$dest"; }
   test_cfg "$core" "$v" || { drop_rejected; die "$core $v не принимает текущий конфиг — обновление отменено, работает $prev"; }
@@ -405,7 +440,8 @@ cmd_x25519() {  # выводит private=… public=… (формат Xray ме�
 }
 
 cmd_online() {  # кто онлайн и с каких IP: {"<email>": ["ip", …]} (statsUserOnline, лимит устройств)
-  XRAY="$BIN/eskadra-xray" python3 -c "$(cat <<'PY'
+  # базы (geosite, ext:…) — из каталога работающей версии, как у самого Xray
+  XRAY_LOCATION_ASSET="$(dirname "$(readlink -f "$BIN/eskadra-xray")")" XRAY="$BIN/eskadra-xray" python3 -c "$(cat <<'PY'
 import json, os, re, subprocess
 from subprocess import PIPE
 X, S = os.environ["XRAY"], "--server=127.0.0.1:10085"
@@ -1093,5 +1129,8 @@ case "${1:-}" in
   port80-yield) cmd_port80_yield "${2:-}" ;;
   port80-keep)  cmd_port80_keep "${2:?unit}" ;;
   cert-status) cmd_cert_status ;;
+  geo-put)     cmd_geo_put "${2:?}" "${3:?}" ;;
+  geo-prune)   shift; cmd_geo_prune "$@" ;;
+  geo-list)    ls -1 "$GEO" 2>/dev/null | grep -E '^eskadra-[a-z0-9-]+\.dat$' || true ;;
   *) die "usage: fleet-core install|apply|status|stop|x25519|stats|tls" ;;
 esac

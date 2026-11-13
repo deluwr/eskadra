@@ -10,9 +10,10 @@ import { Vpn } from './vpn.js';
 import { renderHash } from './ops.js';
 import { coreMode } from './ctx.js';
 import { loadOrCreateMasterKey, Sealer } from './lib/crypto.js';
-import { Ctx, HttpError } from './ctx.js';
+import { Ctx, HttpError, scopeHook } from './ctx.js';
 import { authRoutes, requireAdmin } from './routes/auth.js';
 import { registerIpMask } from './ipmask.js';
+import { registerSecurityHeaders } from './headers.js';
 import { serverRoutes } from './routes/servers.js';
 import { templateRoutes } from './routes/templates.js';
 import { userRoutes } from './routes/users.js';
@@ -41,6 +42,7 @@ const app = Fastify({
     : {}),
 }) as unknown as FastifyInstance;
 await app.register(cookie);
+registerSecurityHeaders(app, { tls: !!(config.tlsCert && config.tlsKey) });
 const prefix = config.basePath.replace(/\/$/, '');
 
 app.setErrorHandler((err, _req, reply) => {
@@ -93,6 +95,7 @@ await app.register(async (root) => {
   await authRoutes(root, ctx);
   await root.register(async (secured) => {
     secured.addHook('preHandler', requireAdmin(ctx));
+    secured.addHook('preHandler', scopeHook(ctx));
     registerIpMask(secured, ctx);   // адреса людей — только с правом «видеть IP» (у owner — всегда)
     await serverRoutes(secured, ctx);
     await templateRoutes(secured, ctx);

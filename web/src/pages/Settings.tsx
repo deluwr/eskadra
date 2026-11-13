@@ -24,6 +24,7 @@ export function SettingsPage({ onAuthChange }: { onAuthChange?: () => void }) {
       <Executor s={data} onSaved={reload} />
       <General s={data} />
       <BlocksCard />
+      <RuDirectCard />
       <BotCard s={data} onSaved={reload} />
       {/* бэкапы и перенос панели — только owner */}
       {can('owner') && <BackupCard s={data} />}
@@ -109,7 +110,7 @@ function PanelVersion() {
       {ver.checkedAt && <span className="k">{ver.error ? `Последняя проверка ${ago(ver.checkedAt)}: GitHub недоступен (${ver.error})` : `Проверено ${ago(ver.checkedAt)} · последняя версия ${ver.latest ?? '—'}`}</span>}
       <ErrorBox error={error} />
       {!can('owner') ? <span className="k">Обновление и откат панели — только у owner.</span> : !data ? <span className="k">Загрузка версий…</span> : data.error ? <ErrorBox error={`список версий с GitHub недоступен: ${data.error}`} /> : !data.versions.length ? <span className="k">Прошлых версий нет.</span> : (
-        <div className="flex" style={{ alignItems: 'flex-end', gap: 14 }}>
+        <div className="flex" style={{ alignItems: 'flex-end', gap: 16 }}>
           <label className="fld" style={{ flex: '0 1 320px' }}>Откатить на
             <select className="inp" value={v?.version ?? ''} onChange={(e) => { setPick(e.target.value); setWithData(true); }}>
               {data.versions.map((x) => <option key={x.version} value={x.version}>{x.version} · {x.published.slice(0, 10)}{x.snapshotAt ? ' · есть копия данных' : ''}</option>)}
@@ -159,6 +160,55 @@ function BlocksCard() {
   );
 }
 
+interface RuDirect {
+  entries: string[];
+  options: Array<{ id: string; name: string; host: string; entry: boolean; geoFile: string | null }>;
+  geo: { file: string; counts: Record<string, number>; fetchedAt: string } | null;
+  check: { at: string; error: string | null } | null;
+  source: string;
+}
+
+/** «Российские сайты напрямую»: на выбранных входах в РФ российский трафик не уходит на выход. */
+function RuDirectCard() {
+  const { data, setData } = usePoll(() => api.get<RuDirect>('/api/v1/settings/ru-direct'), null);
+  const { busy, error, run } = useAsync();
+  if (!data) return null;
+  const refresh = () => run(async () => {
+    setData(await api.post<RuDirect>('/api/v1/settings/ru-direct/refresh', {}));
+    toast('Списки обновлены — входы получат их в течение минуты');
+  });
+  const toggle = (id: string, on: boolean) => run(async () => {
+    const entries = on ? [...data.entries, id] : data.entries.filter((x) => x !== id);
+    setData(await api.put<RuDirect>('/api/v1/settings/ru-direct', { entries }));
+    toast(on ? 'Включено — вход получит правила в течение минуты' : 'Выключено — вход вернётся к прежним правилам в течение минуты');
+  });
+  return (
+    <section className="card pad stack">
+      <h2>Российские сайты напрямую <Info>Для входов в РФ. Трафик к российским сайтам и адресам (домены .ru, .su, .рф и geosite:category-ru, адреса geoip:ru из баз ядра, плюс списки runetfreedom) уходит в интернет с самого входа, а не на зарубежный выход: магазины, банки и госсервисы видят российский адрес, и пользователю не нужно настраивать раздельную маршрутизацию в приложении. Остальной трафик идёт на выходы как раньше. Прямые подключения к узлам и Hysteria2 с пересылкой ядром ОС не затрагиваются. После изменения выбранный вход переприменяет конфиг сам (подключения на нём прервутся на секунды).</Info></h2>
+      {data.options.length ? (
+        <div className="block-list">
+          {data.options.map((o) => (
+            <div className="block-row" key={o.id}>
+              <span className="row-text"><b className="small">{o.name}</b><span className="k">{o.host}{o.entry ? '' : ' · сейчас не вход ни одной конфигурации'}{data.entries.includes(o.id) ? (o.geoFile && o.geoFile === data.geo?.file ? ' · базы ядра + runetfreedom' : o.geoFile ? ' · базы ядра + runetfreedom (прежние, новые в пути)' : data.geo ? ' · пока базы ядра — runetfreedom в пути' : ' · базы ядра') : ''}</span></span>
+              <Switch label={`Российские сайты напрямую на ${o.name}`} on={data.entries.includes(o.id)} disabled={busy || !can('settings.edit')} onChange={(v) => void toggle(o.id, v)} />
+            </div>
+          ))}
+        </div>
+      ) : <span className="k">Входов пока нет: настройка появится, когда у конфигурации будет вход («вход → выход»).</span>}
+      <div className="flex">
+        <span className="k" style={{ flex: 1 }}>
+          Всегда работают базы ядра Xray (geosite:category-ru, geoip:ru). К ним добавляются списки <a href="https://github.com/runetfreedom/russia-v2ray-rules-dat" target="_blank" rel="noreferrer">runetfreedom</a>: сайты «доступно только из России» и category-ru, адреса ru и сети Яндекса
+          {data.geo ? ` (${(data.geo.counts['ru-available-only-inside'] ?? 0) + (data.geo.counts['category-ru'] ?? 0)} доменов и ${(data.geo.counts['ip:ru'] ?? 0) + (data.geo.counts['ip:yandex'] ?? 0)} подсетей, от ${fmtTime(data.geo.fetchedAt)})` : ' — ещё не скачаны'}.
+          Панель обновляет их раз в неделю и раздаёт входам сама, узлам доступ к GitHub не нужен.
+          {data.check?.error ? ` Последняя попытка ${fmtTime(data.check.at)}: ${data.check.error}.` : ''}
+        </span>
+        <button className="btn ghost" disabled={busy || !can('settings.edit')} onClick={() => void refresh()}>Обновить списки</button>
+      </div>
+      <ErrorBox error={error} />
+    </section>
+  );
+}
+
 function BotCard({ s, onSaved }: { s: S; onSaved: () => void }) {
   const [token, setToken] = useState('');
   const [info, setInfo] = useState<string | null>(null);
@@ -198,7 +248,7 @@ function BotProxy() {
     void reload();
   });
   return (
-    <div className="stack" style={{ borderTop: '1px solid var(--line)', paddingTop: 14 }}>
+    <div className="stack" style={{ borderTop: '1px solid var(--line)', paddingTop: 16 }}>
       <div className="flex" style={{ justifyContent: 'space-between' }}>
         <span><b>Через прокси</b> <Info>Если с главного сервера Telegram недоступен (например, сервер в РФ), бот будет ходить через выбранную конфигурацию на одном из ваших серверов. Панель сама добавит в неё служебный клиент для бота.</Info></span>
         <Switch label="Бот через прокси" on={data.enabled} disabled={busy || (!data.enabled && !sel && !data.options.length)}
@@ -279,7 +329,7 @@ function BackupCard({ s }: { s: S }) {
 
 /** Перенос панели на другой сервер: та же версия, порт и путь, все данные; эта панель после переноса отходит. */
 function MoveCard({ onMoved }: { onMoved?: () => void }) {
-  const [f, setF] = useState({ host: '', sshPort: '22', user: 'root', password: '', privateKey: '', tls: 'ip' as 'ip' | 'domain', domain: '' });
+  const [f, setF] = useState({ host: '', sshPort: '22', user: 'root', password: '', privateKey: '', hostKeyFp: '', tls: 'ip' as 'ip' | 'domain', domain: '' });
   const [useKey, setUseKey] = useState(false);
   const [jobId, setJobId] = useState<number | null>(null);
   const [done, setDone] = useState(false);   // перенос закончился — журнал остаётся на экране
@@ -295,6 +345,7 @@ function MoveCard({ onMoved }: { onMoved?: () => void }) {
       host: f.host.trim(), sshPort: Number(f.sshPort) || 22, user: f.user.trim() || 'root', tls: f.tls,
       ...(f.tls === 'domain' ? { domain: f.domain.trim() } : {}),
       ...(useKey ? { privateKey: f.privateKey } : { password: f.password }),
+      ...(f.hostKeyFp.trim() ? { hostKeyFp: f.hostKeyFp.trim() } : {}),
     });
     setF({ ...f, password: '', privateKey: '' });
     setDone(false);
@@ -304,7 +355,7 @@ function MoveCard({ onMoved }: { onMoved?: () => void }) {
   return (
     <section className="card pad stack">
       <h2>Перенос панели на другой сервер <Info>Для переезда на другой хостинг. Панель сама заходит на новый сервер по SSH, ставит туда эту же версию Эскадры с тем же портом и путём в адресе и переносит все данные: серверы, пользователи, конфигурации, администраторы, настройки, бот. На узлах заранее разрешается новый адрес панели. Когда новая панель ответит, эта перестаёт управлять серверами (бот и фоновые задачи останавливаются) — вернуть управление можно кнопкой в баннере.</Info></h2>
-      <ul className="small muted" style={{ margin: 0, paddingLeft: 18 }}>
+      <ul className="small muted" style={{ margin: 0, paddingLeft: 20 }}>
         <li>Новый сервер — чистый, с доступом в интернет; порт 80 свободен (сертификат Let's Encrypt).</li>
         <li>Текущий сервер остаётся узлом флота: VPN на нём продолжает работать, панель на нём можно потом удалить (eskadra uninstall).</li>
         <li>Если адрес подписок — IP этого сервера, у пользователей сменятся ссылки подписок: пусть обновят подписку. С доменом для подписок ничего менять не нужно — только A-запись.</li>
@@ -318,6 +369,8 @@ function MoveCard({ onMoved }: { onMoved?: () => void }) {
       {useKey
         ? <label className="fld">Приватный ключ SSH<textarea className="inp mono" rows={4} value={f.privateKey} onChange={(e) => setF({ ...f, privateKey: e.target.value })} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" spellCheck={false} /></label>
         : <label className="fld" style={{ maxWidth: 360 }}>Пароль SSH<input className="inp" type="password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} autoComplete="off" /></label>}
+      <label className="fld">Отпечаток ключа SSH нового сервера<input className="inp mono" value={f.hostKeyFp} onChange={(e) => setF({ ...f, hostKeyFp: e.target.value })} placeholder="SHA256:…" spellCheck={false} autoComplete="off" />
+        <span className="k">Рекомендуется: с ним пароль и данные панели не уйдут подменённому серверу. На новом сервере: <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code></span></label>
       <div className="flex">
         <label className="fld"><span>Сертификат новой панели</span>
           <select className="inp" style={{ width: 'auto' }} value={f.tls} onChange={(e) => setF({ ...f, tls: e.target.value as 'ip' | 'domain' })}>

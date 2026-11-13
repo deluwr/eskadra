@@ -9,7 +9,7 @@ import { randomToken } from '../lib/crypto.js';
 import { audit } from '../lib/audit.js';
 import { effectiveLimits, json, period, Vpn } from '../vpn.js';
 import { pushAllowedIp, revokeAllowedIp } from '../access.js';
-import { checkUserQuota, roleOf, ScopeError, scopeUserBody, type RoleInfo } from '../roles.js';
+import { can, checkUserQuota, roleOf, ScopeError, scopeUserBody, userVisible, type RoleInfo } from '../roles.js';
 
 /** Онлайн — если подключения пользователя видели за последнюю минуту (опрос узлов раз в 30 с). */
 const ONLINE_MS = 75_000;
@@ -86,9 +86,13 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     return vpn.userTemplates().map((t) => ({ id: t.id, name: t.name, allowed: !allowed || allowed.includes(t.id),
       profiles: all.filter((p) => p.template.id === t.id).map((p) => ({ key: p.key, name: p.name, on: !off.includes(p.key) })) }));
   };
-  const getUser = (id: string) => {
+  type Req = { admin?: { id: number; role: string } };
+  const createdByOf = (u: UserRow) => (u as UserRow & { created_by?: number | null }).created_by ?? null;
+  const visibleTo = (req: Req, u: UserRow) => userVisible(roleOf(db, req.admin!.role), req.admin!.id, createdByOf(u));
+  // чужой пользователь для роли «только свои» — как несуществующий
+  const getUser = (id: string, req: Req) => {
     const u = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
-    if (!u) throw new HttpError(404, 'пользователь не найден');
+    if (!u || !visibleTo(req, u)) throw new HttpError(404, 'пользователь не найден');
     return u;
   };
 
@@ -98,7 +102,9 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     return { online: !!r.at && Date.now() - Date.parse(r.at) < ONLINE_MS && (r.n ?? 0) > 0, lastSeen: at };
   };
 
-  const view = (u: UserRow) => {
+  const view = (u: UserRow, req: Req) => {
+    // ссылки подписки и knock — это сам доступ к VPN: их видит только роль, которой можно менять пользователей
+    const secrets = can(roleOf(db, req.admin!.role), 'users.edit');
     const t = db.prepare('SELECT up, down FROM traffic WHERE user_id = ? AND period = ?').get(u.id, period()) as { up: number; down: number } | undefined;
     // за всё время: помесячные записи не удаляются — сумма с первого месяца, когда был трафик
     const total = db.prepare('SELECT COALESCE(SUM(up), 0) AS up, COALESCE(SUM(down), 0) AS down, MIN(period) AS since FROM traffic WHERE user_id = ?').get(u.id) as { up: number; down: number; since: string | null };
@@ -120,17 +126,17 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
       devices: db.prepare('SELECT ip, first_seen, last_seen, blocked FROM user_devices WHERE user_id = ? ORDER BY first_seen, ip').all(u.id),
       // онлайн: подключения видели на последнем опросе узлов (раз в 30 с, devices.ts); lastSeen — когда видели последний раз
       ...onlineOf(u.id),
-      subUrl: base ? `${base}/s/${u.sub_token}` : null,
-      knockUrl: base ? `${base}/k/${u.knock_token}` : null,
+      subUrl: base && secrets ? `${base}/s/${u.sub_token}` : null,
+      knockUrl: base && secrets ? `${base}/k/${u.knock_token}` : null,
       profiles: vpn.profiles(u).length,
     };
   };
 
   const roleOfReq = (req: { admin?: { role: string } }) => roleOf(db, req.admin!.role);
 
-  app.get('/api/v1/users', async () => vpn.users().map(view));
+  app.get('/api/v1/users', async (req) => vpn.users().filter((u) => visibleTo(req, u)).map((u) => view(u, req)));
 
-  app.get<{ Params: { id: string } }>('/api/v1/users/:id', async (req) => view(getUser(req.params.id)));
+  app.get<{ Params: { id: string } }>('/api/v1/users/:id', async (req) => view(getUser(req.params.id, req), req));
 
   app.post('/api/v1/users', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
     const b = userBody.parse(req.body);
@@ -138,20 +144,20 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
     const id = saveUser(ctx, null, b, roleOfReq(req), req.admin!.id);
     vpn.markDirty();
     audit(db, req.admin!.username, 'user.create', id, { name: b.name });
-    return view(getUser(id));
+    return view(getUser(id, req), req);
   });
 
   app.put<{ Params: { id: string } }>('/api/v1/users/:id', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
-    const u = getUser(req.params.id);
+    const u = getUser(req.params.id, req);
     const b = userBody.parse(req.body);
     saveUser(ctx, u.id, b, roleOfReq(req), req.admin!.id);
     vpn.markDirty();
     audit(db, req.admin!.username, 'user.update', u.id, b);
-    return view(getUser(u.id));
+    return view(getUser(u.id, req), req);
   });
 
   app.delete<{ Params: { id: string } }>('/api/v1/users/:id', { preHandler: guard(ctx, 'users.delete') }, async (req) => {
-    const u = getUser(req.params.id);
+    const u = getUser(req.params.id, req);
     db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
     vpn.markDirty();
     audit(db, req.admin!.username, 'user.delete', u.id, { name: u.name });
@@ -159,36 +165,36 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
   });
 
   /** Отдельные ссылки на каждый профиль (§12.4.1). */
-  app.get<{ Params: { id: string } }>('/api/v1/users/:id/links', async (req) => {
-    const u = getUser(req.params.id);
+  app.get<{ Params: { id: string } }>('/api/v1/users/:id/links', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
+    const u = getUser(req.params.id, req);
     return vpn.profiles(u).map((p) => ({ key: p.key, name: p.name, mode: p.mode, uri: vpn.link(u, p) }));
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/users/:id/rotate', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
-    const u = getUser(req.params.id);
+    const u = getUser(req.params.id, req);
     const { what } = z.object({ what: z.enum(['sub', 'links', 'knock']) }).parse(req.body);
     if (what === 'sub') db.prepare('UPDATE users SET sub_token = ? WHERE id = ?').run(randomToken(18), u.id);
     if (what === 'knock') db.prepare('UPDATE users SET knock_token = ? WHERE id = ?').run(randomToken(18), u.id);
     if (what === 'links') { vpn.rotateCreds(u.id); vpn.markDirty(); }
     audit(db, req.admin!.username, `user.rotate_${what}`, u.id);
-    return view(getUser(u.id));
+    return view(getUser(u.id, req), req);
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/users/:id/allowed-ips', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
-    const u = getUser(req.params.id);
+    const u = getUser(req.params.id, req);
     const b = z.object({ cidr: z.string(), ttlHours: z.number().min(1).max(720).default(12) }).parse(req.body);
     const ip = b.cidr.split('/')[0]!;
     if (!isIP(ip)) throw new HttpError(400, 'неверный адрес');
     await pushAllowedIp(ctx, u, b.cidr, 'admin', b.ttlHours * 3600);
     audit(db, req.admin!.username, 'user.allow_ip', u.id, b);
-    return view(getUser(u.id));
+    return view(getUser(u.id, req), req);
   });
 
   app.delete<{ Params: { id: string; ipId: string } }>('/api/v1/users/:id/allowed-ips/:ipId', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
-    const u = getUser(req.params.id);
+    const u = getUser(req.params.id, req);
     await revokeAllowedIp(ctx, u, Number(req.params.ipId));
     audit(db, req.admin!.username, 'user.revoke_ip', u.id, { id: req.params.ipId });
-    return view(getUser(u.id));
+    return view(getUser(u.id, req), req);
   });
 
   // группы лимитов

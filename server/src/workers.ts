@@ -12,6 +12,7 @@ import { certLabel, certProblems } from './certs.js';
 import { billingDue, billingText } from './billing.js';
 import { collectMetrics, METRICS_EVERY_MS } from './analytics.js';
 import { movedTo } from './migrate.js';
+import { refreshRuGeo, ruGeoPending, syncRuGeo } from './rugeo.js';
 
 const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60_000 : 0);
 
@@ -49,6 +50,11 @@ export class Workers {
     this.every('cores', 6 * 3600_000, () => this.coreCheck());
     this.every('certs', 3 * 3600_000, () => this.certCheck());
     this.every('billing', 3600_000, () => this.billingCheck());
+    // списки российских сайтов (runetfreedom): раз в неделю, только если «Российские сайты напрямую» включены на входе
+    this.every('rugeo', 3600_000, async () => {
+      try { const r = await refreshRuGeo(this.ctx); if (r.changed) this.log.info(`списки российских сайтов обновлены: ${r.geo?.file}`); }
+      catch (e) { this.log.warn(`списки российских сайтов: ${(e as Error).message}`); }
+    });
     // аналитика: короткий срез нагрузки с каждого сервера раз в 5 минут, хранится 48 часов
     this.every('metrics', METRICS_EVERY_MS, async () => { await collectMetrics(this.ctx); });
   }
@@ -305,6 +311,12 @@ export class Workers {
     for (const s of this.ctx.servers().filter((x) => x.config_dirty && x.sudo_mode === 'restricted')) {
       // конфиг узла не изменился (markDirty() отмечает все узлы, а выкат уже применил свои) — ядра не перезапускаем:
       // перезапуск рвёт соединения всех пользователей узла
+      // новые списки российских сайтов: сначала файл на узел — конфиг меняется, только когда файл там (иначе ядро не трогаем)
+      if (coreMode(s) !== 'xui' && ruGeoPending(this.ctx, s) && getSetting<string>(this.ctx.db, `applied.${s.id}`, '') === renderHash(this.ops.vpn, s)) {
+        try {
+          await this.ctx.onNode(s, async (n) => { await this.ops.ensureKit(s, n, (l) => this.log.info(`${s.name}: ${l}`)); await syncRuGeo(this.ctx, s, n, (l) => this.log.info(`${s.name}: ${l}`)); });
+        } catch (e) { this.log.warn(`${s.name}: списки российских сайтов — ${(e as Error).message}`); }
+      }
       if (coreMode(s) !== 'xui' && getSetting<string>(this.ctx.db, `applied.${s.id}`, '') === renderHash(this.ops.vpn, s)) {
         this.ctx.updateServer(s.id, { config_dirty: 0 });
         continue;

@@ -114,8 +114,10 @@ export class SshSession {
           stream.close();
           reject(new Error(`timeout after ${timeoutMs} ms`));
         }, timeoutMs);
-        stream.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
-        stream.stderr.on('data', (d: Buffer) => (stderr += d.toString('utf8')));
+        // узел могут взломать: бесконечный вывод не должен съесть память панели
+        const CAP = 64 * 1024 * 1024;
+        stream.on('data', (d: Buffer) => { if (stdout.length < CAP) stdout += d.toString('utf8'); });
+        stream.stderr.on('data', (d: Buffer) => { if (stderr.length < CAP) stderr += d.toString('utf8'); });
         stream.on('close', (code: number | null, signal?: string) => {
           clearTimeout(timer);
           resolve({ code, signal, stdout, stderr });

@@ -6,7 +6,7 @@ import { Ops, startJob } from '../ops.js';
 import { botProxyOptions, botProxySetting, saveBotProxy } from '../botproxy.js';
 import { panelReleases, versionInfo } from '../version.js';
 import { cmpVersion } from '../releases.js';
-import { Ctx, guard, HttpError } from '../ctx.js';
+import { Ctx, guard, HttpError, checkOtp, otpReply } from '../ctx.js';
 import { getSetting, setSetting } from '../db.js';
 import { hashPassword, sha256hex, verifyPassword } from '../lib/crypto.js';
 import { newTotpSecret, otpauthUri, verifyTotp } from '../lib/totp.js';
@@ -21,8 +21,10 @@ import { certCovers, listSnapshots, MIN_ROLLBACK_WITH_DATA, panelCertNames, requ
 import { armRestore, decryptBackup, stageRestore } from '../restorelib.js';
 import { config } from '../config.js';
 import { NOTIFY } from '../botadmin.js';
-import { listRoles, PERM_KEYS, PERMS, roleOf, type Perm } from '../roles.js';
+import { listRoles, PERM_KEYS, PERMS, roleOf, userVisible, type Perm } from '../roles.js';
 import { blocksOf } from '../blocks.js';
+import { ruDirectOf } from '../rudirect.js';
+import { refreshRuGeo, RU_GEO_SOURCE, ruGeoCheck, ruGeoOf, ruGeoOnNode } from '../rugeo.js';
 import type { SubService } from '../subsvc.js';
 import { movedTo, movePanel } from '../migrate.js';
 
@@ -205,7 +207,8 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   });
 
   app.post<{ Params: { id: string } }>('/api/v1/users/:id/tg-link', { preHandler: guard(ctx, 'users.edit') }, async (req) => {
-    if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(req.params.id)) throw new HttpError(404, 'нет такого пользователя');
+    const u = db.prepare('SELECT created_by FROM users WHERE id = ?').get(req.params.id) as { created_by: number | null } | undefined;
+    if (!u || !userVisible(roleOf(db, req.admin!.role), req.admin!.id, u.created_by)) throw new HttpError(404, 'нет такого пользователя');
     try { return await deps.bot.bindLink('user', req.params.id); } catch (e) { throw new HttpError(409, (e as Error).message); }
   });
 
@@ -230,7 +233,14 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     return { categories: NOTIFY, off };
   });
 
-  app.post('/api/v1/me/2fa/setup', async (req) => {
+  // 2FA уже включена — новый секрет только с действующим кодом: иначе украденная сессия сняла бы 2FA одним запросом
+  // и дальше выполняла бы команды root на серверах без второго фактора
+  app.post('/api/v1/me/2fa/setup', async (req, reply) => {
+    const cur = db.prepare('SELECT totp_enabled, totp_sealed FROM admins WHERE id = ?').get(req.admin!.id) as { totp_enabled: number; totp_sealed: string | null };
+    if (cur.totp_enabled && !req.admin!.console) {
+      const r = checkOtp(req.admin!.id, cur.totp_sealed ? ctx.open(cur.totp_sealed) : null, String(req.headers['x-fleet-otp'] ?? ''));
+      if (r !== 'ok') return otpReply(reply, r);
+    }
     const secret = newTotpSecret();
     db.prepare('UPDATE admins SET totp_sealed = ?, totp_enabled = 0 WHERE id = ?').run(ctx.seal(secret), req.admin!.id);
     return { secret, uri: otpauthUri(secret, req.admin!.username) };
@@ -250,6 +260,8 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     const row = db.prepare('SELECT pw_hash FROM admins WHERE id = ?').get(req.admin!.id) as { pw_hash: string };
     if (!verifyPassword(b.current, row.pw_hash)) throw new HttpError(400, 'текущий пароль неверен');
     db.prepare('UPDATE admins SET pw_hash = ? WHERE id = ?').run(hashPassword(b.next), req.admin!.id);
+    // пароль сменили (возможно, из-за утечки) — прочие сессии больше не действуют, текущая остаётся
+    db.prepare('DELETE FROM sessions WHERE admin_id = ? AND token_hash != ?').run(req.admin!.id, sha256hex(req.cookies[COOKIE] ?? ''));
     audit(db, who(req), 'admin.password_changed');
     return { ok: true };
   });
@@ -420,6 +432,39 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     return blocksOf(db);
   });
 
+  // ───── «Российские сайты напрямую» на входах (rudirect.ts) ─────
+  // варианты — серверы, которые служат входом хотя бы одной конфигурации, и уже выбранные (если сервер ещё есть)
+  const ruOptions = () => {
+    const chosen = new Set(ruDirectOf(db).entries);
+    const entries = new Set((db.prepare(`SELECT DISTINCT entry_id FROM templates WHERE entry_id IS NOT NULL`).all() as Array<{ entry_id: string }>).map((r) => r.entry_id));
+    return ctx.servers().filter((s) => entries.has(s.id) || chosen.has(s.id)).map((s) => ({ id: s.id, name: s.name, host: s.host, entry: entries.has(s.id), geoFile: ruGeoOnNode(ctx, s.id) }));
+  };
+  const ruView = () => { const ids = new Set(ctx.servers().map((s) => s.id)); return { entries: ruDirectOf(db).entries.filter((id) => ids.has(id)), options: ruOptions(), geo: ruGeoOf(ctx), check: ruGeoCheck(ctx), source: RU_GEO_SOURCE }; };
+  app.get('/api/v1/settings/ru-direct', async () => ruView());
+
+  app.put('/api/v1/settings/ru-direct', { preHandler: guard(ctx, 'settings.edit') }, async (req) => {
+    const b = z.object({ entries: z.array(z.string().max(64)).max(500) }).parse(req.body);
+    const ids = new Set(ctx.servers().map((s) => s.id));
+    const entries = [...new Set(b.entries)].filter((id) => ids.has(id));
+    const prev = new Set(ruDirectOf(db).entries);
+    setSetting(db, 'ruDirect', { entries });
+    // меняются конфиги только выбранных и снятых входов — синхронизация переприменит их сама, остальные не трогаются
+    const changed = [...entries.filter((id) => !prev.has(id)), ...[...prev].filter((id) => !entries.includes(id) && ids.has(id))];
+    if (changed.length) new Vpn(ctx).markDirty(changed);
+    audit(db, who(req), 'settings.ru_direct', undefined, { entries });
+    // первое включение — списки runetfreedom скачиваются сразу, не дожидаясь фоновой проверки
+    if (entries.length && !ruGeoOf(ctx)) void refreshRuGeo(ctx, { force: true }).catch(() => undefined);
+    return ruView();
+  });
+
+  app.post('/api/v1/settings/ru-direct/refresh', { preHandler: guard(ctx, 'settings.edit') }, async (req) => {
+    try {
+      const r = await refreshRuGeo(ctx, { force: true });
+      audit(db, who(req), 'settings.ru_direct_refresh', undefined, { file: r.geo?.file, changed: r.changed });
+    } catch (e) { throw new HttpError(502, `списки не обновлены: ${(e as Error).message}`); }
+    return ruView();
+  });
+
   // ───── прокси бота: если api.telegram.org с главного сервера недоступен ─────
   app.get('/api/v1/settings/bot-proxy', async () => ({ ...botProxySetting(ctx), options: botProxyOptions(ctx) }));
 
@@ -479,6 +524,7 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
       user: z.string().trim().min(1).max(32).regex(/^[a-z_][a-z0-9_.-]*$/, 'имя пользователя SSH').default('root'),
       password: z.string().max(512).optional(),
       privateKey: z.string().max(16384).optional(),
+      hostKeyFp: z.string().trim().regex(/^(SHA256:)?[A-Za-z0-9+/]{43}=?$/, 'отпечаток ключа: SHA256:… из ssh-keygen -lf').optional().or(z.literal('').transform(() => undefined)),
       tls: z.enum(['ip', 'domain']).default('ip'),
       domain: z.string().trim().max(253).regex(/^[A-Za-z0-9.-]*$/).optional(),
     }).parse(req.body);

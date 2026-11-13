@@ -87,7 +87,7 @@ function SubCertIssue({ onDone }: { onDone: () => void }) {
   const [told, setTold] = useState(false);
   useEffect(() => { if (done && !told) { setTold(true); onDone(); } }, [done, told, onDone]);
   return (
-    <div className="stack" style={{ gap: 6 }}>
+    <div className="stack" style={{ gap: 8 }}>
       <span className="k">{!data ? 'Панель перезапускается…' : data.running ? 'Выпускаю сертификат…' : data.exit === 0 ? 'Сертификат выпущен, панель перезапущена.' : data.exit !== null ? 'Выпуск не удался — причина в журнале.' : 'Жду помощника…'}</span>
       {!!data?.log.length && <pre className="code">{data.log.join('\n')}</pre>}
     </div>
@@ -241,7 +241,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
         <div className="ucol">
           <section className="ublock stack">
             <h3>Что попадёт в подписку</h3>
-            <div className="flex" style={{ gap: 18 }}>
+            <div className="flex" style={{ gap: 20 }}>
               <label className="cb"><input type="checkbox" checked={f.modes.includes('via')} disabled={!inScope('modes', 'via')} onChange={() => toggleMode('via')} />Через Relay (вход)</label>
               <label className="cb"><input type="checkbox" checked={f.modes.includes('direct')} disabled={!inScope('modes', 'direct')} onChange={() => toggleMode('direct')} />Напрямую к серверу</label>
               {(!inScope('modes', 'via') || !inScope('modes', 'direct')) && <span className="k">режим вне вашей роли не меняется</span>}
@@ -303,7 +303,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
                   <>
                     {user.profiles === 0 && <div className="alert warn">В подписке нет ни одного профиля — клиент (v2rayN и др.) ничего не добавит. Выкатите конфигурацию на серверы, доступные пользователю, и проверьте режимы подключения выше.</div>}
                     <div className="flex"><input className="inp mono" style={{ flex: 1 }} value={user.subUrl} readOnly aria-label="Ссылка подписки" /><CopyButton text={user.subUrl} /><QrButton text={user.subUrl} title={`Подписка · ${user.name}`} /></div>
-                    <div className="flex" style={{ gap: 6 }}>
+                    <div className="flex" style={{ gap: 8 }}>
                       <span className="k">Открыть в приложении <Info>Кнопки работают на устройстве, где установлено приложение. В v2rayN (Windows) — «Подписки → Добавить», вставьте ссылку; или отсканируйте QR с экрана.</Info></span>
                       {importLinks(user.subUrl, user.name).map(([n, href]) => <a key={n} className="btn ghost sm" href={href}>{n}</a>)}
                     </div>
@@ -317,7 +317,7 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
                   {links?.map((l) => (
                     <div key={l.key} className="flex" style={{ justifyContent: 'space-between', borderTop: '1px solid var(--line)', paddingTop: 8 }}>
                       <span className="row-text" style={{ minWidth: 0, flex: 1 }}><b className="small">{l.name}</b><span className="k mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{l.uri}</span></span>
-                      <span className="flex" style={{ gap: 6 }}><QrButton text={l.uri} title={l.name} /><CopyButton text={l.uri} /></span>
+                      <span className="flex" style={{ gap: 8 }}><QrButton text={l.uri} title={l.name} /><CopyButton text={l.uri} /></span>
                     </div>
                   ))}
                   {links && !links.length && <span className="k">Нет активных профилей: выкатите конфигурацию на доступные узлы.</span>}
