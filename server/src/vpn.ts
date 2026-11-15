@@ -250,7 +250,10 @@ export class Vpn {
     const blocks = blocksOf(this.db);
     // «Российские сайты напрямую» на этом входе: теги inbound'ов, чей трафик идёт на выходы (relay и SOCKS Hysteria2)
     const ru = ruDirectOn(this.db, server.id);
-    const ruTags: string[] = [];
+    // тег целиком или тег + пользователи (когда на inbound'е есть те, кто игнорирует глобальные правила)
+    const ruTags: Array<string | { tag: string; users: string[] }> = [];
+    // пользователь с «игнорировать глобальные правила маршрутизации» — RU-правила входа к нему не применяются
+    const obeys = (u: UserRow) => !u.ignore_global_routes;
     const inbounds: object[] = [
       { tag: 'api', listen: '127.0.0.1', port: 10085, protocol: 'dokodemo-door', settings: { address: '127.0.0.1' } },
     ];
@@ -277,16 +280,26 @@ export class Vpn {
       // пользователей различает sing-box, плечи к выходам — Hysteria2 через sing-box входа (entryLegs)
       // то же у eskadra со входом по Hysteria2
       const hy = ib.kind === 'relay' && (sp.protocol === 'hysteria2' || hy2Entry(sp));
-      const hin = (route: string) => {
-        const tag = `hin-${ib.id}-${route}`;
-        if (ru) ruTags.push(tag);
-        inbounds.push({ tag, listen: '127.0.0.1', port: hinPort(ib.id, route), protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' },
+      // global = false — отдельный SOCKS для тех, кто игнорирует глобальные правила (sing-box их различает, Xray — нет)
+      const hin = (route: string, global = true) => {
+        const r = global ? route : `${route}-g`;
+        const tag = `hin-${ib.id}-${r}`;
+        if (ru && global) ruTags.push(tag);
+        inbounds.push({ tag, listen: '127.0.0.1', port: hinPort(ib.id, r), protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' },
           ...(needsSniff(blocks) || ru ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {}) });
         return tag;
       };
       let clients = ib.kind === 'direct' ? this.directClients(server, t, users) : [];
       if (ib.kind === 'relay') {
-        if (ru && !hy) ruTags.push(`in-${ib.id}`);
+        // email пользователей этого inbound'а, к которым RU-правила применяются, и есть ли те, к кому нет
+        const ruEmails: string[] = [];
+        let ruSkip = false;
+        const track = (u: UserRow, email: string) => { if (obeys(u)) ruEmails.push(email); else ruSkip = true; };
+        // Hysteria2: пользователи с флажком — в свой SOCKS, только когда RU-правила здесь включены (иначе конфиг как раньше)
+        const hinTags = (route: string, us: UserRow[]) => {
+          const own = ru ? us.filter((u) => !obeys(u)) : [];
+          return [...(own.length < us.length ? [hin(route)] : []), ...(own.length ? [hin(route, false)] : [])];
+        };
         const targets = this.relayTargets(t);
         // выходы, для которых собран outbound: на них ссылаются балансировщики
         const pairs = targets.flatMap((x) => {
@@ -319,8 +332,9 @@ export class Vpn {
             rules.push({ type: 'field', inboundTag: [`probe-${t.id}-${x.id}`], outboundTag: outTag });
           }
           const us = via.perExit.get(x.id)!;
-          if (hy) { if (us.length) rules.push({ type: 'field', inboundTag: [hin(x.id)], outboundTag: outTag }); continue; }
+          if (hy) { if (us.length) rules.push({ type: 'field', inboundTag: hinTags(x.id, us), outboundTag: outTag }); continue; }
           const emails = us.map((u) => `${u.id}.v-${x.id}`);
+          us.forEach((u, k) => track(u, emails[k]!));
           us.forEach((u, k) => clients.push(xrayClient(isp, this.cred(u.id, `v:${t.id}:${x.id}`), emails[k]!)));
           if (emails.length) rules.push({ type: 'field', inboundTag: [`in-${ib.id}`], user: emails, outboundTag: outTag });
         }
@@ -331,7 +345,8 @@ export class Vpn {
           const autoUsers = via.auto.map((u) => u.id);
           const autoEmails = hy ? [] : autoUsers.map((id) => `${id}.a-${t.id}`);
           via.auto.forEach((u, k) => { if (!hy) clients.push(xrayClient(isp, this.cred(u.id, `v:${t.id}:auto`), autoEmails[k]!)); });
-          const autoMatch = hy ? (autoUsers.length ? { inboundTag: [hin('auto')] } : null) : autoEmails.length ? { inboundTag: [`in-${ib.id}`], user: autoEmails } : null;
+          if (!hy) via.auto.forEach((u, k) => track(u, autoEmails[k]!));
+          const autoMatch = hy ? (autoUsers.length ? { inboundTag: hinTags('auto', via.auto) } : null) : autoEmails.length ? { inboundTag: [`in-${ib.id}`], user: autoEmails } : null;
           if (sp.autoMode === 'spread') {
             // по нагрузке (spread.ts): у каждой группы пользователей своя цепочка уровней — домашний выход, затем остальные.
             // Уровни всех групп ведут на общие outbound'ы выходов (to-…): вход проверяет каждый выход один раз, а не
@@ -390,6 +405,8 @@ export class Vpn {
           }
           if (autoMatch && sp.autoMode !== 'spread') rules.push({ type: 'field', ...autoMatch, balancerTag: `bal-${t.id}` });
         }
+        // RU-правила на inbound входа: целиком, а если есть игнорирующие глобальные правила — только для остальных
+        if (ru && !hy) { if (!ruSkip) ruTags.push(`in-${ib.id}`); else if (ruEmails.length) ruTags.push({ tag: `in-${ib.id}`, users: ruEmails }); }
         // Hysteria2: inbound'а в Xray нет — его держит sing-box входа
         if (hy) continue;
         // всё прочее с входа, не попавшее в правила, не выпускаем наружу с самого входа
@@ -521,13 +538,19 @@ export class Vpn {
         const via = this.viaUsers(t, ready, users);
         const routes: Array<[string, UserRow[], string]> = [...ready.map((x) => [x.id, via.perExit.get(x.id)!, `v-${x.id}`] as [string, UserRow[], string]), ['auto', via.auto, `a-${t.id}`]];
         list = [];
-        for (const [route, us, suffix] of routes) {
-          if (!us.length) continue;
-          const names = us.map((u) => `${u.id}.${suffix}`);
-          us.forEach((u, k) => list.push({ name: names[k]!, password: this.cred(u.id, `v:${t.id}:${route}`) }));
-          const tag = `hin-${ib.id}-${route}`;
-          outbounds.push({ type: 'socks', tag, server: '127.0.0.1', server_port: hinPort(ib.id, route), version: '5' });
-          relayRules.push({ inbound: [`in-${ib.id}`], auth_user: names, outbound: tag });
+        // с «игнорировать глобальные правила» и включёнными RU-правилами на этом входе — в отдельный SOCKS Xray (…-g)
+        const ru = ruDirectOn(this.db, server.id);
+        for (const [route, all, suffix] of routes) {
+          if (!all.length) continue;
+          const groups: Array<[string, UserRow[]]> = ru ? [[route, all.filter((u) => !u.ignore_global_routes)], [`${route}-g`, all.filter((u) => !!u.ignore_global_routes)]] : [[route, all]];
+          for (const [r, us] of groups) {
+            if (!us.length) continue;
+            const names = us.map((u) => `${u.id}.${suffix}`);
+            us.forEach((u, k) => list.push({ name: names[k]!, password: this.cred(u.id, `v:${t.id}:${route}`) }));
+            const tag = `hin-${ib.id}-${r}`;
+            outbounds.push({ type: 'socks', tag, server: '127.0.0.1', server_port: hinPort(ib.id, r), version: '5' });
+            relayRules.push({ inbound: [`in-${ib.id}`], auth_user: names, outbound: tag });
+          }
         }
         relayRules.push({ inbound: [`in-${ib.id}`], action: 'reject' });
         list.push({ name: 'svc.panel', password: this.svcCred(`hy:${t.id}:${server.id}`) });

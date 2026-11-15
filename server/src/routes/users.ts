@@ -32,6 +32,8 @@ export const userBody = z.object({
   note: z.string().trim().max(500).optional(),
   /** Выключенные варианты подключения (ключи профилей). Не передано — прежние не меняются. */
   excludedProfiles: z.array(z.string().regex(/^[dv]:[\w-]+:[\w-]+$/).max(160)).max(500).optional(),
+  /** Игнорировать глобальные правила маршрутизации («Российские сайты напрямую»). Не передано — прежнее значение. */
+  ignoreGlobalRoutes: z.boolean().optional(),
 });
 
 export function subBase(ctx: Ctx): string | null {
@@ -64,13 +66,14 @@ export function saveUser(ctx: Ctx, id: string | null, input: z.infer<typeof user
   if (id) {
     if (b.note !== undefined) db.prepare('UPDATE users SET note = ? WHERE id = ?').run(b.note || null, id);
     if (b.excludedProfiles !== undefined) db.prepare('UPDATE users SET excluded_profiles = ? WHERE id = ?').run(b.excludedProfiles.length ? JSON.stringify(b.excludedProfiles) : null, id);
+    if (b.ignoreGlobalRoutes !== undefined) db.prepare('UPDATE users SET ignore_global_routes = ? WHERE id = ?').run(b.ignoreGlobalRoutes ? 1 : 0, id);
     db.prepare(`UPDATE users SET name=?, tg_id=?, limit_group=?, traffic_limit_gb=?, expire_at=?, device_limit=?, over_action=?, modes=?, node_ids=?, template_ids=?, wl_mode=?, status=?,
       disabled_reason = CASE WHEN ? = 'active' THEN NULL ELSE disabled_reason END WHERE id=?`).run(...vals, b.status, id);
     return id;
   }
   const nid = 'u-' + randomBytes(4).toString('hex');
-  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token, note, excluded_profiles, created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18), b.note || null, b.excludedProfiles?.length ? JSON.stringify(b.excludedProfiles) : null, adminId);
+  db.prepare(`INSERT INTO users (name, tg_id, limit_group, traffic_limit_gb, expire_at, device_limit, over_action, modes, node_ids, template_ids, wl_mode, status, id, sub_token, knock_token, note, excluded_profiles, created_by, ignore_global_routes)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(...vals, nid, randomToken(18), randomToken(18), b.note || null, b.excludedProfiles?.length ? JSON.stringify(b.excludedProfiles) : null, adminId, b.ignoreGlobalRoutes ? 1 : 0);
   return nid;
 }
 
@@ -118,6 +121,7 @@ export async function userRoutes(app: FastifyInstance, ctx: Ctx) {
       over_action: u.over_action, modes: json<string[]>(u.modes, []), node_ids: json<string[] | null>(u.node_ids, null), template_ids: json<string[] | null>(u.template_ids, null), wl_mode: u.wl_mode,
       configs: configsOf(u),
       excluded_profiles: json<string[]>(u.excluded_profiles, []),
+      ignore_global_routes: !!u.ignore_global_routes,
       effective: lim,
       traffic: { up: t?.up ?? 0, down: t?.down ?? 0, period: period() },
       trafficTotal: { up: total.up, down: total.down, since: total.since },

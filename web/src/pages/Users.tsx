@@ -5,13 +5,13 @@ import { CopyButton, ErrorBox, Modal, Seg, Tag, TgBind, toast, useAsync, usePoll
 interface Form {
   name: string; note: string; tgId: string; limitGroup: string; trafficLimitGb: string; expireAt: string; deviceLimit: string;
   overAction: string; modes: string[]; nodeIds: string[] | null; templateIds: string[] | null; wlMode: 'exact' | 'prefix' | 'asn'; status: 'active' | 'disabled';
-  excludedProfiles: string[];
+  excludedProfiles: string[]; ignoreGlobalRoutes: boolean;
 }
-const emptyForm: Form = { name: '', note: '', tgId: '', limitGroup: 'default', trafficLimitGb: '', expireAt: '', deviceLimit: '', overAction: 'disable', modes: ['direct', 'via'], nodeIds: null, templateIds: null, wlMode: 'exact', status: 'active', excludedProfiles: [] };
+const emptyForm: Form = { name: '', note: '', tgId: '', limitGroup: 'default', trafficLimitGb: '', expireAt: '', deviceLimit: '', overAction: 'disable', modes: ['direct', 'via'], nodeIds: null, templateIds: null, wlMode: 'exact', status: 'active', excludedProfiles: [], ignoreGlobalRoutes: false };
 const toForm = (u: User): Form => ({
   name: u.name, note: u.note, tgId: u.tg_id ?? '', limitGroup: u.limit_group, trafficLimitGb: u.traffic_limit_gb?.toString() ?? '', expireAt: u.expire_at?.slice(0, 10) ?? '',
   deviceLimit: u.device_limit?.toString() ?? '', overAction: u.over_action, modes: u.modes, nodeIds: u.node_ids, templateIds: u.template_ids, wlMode: u.wl_mode, status: u.status,
-  excludedProfiles: [...u.excluded_profiles].sort(),
+  excludedProfiles: [...u.excluded_profiles].sort(), ignoreGlobalRoutes: !!u.ignore_global_routes,
 });
 const num = (s: string) => (s.trim() === '' ? null : Number(s));
 
@@ -146,7 +146,7 @@ function importLinks(url: string, name: string): Array<[string, string]> {
 }
 
 const bodyOf = (f: Form) => ({ name: f.name, note: f.note, tgId: f.tgId || null, limitGroup: f.limitGroup, trafficLimitGb: num(f.trafficLimitGb), expireAt: f.expireAt ? new Date(f.expireAt + 'T23:59:59Z').toISOString() : null,
-  deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, templateIds: f.templateIds, wlMode: f.wlMode, status: f.status, excludedProfiles: f.excludedProfiles });
+  deviceLimit: num(f.deviceLimit), overAction: f.overAction, modes: f.modes, nodeIds: f.nodeIds, templateIds: f.templateIds, wlMode: f.wlMode, status: f.status, excludedProfiles: f.excludedProfiles, ignoreGlobalRoutes: f.ignoreGlobalRoutes });
 
 function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: User | null; servers: Server[]; onSaved: (u: User) => void; onDeleted: () => void; onClose: () => void; wlOn: boolean }) {
   const [f, setF] = useState<Form>(user ? toForm(user) : emptyForm);
@@ -222,6 +222,8 @@ function UserCard({ user, servers, onSaved, onDeleted, onClose, wlOn }: { user: 
               <label className="fld">Статус<select className="inp" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value as Form['status'] })}><option value="active">активен</option><option value="disabled">отключён</option></select></label>
             </div>
             <span className="k">Пустое поле — значение из группы. Трафик считается по Xray. Устройство — адрес, с которого пользователь сейчас подключён; лишние блокируются только для этого пользователя.</span>
+            <label className="cb"><input type="checkbox" checked={f.ignoreGlobalRoutes} onChange={(e) => setF({ ...f, ignoreGlobalRoutes: e.target.checked })} />Игнорировать глобальные правила маршрутизации
+              <Info>Правила из «Настроек» — «Российские сайты напрямую» — к этому пользователю не применяются: весь его трафик через вход уходит на выход, как без них.</Info></label>
           </section>
           {user && <Devices user={user} />}
           {wlOn && <section className="ublock stack">

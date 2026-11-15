@@ -340,6 +340,10 @@ const MIGRATIONS: string[] = [
   -- канал управления «через сервер» (mgmt_mode = 'jump'): SSH панели через узел-посредник mgmt_jump (servers.id)
   ALTER TABLE servers ADD COLUMN mgmt_jump TEXT;
   `,
+  `
+  -- пользователь не подчиняется глобальным правилам маршрутизации («Российские сайты напрямую»): весь его трафик — на выход
+  ALTER TABLE users ADD COLUMN ignore_global_routes INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export type Db = DatabaseSync;

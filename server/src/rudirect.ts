@@ -30,11 +30,21 @@ export const ruDirectOf = (db: Db): RuDirect => ({ ...DEFAULT_RU_DIRECT, ...getS
 /** Включено ли на этом сервере. */
 export const ruDirectOn = (db: Db, serverId: string) => ruDirectOf(db).entries.includes(serverId);
 
-/** Правила Xray: после служебных и лимита устройств, раньше маршрутов «пользователь → выход». */
-export function xrayRuDirectRules(inboundTags: string[], ext: { file: string; ipFile: string } | null = null): object[] {
-  if (!inboundTags.length) return [];
+/**
+ * Правила Xray: после служебных и лимита устройств, раньше маршрутов «пользователь → выход». Элемент — тег inbound'а
+ * целиком или тег с пользователями (email): на таком inbound'е есть те, кто игнорирует глобальные правила, — правило
+ * только для остальных. Без таких пользователей правила те же, что раньше (одна пара на все теги).
+ */
+export function xrayRuDirectRules(inbounds: Array<string | { tag: string; users: string[] }>, ext: { file: string; ipFile: string } | null = null): object[] {
+  const domain = [...RU_DOMAINS, ...(ext ? ruExtDomains(ext.file) : [])];
+  const ip = [...RU_IPS, ...(ext ? ruExtIps(ext.ipFile) : [])];
+  const pair = (m: Record<string, unknown>) => [
+    { type: 'field', ...m, domain, outboundTag: 'direct' },
+    { type: 'field', ...m, ip, outboundTag: 'direct' },
+  ];
+  const whole = inbounds.filter((x): x is string => typeof x === 'string');
   return [
-    { type: 'field', inboundTag: inboundTags, domain: [...RU_DOMAINS, ...(ext ? ruExtDomains(ext.file) : [])], outboundTag: 'direct' },
-    { type: 'field', inboundTag: inboundTags, ip: [...RU_IPS, ...(ext ? ruExtIps(ext.ipFile) : [])], outboundTag: 'direct' },
+    ...(whole.length ? pair({ inboundTag: whole }) : []),
+    ...inbounds.filter((x): x is { tag: string; users: string[] } => typeof x !== 'string').flatMap((x) => pair({ inboundTag: [x.tag], user: x.users })),
   ];
 }

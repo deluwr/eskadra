@@ -1954,4 +1954,6 @@ export const EN: Record<string, string> = {
   "Российские сайты напрямую на {}": "Russian sites directly on {}",
   "Списки обновлены — входы получат их в течение минуты": "Lists refreshed — entries will get them within a minute",
   "— ещё не скачаны": "— not downloaded yet",
+  "Игнорировать глобальные правила маршрутизации": "Ignore global routing rules",
+  "Правила из «Настроек» — «Российские сайты напрямую» — к этому пользователю не применяются: весь его трафик через вход уходит на выход, как без них.": "Rules from Settings — “Russian sites directly” — don't apply to this user: all their traffic through the entry goes to the exit, as if the rules were off.",
 };

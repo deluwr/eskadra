@@ -95,6 +95,8 @@ export interface UserRow {
   note: string | null;
   /** выключенные варианты подключения (ключи профилей d:/v:…); новые варианты включены сами */
   excluded_profiles: string | null;
+  /** 1 — глобальные правила маршрутизации (rudirect.ts) к пользователю не применяются */
+  ignore_global_routes: number;
 }
 
 export class HttpError extends Error {

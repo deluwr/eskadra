@@ -111,6 +111,8 @@ export interface User {
   modes: string[]; node_ids: string[] | null; template_ids: string[] | null; wl_mode: 'exact' | 'prefix' | 'asn';
   configs: Array<{ id: string; name: string; allowed: boolean; profiles: Array<{ key: string; name: string; on: boolean }> }>;
   excluded_profiles: string[];
+  /** глобальные правила маршрутизации («Российские сайты напрямую») к пользователю не применяются */
+  ignore_global_routes: boolean;
   effective: { trafficGb: number | null; devices: number | null; expireAt: string | null };
   traffic: { up: number; down: number; period: string };
   /** трафик за всё время; since — первый месяц с трафиком (ГГГГ-ММ) */
