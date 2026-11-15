@@ -280,13 +280,15 @@ export class Vpn {
       // пользователей различает sing-box, плечи к выходам — Hysteria2 через sing-box входа (entryLegs)
       // то же у eskadra со входом по Hysteria2
       const hy = ib.kind === 'relay' && (sp.protocol === 'hysteria2' || hy2Entry(sp));
+      // RU-правила на входе этой конфигурации: включены на сервере и конфигурация их не игнорирует
+      const ruT = ru && !sp.ignoreGlobalRoutes;
       // global = false — отдельный SOCKS для тех, кто игнорирует глобальные правила (sing-box их различает, Xray — нет)
       const hin = (route: string, global = true) => {
         const r = global ? route : `${route}-g`;
         const tag = `hin-${ib.id}-${r}`;
-        if (ru && global) ruTags.push(tag);
+        if (ruT && global) ruTags.push(tag);
         inbounds.push({ tag, listen: '127.0.0.1', port: hinPort(ib.id, r), protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' },
-          ...(needsSniff(blocks) || ru ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {}) });
+          ...(needsSniff(blocks) || ruT ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {}) });
         return tag;
       };
       let clients = ib.kind === 'direct' ? this.directClients(server, t, users) : [];
@@ -297,7 +299,7 @@ export class Vpn {
         const track = (u: UserRow, email: string) => { if (obeys(u)) ruEmails.push(email); else ruSkip = true; };
         // Hysteria2: пользователи с флажком — в свой SOCKS, только когда RU-правила здесь включены (иначе конфиг как раньше)
         const hinTags = (route: string, us: UserRow[]) => {
-          const own = ru ? us.filter((u) => !obeys(u)) : [];
+          const own = ruT ? us.filter((u) => !obeys(u)) : [];
           return [...(own.length < us.length ? [hin(route)] : []), ...(own.length ? [hin(route, false)] : [])];
         };
         const targets = this.relayTargets(t);
@@ -406,7 +408,7 @@ export class Vpn {
           if (autoMatch && sp.autoMode !== 'spread') rules.push({ type: 'field', ...autoMatch, balancerTag: `bal-${t.id}` });
         }
         // RU-правила на inbound входа: целиком, а если есть игнорирующие глобальные правила — только для остальных
-        if (ru && !hy) { if (!ruSkip) ruTags.push(`in-${ib.id}`); else if (ruEmails.length) ruTags.push({ tag: `in-${ib.id}`, users: ruEmails }); }
+        if (ruT && !hy) { if (!ruSkip) ruTags.push(`in-${ib.id}`); else if (ruEmails.length) ruTags.push({ tag: `in-${ib.id}`, users: ruEmails }); }
         // Hysteria2: inbound'а в Xray нет — его держит sing-box входа
         if (hy) continue;
         // всё прочее с входа, не попавшее в правила, не выпускаем наружу с самого входа
@@ -416,7 +418,7 @@ export class Vpn {
         privateKey: ib.private_key_sealed ? this.ctx.open(ib.private_key_sealed) : undefined,
         cert: certName(isp, t.id, server.id, server.host),
         ssServerKey: ib.public_key ?? undefined,
-        forceSniff: needsSniff(blocks) || (ru && ib.kind === 'relay'),
+        forceSniff: needsSniff(blocks) || (ruT && ib.kind === 'relay'),
       }));
     }
     return {
@@ -539,7 +541,7 @@ export class Vpn {
         const routes: Array<[string, UserRow[], string]> = [...ready.map((x) => [x.id, via.perExit.get(x.id)!, `v-${x.id}`] as [string, UserRow[], string]), ['auto', via.auto, `a-${t.id}`]];
         list = [];
         // с «игнорировать глобальные правила» и включёнными RU-правилами на этом входе — в отдельный SOCKS Xray (…-g)
-        const ru = ruDirectOn(this.db, server.id);
+        const ru = ruDirectOn(this.db, server.id) && !sp.ignoreGlobalRoutes;
         for (const [route, all, suffix] of routes) {
           if (!all.length) continue;
           const groups: Array<[string, UserRow[]]> = ru ? [[route, all.filter((u) => !u.ignore_global_routes)], [`${route}-g`, all.filter((u) => !!u.ignore_global_routes)]] : [[route, all]];

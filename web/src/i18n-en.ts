@@ -1956,4 +1956,8 @@ export const EN: Record<string, string> = {
   "— ещё не скачаны": "— not downloaded yet",
   "Игнорировать глобальные правила маршрутизации": "Ignore global routing rules",
   "Правила из «Настроек» — «Российские сайты напрямую» — к этому пользователю не применяются: весь его трафик через вход уходит на выход, как без них.": "Rules from Settings — “Russian sites directly” — don't apply to this user: all their traffic through the entry goes to the exit, as if the rules were off.",
+  "маршрутизация": "routing",
+  "глобальные правила игнорируются": "global rules are ignored",
+  "глобальные правила действуют": "global rules apply",
+  "«Российские сайты напрямую» из «Настроек» не применяются ко входу этой конфигурации: весь трафик её пользователей уходит на выход. Применится при выкате.": "“Russian sites directly” from Settings don't apply to this configuration's entry: all its users' traffic goes to the exit. Takes effect on rollout.",
 };

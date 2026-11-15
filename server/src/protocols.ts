@@ -197,6 +197,8 @@ export interface Spec {
   spreadHighPct: number;
   /** «по нагрузке»: справедливое деление канала на выходах — cake на 95% ёмкости + BBR (nodekit net-fair) */
   spreadFair: boolean;
+  /** Глобальные правила маршрутизации («Российские сайты напрямую», rudirect.ts) ко входу этой конфигурации не применяются */
+  ignoreGlobalRoutes: boolean;
 }
 
 /** Настройки шаблона с умолчаниями; старый протокол «vless-reality» = VLESS + REALITY + Vision. */
@@ -266,6 +268,7 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     exitCapMbps: raw.exitCapMbps ?? {},
     spreadHighPct: raw.spreadHighPct ?? 80,
     spreadFair: raw.spreadFair ?? false,
+    ignoreGlobalRoutes: raw.ignoreGlobalRoutes ?? false,
   };
 }
 

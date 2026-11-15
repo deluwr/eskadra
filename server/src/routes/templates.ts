@@ -50,6 +50,7 @@ const settingsBody = z.object({
   exitCapMbps: z.record(z.string().max(64), z.number().min(0).max(100000)).optional(),
   spreadHighPct: z.number().int().min(30).max(95).optional(),
   spreadFair: z.boolean().optional(),
+  ignoreGlobalRoutes: z.boolean().optional(),
   hy2Relay: z.enum(['nat', 'core']).optional(),
   hy2Leg: z.string().max(64).optional(),
   bundle: z.boolean().optional(),

@@ -124,3 +124,31 @@ test('игнорировать глобальные правила: VLESS — RU
   f.saveUser(f.ctx, f.a, f.userBody.parse({ name: 'a', modes: ['via'] }));
   assert.equal((f.db.prepare('SELECT ignore_global_routes AS g FROM users WHERE id = ?').get(f.a) as { g: number }).g, 1);
 });
+
+test('конфигурация «игнорировать глобальные правила»: её вход без RU-правил, другая конфигурация того же входа — с ними', async () => {
+  const f = await entryFixture();
+  setSetting(f.db, 'ruDirect', { entries: ['ru'] });
+  const setIgnore = (id: string, on: boolean) => {
+    const s = JSON.parse((f.db.prepare('SELECT settings FROM templates WHERE id = ?').get(id) as { settings: string }).settings);
+    f.db.prepare('UPDATE templates SET settings = ? WHERE id = ?').run(JSON.stringify({ ...s, ignoreGlobalRoutes: on }), id);
+  };
+  // VLESS-конфигурация игнорирует — правила только на Hysteria2 через тот же вход
+  setIgnore('v', true);
+  let x = f.vpn.renderXray(f.ctx.server('ru')) as any;
+  let ru = ruRules(x);
+  assert.equal(ru.length, 2);
+  assert.deepEqual(ru[0].inboundTag, ['hin-h-ru-pl']);
+  // Hysteria2 тоже игнорирует — RU-правил на входе нет; sing-box без отдельных SOCKS даже при флажке пользователя
+  setIgnore('h', true);
+  f.db.prepare('UPDATE users SET ignore_global_routes = 1 WHERE id = ?').run(f.a);
+  x = f.vpn.renderXray(f.ctx.server('ru')) as any;
+  assert.equal(ruRules(x).length, 0);
+  assert.ok(!x.inbounds.some((i: any) => String(i.tag).endsWith('-g')));
+  const sb = f.vpn.renderSingbox(f.ctx.server('ru')) as any;
+  assert.ok(!(sb.route.rules as any[]).some((r) => String(r.outbound).endsWith('-g')));
+  // выключили — снова как раньше
+  setIgnore('v', false); setIgnore('h', false);
+  f.db.prepare('UPDATE users SET ignore_global_routes = 0').run();
+  ru = ruRules(f.vpn.renderXray(f.ctx.server('ru')));
+  assert.deepEqual(ru[0].inboundTag, ['in-v-ru', 'hin-h-ru-pl']);
+});

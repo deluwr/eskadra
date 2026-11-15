@@ -138,6 +138,8 @@ interface Settings {
   hy2UpMbps: number; hy2DownMbps: number; hy2ServerUpMbps: number; hy2ServerDownMbps: number; hy2IgnoreClientBw: boolean; hy2Masquerade: string; hy2Hop: string; hy2HopInterval: number;
   autoEnabled: boolean; autoMode: AutoMode; exitOrder: string[]; maxRttMs: number; minMbps: number; checkMin: number; testMB: number; orderMinMbps: number; speedEveryMin: number; decideMin: number;
   spreadGroups: number; exitCapMbps: Record<string, number>; spreadHighPct: number; spreadFair: boolean;
+  /** «Российские сайты напрямую» и другие глобальные правила ко входу этой конфигурации не применяются */
+  ignoreGlobalRoutes: boolean;
   hy2Relay: 'nat' | 'core'; hy2Leg: string; hy2Port: number; entryProto: 'vless' | 'hysteria2';
   // XHTTP через вход: транспорт входа ('' — как у выходов) и домен CDN перед входом
   entryTransport: '' | 'tcp' | 'xhttp'; cdn: string; cdnMode: 'packet-up' | 'stream-up' | 'stream-one'; cdnH3: boolean; xhttpExtra: XhttpExtra;
@@ -155,7 +157,7 @@ const randomHex = (n: number) => Array.from(crypto.getRandomValues(new Uint8Arra
 const defaults = (p: Protocol): Settings => ({
   security: PROTO[p].sec[0]!, transport: p === 'vmess' ? 'ws' : 'tcp', flow: p === 'vless' || p === 'eskadra' ? 'xtls-rprx-vision' : '', path: '/', host: '', serviceName: 'grpc',
   xhttpMode: 'auto', alpn: ['h2', 'http/1.1'], certMode: PROTO[p].cert[0] ?? 'self', domain: '', domains: {}, ssMethod: '2022-blake3-aes-128-gcm',
-  hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true,
+  hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true, ignoreGlobalRoutes: false,
   hy2UpMbps: 0, hy2DownMbps: 0, hy2ServerUpMbps: 0, hy2ServerDownMbps: 0, hy2IgnoreClientBw: false, hy2Masquerade: '', hy2Hop: '', hy2HopInterval: 30,
   autoEnabled: !PROTO[p].natRelay, autoMode: p === 'eskadra' ? 'order' : 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
   spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '', hy2Port: 0, entryProto: 'vless',
@@ -571,7 +573,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
       xhttpExtra: xUsed ? cleanExtra(st.xhttpExtra) : {},
       path: st.path, host: st.host, serviceName: st.serviceName, xhttpMode: st.xhttpMode, alpn: st.alpn, certMode: st.certMode,
       domain: st.domain, domains: Object.fromEntries(Object.entries(st.domains).filter(([k, v]) => usedIds.includes(k) && v)),
-      ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing,
+      ssMethod: st.ssMethod, hy2Obfs: st.hy2Obfs, mtDomain: st.mtDomain, sniffing: st.sniffing, ignoreGlobalRoutes: st.ignoreGlobalRoutes,
       hy2UpMbps: Number(st.hy2UpMbps) || 0, hy2DownMbps: Number(st.hy2DownMbps) || 0, hy2ServerUpMbps: Number(st.hy2ServerUpMbps) || 0, hy2ServerDownMbps: Number(st.hy2ServerDownMbps) || 0,
       hy2IgnoreClientBw: st.hy2IgnoreClientBw, hy2Masquerade: st.hy2Masquerade.trim(), hy2Hop: st.hy2Hop.replace(/\s/g, ''), hy2HopInterval: Math.min(3600, Math.max(5, Number(st.hy2HopInterval) || 30)),
       autoEnabled: st.autoEnabled, autoMode: st.autoMode, exitOrder: exits.map((s) => s.id), maxRttMs: Number(st.maxRttMs) || 100, minMbps: Number(st.minMbps) || 10, checkMin: Number(st.checkMin) || 15, testMB: Number(st.testMB) || 5, orderMinMbps: Number(st.orderMinMbps) || 0, speedEveryMin: Number(st.speedEveryMin) || 1, decideMin: Number(st.decideMin) || 1,
@@ -598,6 +600,9 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   const pending = !!current && current.applied_revision < current.revision;
   // Hysteria2 через вход: вход пересылает UDP ядром ОС на один выход — выбор одного
   const nat = !!info.natRelay && st.hy2Relay !== 'core';
+  // глобальные правила маршрутизации включены на входе этой конфигурации (Настройки → «Российские сайты напрямую»)
+  const { data: ruDirect } = usePoll(() => api.get<{ entries: string[] }>('/api/v1/settings/ru-direct').catch(() => null), null);
+  const ruOnEntry = !!d.entryId && !nat && !!ruDirect?.entries.includes(d.entryId);
   const oneExit = !!d.entryId && nat;
   // резервное плечо вход → выход: Hysteria2-конфигурации, у которых есть хоть один из выходов этой
   const legChoices = templates.filter((t) => t.spec.protocol === 'hysteria2' && t.id !== d.id && t.node_ids.some((id) => id !== d.entryId && d.nodeIds.includes(id)));
@@ -1267,6 +1272,12 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
             </div>
             {!st.hy2UpMbps && !st.hy2DownMbps && <span><button type="button" className="btn sm" title="Отдача 50, загрузка 200 Мбит/с" onClick={() => setSt({ hy2UpMbps: 50, hy2DownMbps: 200 })}>типичные 50 / 200</button></span>}
             {!st.hy2UpMbps !== !st.hy2DownMbps && <span className="hint warn">Укажите обе величины — иначе Brutal не включится.</span>}
+          </Adv>
+        )}
+        {(ruOnEntry || st.ignoreGlobalRoutes) && (
+          <Adv title="маршрутизация" sum={st.ignoreGlobalRoutes ? 'глобальные правила игнорируются' : 'глобальные правила действуют'}>
+            <span className="flex" style={{ gap: 12 }}><Switch label="Игнорировать глобальные правила маршрутизации" on={st.ignoreGlobalRoutes} onChange={(v) => setSt({ ignoreGlobalRoutes: v })} /><span>Игнорировать глобальные правила маршрутизации</span></span>
+            <span className="hint">«Российские сайты напрямую» из «Настроек» не применяются ко входу этой конфигурации: весь трафик её пользователей уходит на выход. Применится при выкате.</span>
           </Adv>
         )}
         {d.protocol !== 'hysteria2' && (
