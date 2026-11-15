@@ -196,6 +196,37 @@ const stateOf = (t: Template): CfgState =>
 const ST_MARK: Record<CfgState, string> = { ok: '[ OK ]', draft: '[DRAFT]', new: '[ NEW ]', fail: '[FAIL]' };
 /** Выкат, запущенный из списка: его журнал показывает страница конфигурации, куда переходит список. */
 let handoff: { id: string; job: number } | null = null;
+/** Шаг мастера, на котором открыть конфигурацию после перехода (клон с «донастроить защиту» — шаг «Защита»). */
+let openStep: { id: string; step: number } | null = null;
+const STEP_PROTECT = 2;
+
+/** Клон конфигурации: новое имя, случайные свободные порты, черновик. */
+function CloneModal({ t, templates, onClose }: { t: Template; templates: Template[]; onClose: () => void }) {
+  const suggest = (() => { const base = `${t.name.slice(0, 42)}-copy`; let n = base, i = 1; while (templates.some((x) => x.name === n)) n = `${base}-${++i}`; return n; })();
+  const [name, setName] = useState(suggest);
+  const [protect, setProtect] = useState(true);
+  const { busy, error, run } = useAsync();
+  const go = () => run(async () => {
+    const c = await api.post<Template>(`/api/v1/templates/${t.id}/clone`, { name: name.trim() });
+    const entry = c.entry_id ? `, вход ${c.entry_port}` : '';
+    toast(`«${c.name}» создана: порт ${c.port}${entry} — черновик, выкатите, когда будете готовы`);
+    if (protect) openStep = { id: c.id, step: STEP_PROTECT };
+    onClose();
+    location.hash = `#/configs/${c.id}`;
+  });
+  return (
+    <Modal title={`Клонировать «${t.name}»`} onClose={onClose}>
+      <div className="stack">
+        <label className="fld">Название<input className="inp mono" value={name} onChange={(e) => setName(e.target.value)} autoFocus onKeyDown={(e) => { if (e.key === 'Enter' && name.trim()) void go(); }} /></label>
+        <span className="k">Протокол, серверы и настройки — как у «{t.name}». Порты и диапазон смены портов Hysteria2 — новые, из свободных; пароль obfs и путь XHTTP — новые. Клон сохраняется черновиком: на серверы попадёт при выкате.</span>
+        <label className="cb"><input type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} />Донастроить защиту — открыть клон на шаге «Защита»</label>
+        <ErrorBox error={error} />
+        <div className="flex"><button className="btn pri" disabled={busy || !name.trim()} onClick={() => void go()}>клонировать</button><button className="btn ghost" onClick={onClose}>отмена</button></div>
+      </div>
+    </Modal>
+  );
+}
+
 const passJob = (id: string, job: number) => { handoff = { id, job }; dispatchEvent(new CustomEvent("cfg-job", { detail: handoff })); };
 
 /** Раздел «Конфигурации»: список (#/configs), мастер новой (#/configs/new), страница конфигурации (#/configs/<id>). */
@@ -225,6 +256,7 @@ function ConfigList() {
   const [filter, setFilter] = useState<'all' | 'att' | 'draft' | 'fail'>('all');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState<string[]>([]);
+  const [cloning, setCloning] = useState<Template | null>(null);
   const { busy, error, run } = useAsync();
   const name = (sid: string) => servers?.find((s) => s.id === sid)?.name ?? sid;
   const route = (t: Template) => {
@@ -326,6 +358,7 @@ function ConfigList() {
                       {(s === 'draft' || s === 'new') && can('configs.rollout') && <button className="btn sm acc" disabled={busy || (!t.node_ids.length && !t.entry_id)} onClick={() => void rollout(t)}>Выкатить</button>}
                       {s === 'fail' && <a className="btn sm danger" href={`#/configs/${t.id}`}>Журнал</a>}
                       <a className="btn sm" href={`#/configs/${t.id}`}>Открыть</a>
+                      {can('configs.edit') && <button className="btn sm" onClick={() => setCloning(t)}>Клонировать</button>}
                     </td>
                   </tr>
                 );
@@ -341,6 +374,7 @@ function ConfigList() {
         <span><b className="st st-new">{ST_MARK.new}</b> ещё не выкатывалась</span>
         <span><b className="st st-fail">{ST_MARK.fail}</b> выкат упал — смотрите журнал</span>
       </div>
+      {cloning && <CloneModal t={cloning} templates={templates ?? []} onClose={() => setCloning(null)} />}
     </>
   );
 }
@@ -600,6 +634,47 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
   const pending = !!current && current.applied_revision < current.revision;
   // Hysteria2 через вход: вход пересылает UDP ядром ОС на один выход — выбор одного
   const nat = !!info.natRelay && st.hy2Relay !== 'core';
+  // Домен сервера, для которого TLS уже выбирали: из других конфигураций с сертификатом «свой домен» (сертификат на узле
+  // называется по домену — тот же домен берёт уже выпущенный) или из сертификатов, выпущенных на узле. Сначала — домен,
+  // сертификат которого на узле точно есть.
+  const knownDomain = (sid: string): string | undefined => {
+    const onNode = (servers.find((s) => s.id === sid)?.tls_state?.certs ?? []).map((c) => c.name).filter((n) => n.startsWith('dom-')).map((n) => n.slice(4));
+    const fromTpl = templates
+      .filter((t) => t.id !== d.id && (t.spec.security === 'tls' || t.spec.protocol === 'hysteria2') && t.spec.certMode === 'domain')
+      .map((t) => (t.spec.domains as Record<string, string> | undefined)?.[sid]).filter((x): x is string => !!x);
+    return fromTpl.find((x) => onNode.includes(x)) ?? fromTpl[0] ?? onNode[0];
+  };
+  // серверы, которым нужен сертификат: у пересылки ядром ОС и входа за CDN — без входа
+  const certIds = [...d.nodeIds, ...(d.entryId && !nat && !st.cdn ? [d.entryId] : [])];
+  const certTouched = useRef(false);
+  const prevTls = useRef(tls);
+  useEffect(() => {
+    if (!tls || !certIds.length) { prevTls.current = tls; return; }
+    const known = Object.fromEntries(certIds.map((id) => [id, knownDomain(id)]).filter(([, v]) => !!v)) as Record<string, string>;
+    // TLS выбрали снова (или новая конфигурация на таких серверах): у всех серверов есть домен — «свой домен» с ним
+    const justTls = !prevTls.current || !d.id;
+    prevTls.current = tls;
+    if (justTls && !certTouched.current && st.certMode !== 'domain' && st.certMode !== 'custom' && certIds.every((id) => known[id])) {
+      setD((x) => ({ ...x, st: { ...x.st, certMode: 'domain', domains: { ...known, ...x.st.domains } } }));
+      return;
+    }
+    // «свой домен»: пустые (ещё не тронутые) поля — доменом, который у сервера уже есть
+    if (st.certMode === 'domain') {
+      const add = Object.fromEntries(Object.entries(known).filter(([id]) => st.domains[id] === undefined));
+      if (Object.keys(add).length) setD((x) => ({ ...x, st: { ...x.st, domains: { ...add, ...x.st.domains } } }));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tls, st.certMode, certIds.join(','), templates.length, servers.length]);
+  // диапазон смены портов Hysteria2 — свободный на серверах, где он работает (у eskadra со входом по VLESS — только на выходах)
+  const pickHop = () => run(async () => {
+    const hopIds = esk && !hyIn ? d.nodeIds.filter((x) => x !== d.entryId) : usedIds;
+    if (!hopIds.length) throw new Error('Сначала выберите серверы на шаге «Маршрут»');
+    const cur = st.hy2Hop.match(/^(\d+)-(\d+)$/);
+    const size = cur ? Number(cur[2]) - Number(cur[1]) : 10000;
+    const avoid = [d.port, d.entryId ? d.entryPort : '', st.hy2Port || ''].filter(Boolean).join(',');
+    const r = await api.get<{ range: string }>(`/api/v1/free-hop?servers=${hopIds.join(',')}&size=${size}&self=${d.id ?? ''}&avoid=${avoid}`);
+    setD((x) => ({ ...x, st: { ...x.st, hy2Hop: r.range } }));
+  });
   // глобальные правила маршрутизации включены на входе этой конфигурации (Настройки → «Российские сайты напрямую»)
   const { data: ruDirect } = usePoll(() => api.get<{ entries: string[] }>('/api/v1/settings/ru-direct').catch(() => null), null);
   const ruOnEntry = !!d.entryId && !nat && !!ruDirect?.entries.includes(d.entryId);
@@ -653,7 +728,8 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
 
   // мастер: протокол → маршрут (сначала вход, потом выходы) → защита и транспорт → проверка. Дальше не пускает, пока
   // не заполнен минимум шага; у сохранённой конфигурации открыты все шаги сразу
-  const [step, setStep] = useState(0);
+  // клон с «донастроить защиту» открывается сразу на шаге «Защита»
+  const [step, setStep] = useState(() => { if (openStep && openStep.id === draft.id) { const s = openStep.step; openStep = null; return s; } return 0; });
   const [seen, setSeen] = useState(draft.id ? 3 : 0);
   // имя не придумали — случайное, не занятое другой конфигурацией
   const [nameSeed] = useState(() => randomHex(2));
@@ -1037,7 +1113,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
               <div className="picks picks-col" role="radiogroup" aria-label="Сертификат">
                 {info.cert.map((m) => (
                   <label key={m} className="pick">
-                    <input type="radio" name="cert" checked={st.certMode === m} onChange={() => setSt({ certMode: m })} />
+                    <input type="radio" name="cert" checked={st.certMode === m} onChange={() => { certTouched.current = true; setSt({ certMode: m }); }} />
                     <span className="pick-t">{CERT_PICK[m].label}{m === 'ip' && <span className="tag ok">rec</span>}</span>
                     <span className="pick-d">{CERT_PICK[m].desc}</span>
                   </label>
@@ -1047,7 +1123,8 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
                 <div className="grid g2">
                   {usedIds.length ? usedIds.map((id) => (
                     <label key={id} className="fld"><span>{`${nameOf(id)} — домен`}</span>
-                      <input className="inp mono" value={st.domains[id] ?? ''} onChange={(e) => setSt({ domains: { ...st.domains, [id]: e.target.value.trim() } })} placeholder="de.example.com" />
+                      <input className="inp mono" value={st.domains[id] ?? ''} onChange={(e) => setSt({ domains: { ...st.domains, [id]: e.target.value.trim() } })} placeholder={knownDomain(id) ?? 'de.example.com'} />
+                      {!!st.domains[id] && st.domains[id] === knownDomain(id) && <span className="k">уже есть на сервере — сертификат возьмётся существующий</span>}
                     </label>
                   )) : <span className="hint warn">Сначала выберите серверы на шаге «Маршрут».</span>}
                 </div>
@@ -1161,8 +1238,9 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
               </span>
               <span className="hint">Прячет признаки QUIC в первых пакетах — у большинства провайдеров РФ проходимость выше. Клиенты должны поддерживать obfs.</span>
               <span className="flex" style={{ gap: 12 }}>
-                <Switch label="port hopping" on={!!st.hy2Hop.trim()} onChange={(v) => setSt({ hy2Hop: v ? '20000-30000' : '' })} /><span className="mono small">port hopping</span>
+                <Switch label="port hopping" on={!!st.hy2Hop.trim()} onChange={(v) => (v ? void pickHop() : setSt({ hy2Hop: '' }))} /><span className="mono small">port hopping</span>
                 {!!st.hy2Hop.trim() && <input className="inp mono" style={{ width: 160 }} value={st.hy2Hop} onChange={(e) => setSt({ hy2Hop: e.target.value })} placeholder="20000-30000" aria-label="Диапазон портов" />}
+                {!!st.hy2Hop.trim() && <button type="button" className="btn sm" disabled={busy} title="Свободный диапазон того же размера: не задевает SSH, порты и диапазоны других конфигураций" onClick={() => void pickHop()}>подобрать</button>}
               </span>
               <span className="hint">Клиент периодически меняет UDP-порт из диапазона — одно соединение сложнее задушить. Диапазон откройте и во внешнем файрволе хостера.</span>
             </div>

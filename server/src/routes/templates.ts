@@ -275,19 +275,16 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
   app.get('/api/v1/templates', async () => vpn.userTemplates().map((t) => templateView(vpn, t)));
 
   /**
-   * Случайные свободные порты для новой конфигурации: на каждом из серверов проходят ту же проверку, что при выкате
-   * (не SSH, не резерв, не занят шаблоном или процессом по последнему preflight, в диапазоне группы), и не совпадают
-   * с портами других конфигураций — чтобы их можно было добавить на любой сервер позже. Нет серверов — все подключённые.
+   * Случайные свободные порты (новая конфигурация, клон): на каждом из серверов ids проходят ту же проверку, что при выкате (не SSH, не резерв,
+   * не занят шаблоном или процессом по последнему preflight, в диапазоне группы), и не совпадают с портами других
+   * конфигураций — чтобы их можно было добавить на любой сервер позже. Нет серверов — все подключённые.
    */
-  app.get<{ Querystring: { proto?: string; servers?: string; count?: string; avoid?: string } }>('/api/v1/free-ports', async (req) => {
-    const proto = req.query.proto === 'udp' ? 'udp' : 'tcp';
-    const count = Math.min(4, Math.max(1, Number(req.query.count) || 1));
-    const ids = (req.query.servers ?? '').split(',').filter(Boolean);
+  const freePorts = (proto: 'tcp' | 'udp', ids: string[], count = 1, avoid: number[] = []): number[] => {
     const all = ctx.servers().filter((s) => s.sudo_mode === 'restricted');
     const servers = ids.length ? all.filter((s) => ids.includes(s.id)) : all;
     const taken = new Set<number>([
       ...vpn.templates().flatMap((t) => [t.port, t.entry_port ?? 0]),
-      ...(req.query.avoid ?? '').split(',').map(Number).filter(Boolean),
+      ...avoid,
       10085, 51820, 54321, 2053, 2096, 8443,
     ]);
     // кандидаты — из разрешённого диапазона группы первого сервера (остальные проверит lintPort); без группы — 1024–65535
@@ -316,8 +313,59 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
       for (let i = 0; i < all.length && ports.length < count; i++) tryPort(all[(start + i) % all.length]!);
     }
     if (ports.length < count) throw new HttpError(409, 'не нашёл свободный порт — проверьте диапазоны портов групп серверов');
-    return { ports };
+    return ports;
+  };
+
+  /**
+   * Свободный диапазон смены портов Hysteria2 на серверах ids — с теми же условиями, что проверяет сохранение: не задевает
+   * SSH, UDP-порты других конфигураций и их диапазоны на этих серверах, лежит в диапазоне портов группы. selfIds —
+   * конфигурации, свои порты и диапазоны которых не мешают (сама конфигурация и её служебная «eskadra»). null — места нет.
+   */
+  const freeHop = (ids: string[], size: number, selfIds: string[] = [], avoid: number[] = []): string | null => {
+    const own = new Set(selfIds);
+    const servers = ids.map((id) => ctx.server(id));
+    const busy: Array<[number, number]> = [];
+    for (const s of servers) {
+      for (const p of json<number[]>(s.ssh_ports, [])) busy.push([p, p]);
+      for (const i of vpn.inbounds(`server_id = ? AND proto = 'udp' AND state IN ('active','deploying')`, s.id)) if (!own.has(i.template_id)) busy.push([i.port, i.port]);
+      for (const t of vpn.templates())
+        if (!own.has(t.id) && (json<string[]>(t.node_ids, []).includes(s.id) || t.entry_id === s.id)) { const r = hopRange(vpn.spec(t).hy2Hop); if (r) busy.push(r); }
+    }
+    // порты других конфигураций (их inbound'ы ещё могут появиться на этих серверах) и уже выбранные порты этой
+    for (const t of vpn.templates()) if (!own.has(t.id)) for (const p of [t.port, t.entry_port ?? 0]) if (p) busy.push([p, p]);
+    for (const p of avoid) busy.push([p, p]);
+    const g = servers[0] && (db.prepare('SELECT port_range FROM groups WHERE name = ?').get(servers[0].group_name) as { port_range: string } | undefined);
+    const spans = (g?.port_range ?? '1024-65535').split(',').map((x) => x.trim().split('-').map(Number))
+      .map(([a, b]) => [Math.max(1024, a!), Math.min(65535, b ?? a!)] as [number, number]).filter(([a, b]) => a + size <= b);
+    const fits = (a: number) => !busy.some(([x, y]) => x <= a + size && a <= y);
+    // сначала — случайные места в высоких портах (реже заняты), затем — по порядку с шагом
+    const high = spans.map(([a, b]) => [Math.max(a, 20000), Math.min(b, 60000)] as [number, number]).filter(([a, b]) => a + size <= b);
+    for (const list of [high, spans]) {
+      for (let i = 0; i < 400 && list.length; i++) {
+        const [a, b] = list[Math.floor(Math.random() * list.length)]!;
+        const start = a + Math.floor(Math.random() * (b - size - a + 1));
+        if (fits(start)) return `${start}-${start + size}`;
+      }
+    }
+    for (const [a, b] of spans) for (let start = a; start + size <= b; start += 50) if (fits(start)) return `${start}-${start + size}`;
+    return null;
+  };
+
+  app.get<{ Querystring: { servers?: string; size?: string; self?: string; avoid?: string } }>('/api/v1/free-hop', async (req) => {
+    const ids = (req.query.servers ?? '').split(',').filter(Boolean);
+    if (!ids.length) throw new HttpError(400, 'выберите серверы конфигурации');
+    const size = Math.min(20000, Math.max(100, Number(req.query.size) || 10000));
+    const self = req.query.self ?? '';
+    const selfIds = self ? [self, ...companionOf(vpn, self).map((c) => c.id)] : [];
+    const range = freeHop(ids, size, selfIds, (req.query.avoid ?? '').split(',').map(Number).filter(Boolean));
+    if (!range) throw new HttpError(409, `нет свободного диапазона на ${size} портов — уменьшите размер или освободите порты`);
+    return { range };
   });
+
+  app.get<{ Querystring: { proto?: string; servers?: string; count?: string; avoid?: string } }>('/api/v1/free-ports', async (req) => ({
+    ports: freePorts(req.query.proto === 'udp' ? 'udp' : 'tcp', (req.query.servers ?? '').split(',').filter(Boolean),
+      Math.min(4, Math.max(1, Number(req.query.count) || 1)), (req.query.avoid ?? '').split(',').map(Number).filter(Boolean)),
+  }));
 
   app.post('/api/v1/templates', { preHandler: guard(ctx, 'configs.edit') }, async (req) => {
     const b = body.parse(req.body);
@@ -338,6 +386,61 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
     saveCert(id, b.customCert);
     syncCompanion(db, vpn, vpn.template(id)!);
     audit(db, req.admin!.username, 'template.create', id, b);
+    return templateView(vpn, vpn.template(id)!);
+  });
+
+  /**
+   * Клон конфигурации: те же протокол, серверы и настройки под новым именем, порты — случайные свободные. Секреты
+   * конфигурации новые (пароль obfs Hysteria2, путь XHTTP; ключи REALITY выдаются inbound'ам при выкате), диапазон смены
+   * портов Hysteria2 — новый свободный того же размера. Клон — черновик: на серверы попадает при выкате.
+   */
+  app.post<{ Params: { id: string } }>('/api/v1/templates/:id/clone', { preHandler: guard(ctx, 'configs.edit') }, async (req) => {
+    const src = vpn.template(req.params.id);
+    if (!src) throw new HttpError(404, 'шаблон не найден');
+    notCompanion(src);
+    const { name } = z.object({ name: body.shape.name }).parse(req.body);
+    if (vpn.templates().some((t) => t.name === name)) throw new HttpError(409, `конфигурация «${name}» уже есть — выберите другое имя`);
+    const role = roleOf(db, req.admin!.role);
+    if (!role.owner && role.scope.templates) throw new HttpError(403, `роль «${role.name}» работает только со своими конфигурациями — новую создаёт owner или роль без ограничения`);
+    const nodeIds = json<string[]>(src.node_ids, []);
+    const entryId = src.entry_id;
+    scoped(() => checkTemplateServers(role, [], [...nodeIds, ...(entryId ? [entryId] : [])]));
+    scoped(() => checkTemplateQuota(db, role, req.admin!.id));
+    const sp = specOf(src);
+    const settings = JSON.parse(src.settings || '{}') as Record<string, unknown>;
+    // порты: основной — на серверах конфигурации (у входа с «и сам принимает» — и на нём), входа — на входе
+    const mainIds = nodeIds.length ? nodeIds : entryId ? [entryId] : [];
+    const port = freePorts(sp.protocol === 'hysteria2' ? 'udp' : 'tcp', mainIds)[0]!;
+    const entryPort = entryId ? freePorts(sp.protocol === 'hysteria2' || hy2Entry(sp) ? 'udp' : 'tcp', [entryId], 1, [port])[0]! : null;
+    // «eskadra»: Hysteria2 на выходах — свой UDP-порт
+    if (typeof settings.hy2Port === 'number' && settings.hy2Port > 0)
+      settings.hy2Port = freePorts('udp', nodeIds.filter((id) => id !== entryId), 1, [port, ...(entryPort ? [entryPort] : [])])[0]!;
+    if (settings.hy2Obfs) settings.hy2Obfs = randomBytes(16).toString('hex');
+    if (usesXhttp(sp)) settings.path = xhttpPath();
+    // диапазон смены портов — новый свободный того же размера (на тех же серверах, что проверяет сохранение)
+    const hop = hopRange(String(settings.hy2Hop ?? ''));
+    if (hop) {
+      const hopIds = sp.bundle && !hy2Entry(sp) ? nodeIds.filter((x) => x !== entryId) : [...nodeIds, ...(entryId ? [entryId] : [])];
+      settings.hy2Hop = freeHop(hopIds, hop[1] - hop[0], [], [port, ...(entryPort ? [entryPort] : []), ...(typeof settings.hy2Port === 'number' ? [settings.hy2Port] : [])]) ?? '';
+    }
+    delete settings.companionOf;
+    const b = body.parse({
+      name, protocol: src.protocol === 'vless-reality' ? 'vless' : src.protocol, port, sni: json<string[]>(src.sni, []), fingerprint: src.fingerprint,
+      ech: !!src.ech, nodeIds, entryId, entryPort, settings,
+    });
+    validate(b);
+    autoFill(b);
+    const id = 'tpl-' + randomBytes(3).toString('hex');
+    db.prepare(
+      `INSERT INTO templates (id, name, core, protocol, port, sni, fingerprint, ech, node_ids, entry_id, entry_port, settings, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, b.name, PROTOCOLS[b.protocol as Protocol].core, b.protocol, b.port, JSON.stringify(b.sni), b.fingerprint,
+      b.ech ? 1 : 0, JSON.stringify(b.nodeIds), b.entryId, b.entryPort, JSON.stringify(b.settings), req.admin!.id);
+    // свой загруженный сертификат — тот же
+    const cert = getSetting<unknown>(db, `cert.${src.id}`, null);
+    if (cert) setSetting(db, `cert.${id}`, cert);
+    syncCompanion(db, vpn, vpn.template(id)!);
+    audit(db, req.admin!.username, 'template.clone', id, { from: src.id, name: b.name, port: b.port, entryPort: b.entryPort });
     return templateView(vpn, vpn.template(id)!);
   });
 
