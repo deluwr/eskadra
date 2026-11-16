@@ -4,6 +4,7 @@ import { certProblems } from './certs.js';
 import { coresOff } from './ops.js';
 import { twinOf, twinText } from './twins.js';
 import { backupPassword, backupSettings } from './backup.js';
+import { relocatedOf } from './relocate.js';
 
 /**
  * Входы, которые за последние 30 минут дошли до выхода serverId (пробы «Авто» через сам выход): по ним видно, что
@@ -44,6 +45,20 @@ export function attentionOf(ctx: Ctx, vpn: Vpn): Attention[] {
     for (const p of certProblems(s, (id) => vpn.template(id)?.name)) attention.push({ level: p.level, title: p.title, detail: p.detail, serverId: s.id });
     for (const ib of vpn.inbounds(`server_id = ? AND state = 'error'`, s.id))
       attention.push({ level: 'warn', title: `${s.name}: конфигурация не поднялась`, detail: ib.error ?? '', serverId: s.id });
+  }
+  // экстренный переезд (relocate.ts): пока этот сервер не стал главным-узлом или узлы его не пускают — что сделать
+  const moved = relocatedOf(ctx);
+  if (moved && Date.now() - Date.parse(moved.at) < 30 * 86_400_000) {
+    const hasMain = servers.some((s) => s.mgmt_mode === 'local');
+    const cut = servers.filter((s) => s.fail_since && s.id !== moved.fromServer?.id && s.sudo_mode === 'restricted');
+    if (!hasMain || cut.length) {
+      const steps = [
+        ...(hasMain ? [] : ['Сделайте этот сервер главным: «Серверы» → «Сделать главный сервер входом».']),
+        ...(moved.fromServer ? [`Прежний главный «${moved.fromServer.name}» теперь relay: его конфигурации на месте; когда он вернётся, выполните на нём сниппет подключения заново (ключ панели был разрешён только с самого сервера).`] : []),
+        ...(cut.length ? [`Панель не заходит на: ${cut.map((s) => s.name).join(', ')}. Разрешите им новый адрес панели — в консоли хостера: fleetctl allow ${moved.toIp ?? '<IP этого сервера>'}.`] : []),
+      ];
+      attention.push({ level: 'warn', title: `Панель восстановлена на новом сервере${moved.toIp ? ` (${moved.toIp})` : ''}`, detail: steps.join(' ') });
+    }
   }
   if (!backupPassword(ctx)) attention.push({ level: 'warn', title: 'Бэкапы не делаются: не задан пароль бэкапа', detail: 'Задайте пароль и Telegram ID получателей в «Настройках».' });
   else if (backupSettings(db).tgIds.length < 2) attention.push({ level: 'warn', title: 'Бэкапы: меньше двух получателей', detail: 'Если единственный получатель удалит чат, копии пропадут.' });

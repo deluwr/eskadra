@@ -28,12 +28,15 @@ import { Workers } from './workers.js';
 import { Mgmt } from './mgmt.js';
 import { pruneServerRefs, pruneTemplateRefs } from './prune.js';
 import { applyStagedRestore } from './restorelib.js';
+import { checkRelocation } from './relocate.js';
 
 fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 // восстановление из бэкапа, подготовленное в панели: подмена данных до открытия базы
 applyStagedRestore(config.dataDir, (m) => console.log(m));
 const db = openDb(config.dataDir);
 const ctx = new Ctx(db, new Sealer(loadOrCreateMasterKey(config.dataDir)));
+// бэкап прежней панели восстановили на другом сервере — этот становится главным, прежний главный остаётся relay
+checkRelocation(ctx, undefined, (m) => console.log(m));
 
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL ?? 'info' },

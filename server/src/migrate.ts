@@ -77,6 +77,8 @@ export function prepareMovedDb(file: string, oldHost: string, newIp: string) {
   try {
     db.prepare(`UPDATE servers SET mgmt_mode = 'direct' WHERE mgmt_mode = 'local'`).run();
     db.prepare(`DELETE FROM settings WHERE key = 'panel.movedTo'`).run();
+    // плановый перенос сам правит данные под новое место — экстренным переездом (relocate.ts) он не считается
+    db.prepare(`DELETE FROM settings WHERE key = 'panel.machine'`).run();
     // адрес панели — новый и первым: по первому адресу eskadra выпускает сертификат на IP и сверяет домен
     const ex = db.prepare(`SELECT value FROM settings WHERE key = 'executor.ips'`).get() as { value: string } | undefined;
     const ips = [newIp, ...(ex ? (JSON.parse(ex.value) as string[]) : []).filter((x) => x !== newIp && x !== oldHost)];
