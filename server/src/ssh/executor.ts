@@ -106,24 +106,34 @@ export class SshSession {
   exec(cmd: string, opts: { stdin?: string | Buffer; timeoutMs?: number } = {}): Promise<ExecResult> {
     const timeoutMs = opts.timeoutMs ?? 120_000;
     return new Promise((resolve, reject) => {
-      this.client.exec(cmd, (err, stream) => {
-        if (err) return reject(err);
+      // срок — с момента вызова, а не с открытия канала: «полумёртвое» соединение (TCP жив, ответов нет) не отвечает
+      // на открытие канала вовсе — без этого операция висела вечно и держала блокировку узла (а с ней — фоновые задачи)
+      let stream: { close: () => void } | null = null;
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        if (stream) stream.close(); else this.client.end();
+        reject(new Error(stream ? `timeout after ${timeoutMs} ms` : `узел не ответил за ${Math.round(timeoutMs / 1000)} с (соединение не отвечает)`));
+      }, timeoutMs);
+      this.client.exec(cmd, (err, ch) => {
+        if (done) { ch?.close(); return; }
+        if (err) { done = true; clearTimeout(timer); return reject(err); }
+        stream = ch;
         let stdout = '';
         let stderr = '';
-        const timer = setTimeout(() => {
-          stream.close();
-          reject(new Error(`timeout after ${timeoutMs} ms`));
-        }, timeoutMs);
         // узел могут взломать: бесконечный вывод не должен съесть память панели
         const CAP = 64 * 1024 * 1024;
-        stream.on('data', (d: Buffer) => { if (stdout.length < CAP) stdout += d.toString('utf8'); });
-        stream.stderr.on('data', (d: Buffer) => { if (stderr.length < CAP) stderr += d.toString('utf8'); });
-        stream.on('close', (code: number | null, signal?: string) => {
+        ch.on('data', (d: Buffer) => { if (stdout.length < CAP) stdout += d.toString('utf8'); });
+        ch.stderr.on('data', (d: Buffer) => { if (stderr.length < CAP) stderr += d.toString('utf8'); });
+        ch.on('close', (code: number | null, signal?: string) => {
           clearTimeout(timer);
+          if (done) return;
+          done = true;
           resolve({ code, signal, stdout, stderr });
         });
-        if (opts.stdin !== undefined) stream.end(opts.stdin);
-        else stream.end();
+        if (opts.stdin !== undefined) ch.end(opts.stdin);
+        else ch.end();
       });
     });
   }
@@ -133,8 +143,15 @@ export class SshSession {
 export async function jumpSocket(t: SshTarget, timeoutMs: number): Promise<{ sock: ClientChannel; jc: Client }> {
   const jc = await connect(t.jump!, timeoutMs).catch((e: Error) => { throw new Error(`посредник ${t.jump!.host}: ${e.message}`); });
   try {
-    const sock = await new Promise<ClientChannel>((resolve, reject) =>
-      jc.forwardOut('127.0.0.1', 0, t.host, t.port, (err, s) => (err ? reject(new Error(`посредник ${t.jump!.host} не открыл соединение до ${t.host}:${t.port}: ${err.message} — разрешите пересылку заново (смените канал управления)`)) : resolve(s))));
+    // посредник может не ответить на открытие пересылки вовсе — без срока соединение висело бы вечно
+    const sock = await new Promise<ClientChannel>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`посредник ${t.jump!.host} не открыл соединение до ${t.host}:${t.port} за ${Math.round(timeoutMs / 1000)} с`)), timeoutMs);
+      jc.forwardOut('127.0.0.1', 0, t.host, t.port, (err, s) => {
+        clearTimeout(timer);
+        if (err) reject(new Error(`посредник ${t.jump!.host} не открыл соединение до ${t.host}:${t.port}: ${err.message} — разрешите пересылку заново (смените канал управления)`));
+        else resolve(s);
+      });
+    });
     return { sock, jc };
   } catch (e) { jc.end(); throw e; }
 }

@@ -608,7 +608,8 @@ fw_close() {  # закрыть в ufw / firewalld все порты Эскадр
 
 # На сервере работает и узел флота (nodekit, ядра): у панели и узла общий каталог $ETC (там конфиги ядер, сертификаты
 # узла, общий каталог Let's Encrypt) и общий таймер продления eskadra-certbot — панель удаляется без них.
-node_here() { [ -x /usr/local/sbin/fleet-core ] || [ -d "$ETC/xray" ] || [ -d "$ETC/sing-box" ] || [ -d "$ETC/telemt" ]; }
+# узел — по любому его следу: nodekit, ядра Эскадры, конфиги ядер или адреса панелей (их ставит подключение узла)
+node_here() { [ -x /usr/local/sbin/fleet-core ] || [ -d /usr/local/lib/eskadra ] || [ -s /etc/fleet/panel-ips ] || [ -d "$ETC/xray" ] || [ -d "$ETC/sing-box" ] || [ -d "$ETC/telemt" ]; }
 
 # Узел на этом сервере — полностью: ядра и их службы, конфиги и сертификаты, nodekit, firewall Эскадры, пользователи
 # fleet и fleet-mgmt. Настройки SSH и консольный пользователь fleetadmin остаются — иначе можно потерять доступ.
@@ -658,7 +659,14 @@ cmd_uninstall() {  # cmd_uninstall [--purge|--keep] [--with-node] [--yes]
   if node_here && [ "$node" = keep ] && [ -z "$yes" ]; then
     local running; running="$(systemctl list-units --no-legend --state=active 'eskadra-*.service' 2>/dev/null | awk '{print $1}' | grep -v '^eskadra-\(selfnode\|update\|certbot\)' | paste -sd' ' || true)"
     printf '\n  %sНа этом сервере работает и узел флота%s%s\n' "$c_b" "$c_0" "${running:+ ($running)}"
-    printf '   1) Оставить узел — удалить только панель: ядра, их конфиги и сертификаты не трогаются, VPN работает\n'
+    # узел пускает и другую панель (её адрес — в panel-ips, кроме loopback и адресов самого сервера): после удаления
+    # этой он остаётся там relay/узлом — например, после переезда панели на новый сервер
+    local others
+    others="$(grep -vxE '127\.0\.0\.1|::1|' /etc/fleet/panel-ips 2>/dev/null | grep -vxF -f <(hostname -I 2>/dev/null | tr ' ' '\n' | grep . || echo -) | paste -sd' ' || true)"
+    if [ -n "$others" ]; then
+      printf '   %sУзел подключён и к другой панели%s (пускает её с: %s) — оставьте узел: он продолжит работать relay там\n' "$c_b" "$c_0" "$others"
+    fi
+    printf '   1) Оставить узел — удалить только панель: ядра, их конфиги и сертификаты не трогаются, VPN работает%s\n' "${others:+, узлом управляет другая панель}"
     printf '   2) Удалить всё — и панель, и узел: ядра, конфиги, сертификаты, nodekit, firewall Эскадры, пользователь fleet\n'
     case "$(prompt "  Выберите [1]:" 1)" in 2) node=remove ;; esac
   fi

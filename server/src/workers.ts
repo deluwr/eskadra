@@ -22,6 +22,12 @@ const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso
  */
 const DOWN_AFTER_FAILS = 3;
 
+/** Обещание со сроком: не дождались — ошибка (сама операция может доработать позже, её результат не нужен). */
+export function deadline<T>(p: Promise<T>, ms: number, why: string): Promise<T> {
+  let timer!: NodeJS.Timeout;
+  return Promise.race([p, new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error(why)), ms); })]).finally(() => clearTimeout(timer));
+}
+
 export class Workers {
   private readonly ops: Ops;
   private timers: NodeJS.Timeout[] = [];
@@ -141,7 +147,8 @@ export class Workers {
     const threshold = this.ops.failThresholdMin();
     await Promise.all(this.managed().map(async (s) => {
       try {
-        const r = await this.ctx.onNode(s, (n) => n.op(['ping'], { timeoutMs: 15_000 }));
+        // жёсткий срок на сервер: один зависший (или стоящий в очереди за долгой операцией) не останавливает опрос остальных
+        const r = await deadline(this.ctx.onNode(s, (n) => n.op(['ping'], { timeoutMs: 15_000 })), 60_000, `${s.name}: опрос не уложился в 60 с`);
         if (r.stdout.trim() !== 'pong') throw new Error('no pong');
         if (s.fail_since) {
           const downMin = Math.round(minutesSince(s.fail_since));

@@ -79,3 +79,19 @@ test('о машине ничего не узнать — ничего не тр�
   assert.ok(checkRelocation(ctx, { ...NEW, ip: 'panel.example.net' }));
   assert.deepEqual(ctx.executorIps(), ['198.51.100.1', '192.0.2.7']);
 });
+
+test('переезд без IP (адрес панели — домен): при следующем запуске IP дописывается в адреса исполнителя', async () => {
+  const { db, ctx } = fixture();
+  checkRelocation(ctx, OLD);
+  const r = checkRelocation(ctx, { ...NEW, ip: 'pnl.example.net' })!;
+  assert.equal(r.toIp, null);
+  assert.deepEqual(ctx.executorIps(), ['198.51.100.1', '192.0.2.7'], 'IP не узнали — адреса не трогали');
+  const { healRelocation, resolveIp } = await import('./relocate.js');
+  assert.deepEqual(await resolveIp({ ...NEW, ip: '203.0.113.50' }), { ...NEW, ip: '203.0.113.50' }, 'IP остаётся как есть');
+  assert.equal(healRelocation(ctx, { ...NEW, ip: '203.0.113.50' }), true);
+  assert.deepEqual(ctx.executorIps(), ['203.0.113.50', '192.0.2.7']);
+  assert.equal(getSetting(db, 'sub.host', ''), '203.0.113.50');
+  assert.equal(getSetting<{ toIp: string } | null>(db, 'panel.relocated', null)?.toIp, '203.0.113.50');
+  // второй раз — уже нечего
+  assert.equal(healRelocation(ctx, { ...NEW, ip: '203.0.113.50' }), false);
+});

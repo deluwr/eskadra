@@ -11,6 +11,7 @@
  * Старые бэкапы без panel.machine: переезд виден по ключу хоста главного сервера-узла.
  */
 import fs from 'node:fs';
+import dns from 'node:dns/promises';
 import { isIP } from 'node:net';
 import type { Ctx } from './ctx.js';
 import { getSetting, setSetting } from './db.js';
@@ -37,6 +38,26 @@ export function sameMachine(a: Machine, b: Machine): boolean | null {
   if (a.machineId && b.machineId) return a.machineId === b.machineId;
   if (a.hostKeyFp && b.hostKeyFp) return a.hostKeyFp === b.hostKeyFp;
   return null;
+}
+
+/** Адрес панели доменом (FLEET_PUBLIC_HOST = pnl.example) — IPv4 этого домена: адреса исполнителя — это IP. */
+export async function resolveIp(m: Machine): Promise<Machine> {
+  if (!m.ip || isIP(m.ip)) return m;
+  try { return { ...m, ip: (await dns.lookup(m.ip, { family: 4 })).address }; } catch { return m; }
+}
+
+/**
+ * Переезд уже был, а IP этого сервера тогда не узнали (адрес панели — домен, до v1.2.2): дописать его в адреса
+ * исполнителя первым и перевести на него подписки — как сделал бы переезд.
+ */
+export function healRelocation(ctx: Ctx, cur: Machine): boolean {
+  const r = relocatedOf(ctx);
+  if (!r || r.toIp || !cur.ip || !isIP(cur.ip)) return false;
+  setSetting(ctx.db, 'executor.ips', [cur.ip, ...ctx.executorIps().filter((x) => x !== cur.ip && x !== r.fromIp)]);
+  if (r.fromIp && getSetting<string>(ctx.db, 'sub.host', '') === r.fromIp) setSetting(ctx.db, 'sub.host', cur.ip);
+  setSetting(ctx.db, 'panel.relocated', { ...r, toIp: cur.ip });
+  audit(ctx.db, 'system', 'panel.relocated_ip', undefined, { ip: cur.ip });
+  return true;
 }
 
 export const relocatedOf = (ctx: Ctx) => getSetting<Relocated | null>(ctx.db, 'panel.relocated', null);

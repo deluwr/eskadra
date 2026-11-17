@@ -28,7 +28,7 @@ import { Workers } from './workers.js';
 import { Mgmt } from './mgmt.js';
 import { pruneServerRefs, pruneTemplateRefs } from './prune.js';
 import { applyStagedRestore } from './restorelib.js';
-import { checkRelocation } from './relocate.js';
+import { checkRelocation, currentMachine, healRelocation, resolveIp } from './relocate.js';
 
 fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
 // восстановление из бэкапа, подготовленное в панели: подмена данных до открытия базы
@@ -36,7 +36,12 @@ applyStagedRestore(config.dataDir, (m) => console.log(m));
 const db = openDb(config.dataDir);
 const ctx = new Ctx(db, new Sealer(loadOrCreateMasterKey(config.dataDir)));
 // бэкап прежней панели восстановили на другом сервере — этот становится главным, прежний главный остаётся relay
-checkRelocation(ctx, undefined, (m) => console.log(m));
+{
+  // адрес панели может быть доменом — для адресов исполнителя нужен IP
+  const machine = await resolveIp(currentMachine());
+  checkRelocation(ctx, machine, (m) => console.log(m));
+  if (healRelocation(ctx, machine)) console.log(`адрес этого сервера ${machine.ip} добавлен в адреса исполнителя (переезд был без него)`);
+}
 
 const app = Fastify({
   logger: { level: process.env.LOG_LEVEL ?? 'info' },
