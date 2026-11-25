@@ -119,3 +119,18 @@ test('цикл лимита: ни один узел не ответил — ус
   const r = await f.ops.syncDevices();
   assert.deepEqual([...r.blocked], [['u-a1', ['198.51.100.2']]]);
 });
+
+test('устройство без подключений дольше 90 с освобождает место, за минуту — ещё нет', async () => {
+  const { updateDevices } = await import('./devices.js');
+  const { ctx, db } = fixture();
+  const t0 = new Date('2026-11-25T10:00:00Z');
+  updateDevices(ctx, new Map([['u-a1', new Set(['198.51.100.1', '198.51.100.2'])]]), t0);
+  const count = () => (db.prepare("SELECT COUNT(*) AS n FROM user_devices WHERE user_id = 'u-a1'").get() as { n: number }).n;
+  assert.equal(count(), 2);
+  // второй адрес пропал (сменили сеть): через 60 с ещё держится, через 100 с — место свободно и блокировки нет
+  updateDevices(ctx, new Map([['u-a1', new Set(['198.51.100.1'])]]), new Date(t0.getTime() + 60_000));
+  assert.equal(count(), 2);
+  const r = updateDevices(ctx, new Map([['u-a1', new Set(['198.51.100.1'])]]), new Date(t0.getTime() + 100_000));
+  assert.equal(count(), 1);
+  assert.equal(r.blocked.get('u-a1'), undefined);
+});

@@ -95,3 +95,50 @@ test('переезд без IP (адрес панели — домен): при 
   // второй раз — уже нечего
   assert.equal(healRelocation(ctx, { ...NEW, ip: '203.0.113.50' }), false);
 });
+
+test('переезд: новая панель ставит отметку на прежнем главном; прежняя по ней — «перенесена» (бот, бэкапы, уведомления молчат)', async () => {
+  const { retireOldPanel, checkSuperseded, panelUrl } = await import('./relocate.js');
+  assert.equal(panelUrl('pnl.example.net', 43495, '/abc123/'), 'https://pnl.example.net:43495/abc123/');
+  assert.equal(panelUrl('', 43495, '/'), null);
+  // новая панель: переезд с главным-узлом «main» → отметка через nodekit на нём, один раз
+  const { db, ctx } = fixture();
+  checkRelocation(ctx, OLD);
+  checkRelocation(ctx, NEW);
+  const calls: string[][] = [];
+  (ctx as unknown as { onNode: unknown }).onNode = async (_s: unknown, fn: (n: unknown) => Promise<unknown>) =>
+    fn({ op: async (a: string[]) => { calls.push(a); return { code: 0, stdout: 'ok', stderr: '' }; } });
+  const env = { h: process.env.FLEET_PUBLIC_HOST, p: process.env.FLEET_PORT, b: process.env.FLEET_BASE_PATH };
+  Object.assign(process.env, { FLEET_PUBLIC_HOST: 'pnl.example.net', FLEET_PORT: '43495', FLEET_BASE_PATH: '/abc123/' });
+  try {
+    let kit = 0;
+    assert.equal(await retireOldPanel(ctx, async () => { kit++; }, () => undefined), true);
+    assert.deepEqual(calls, [['panel-retire', 'https://pnl.example.net:43495/abc123/']]);
+    assert.equal(kit, 1, 'nodekit на прежнем главном обновляется (новая команда)');
+    assert.equal(await retireOldPanel(ctx, async () => undefined, () => undefined), false, 'второй раз — нет');
+    assert.equal(getSetting(db, 'panel.retired.main', false), true);
+  } finally {
+    for (const [k, v] of [['FLEET_PUBLIC_HOST', env.h], ['FLEET_PORT', env.p], ['FLEET_BASE_PATH', env.b]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+
+  // прежняя панель: отметка на её сервере — «перенесена», бот молчит
+  const old = fixture();
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'esk-sup-')), 'panel-superseded');
+  assert.equal(checkSuperseded(old.ctx, file), null, 'отметки нет');
+  fs.writeFileSync(file, 'https://pnl.example.net:43495/abc123/\n');
+  assert.equal(checkSuperseded(old.ctx, file), 'https://pnl.example.net:43495/abc123/');
+  assert.equal(getSetting(old.db, 'panel.movedTo', null), 'https://pnl.example.net:43495/abc123/');
+  assert.equal(checkSuperseded(old.ctx, file), null, 'уже перенесена');
+  const { Bot } = await import('./bot.js');
+  setSetting(old.db, 'bot.token', old.ctx.seal('123:abc'));
+  old.db.prepare(`INSERT INTO admins (username, pw_hash, role, tg_id) VALUES ('a', 'x', 'owner', '42')`).run();
+  const bot = new Bot(old.ctx, { info: () => undefined, warn: () => undefined } as never);
+  let sent = 0;
+  (bot as unknown as { send: unknown }).send = async () => { sent++; };
+  await bot.notifyAdmins('тест');
+  assert.equal(sent, 0, 'уведомления с перенесённой панели не уходят');
+  assert.deepEqual(await bot.sendBackup('x', Buffer.from('x'), ['42']), { ok: 0, total: 0, errors: ['панель перенесена — бэкапы шлёт новая'] });
+  // мусор в отметке — не трогаем
+  const f2 = fixture();
+  fs.writeFileSync(file, 'javascript:alert(1)\n');
+  assert.equal(checkSuperseded(f2.ctx, file), null);
+});

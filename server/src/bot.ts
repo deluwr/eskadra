@@ -112,7 +112,7 @@ export class Bot {
 
   /** Уведомление админам; cat — категория, которую админ может выключить у себя (/notify). Пользователям не шлётся. */
   async notifyAdmins(text: string, kb?: Kb, cat?: NotifyCat) {
-    if (!this.token()) return;
+    if (!this.token() || getSetting<string | null>(this.ctx.db, 'panel.movedTo', null)) return;
     const ids = this.ctx.db.prepare(`SELECT tg_id, notify_off FROM admins WHERE tg_id IS NOT NULL`).all() as Array<{ tg_id: string; notify_off: string }>;
     for (const a of ids) {
       if (cat && json<string[]>(a.notify_off, []).includes(cat)) continue;
@@ -124,6 +124,7 @@ export class Bot {
   /** Отправить файл бэкапа на Telegram ID из настроек бэкапа (частями, если больше лимита бота). */
   async sendBackup(name: string, data: Buffer, tgIds: string[]): Promise<{ ok: number; total: number; errors: string[] }> {
     const ids = tgIds.map((id) => ({ username: id, tg_id: id }));
+    if (getSetting<string | null>(this.ctx.db, 'panel.movedTo', null)) return { ok: 0, total: 0, errors: ['панель перенесена — бэкапы шлёт новая'] };
     if (!this.token() || !ids.length) return { ok: 0, total: 0, errors: this.token() ? ['не заданы Telegram ID получателей'] : ['бот не настроен'] };
     const parts: Buffer[] = [];
     for (let i = 0; i < data.length; i += PART) parts.push(data.subarray(i, i + PART));

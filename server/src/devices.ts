@@ -9,12 +9,15 @@
  * «email пользователя + IP источника → block». Правило касается только этого пользователя: другие
  * пользователи с той же конфигурации и даже с того же IP (общий NAT) не затрагиваются.
  * Устройство, пропавшее больше чем на HOLD, освобождает место — короткие паузы между запросами
- * его не отнимают, а смена сети (Wi-Fi → LTE) ждёт не дольше HOLD.
+ * его не отнимают, а смена сети (Wi-Fi → LTE) ждёт не дольше HOLD. Узел отдаёт только адреса, с которых были
+ * подключения за последние 2 минуты (fleet-core online): прежний адрес после смены сети не висит устройством.
  */
 import type { Ctx, UserRow } from './ctx.js';
 import { effectiveLimits } from './vpn.js';
 
-export const DEVICE_HOLD_MS = 2 * 60_000;
+export const DEVICE_HOLD_MS = 90_000;
+/** Уведомление «устройств больше лимита» — не чаще раза в столько на пользователя (блокировка может мигать). */
+export const LIMIT_NOTIFY_EVERY_MS = 12 * 3600_000;
 
 export interface DeviceRow { user_id: string; ip: string; first_seen: string; last_seen: string; blocked: number }
 

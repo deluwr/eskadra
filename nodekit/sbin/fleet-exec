@@ -74,6 +74,10 @@ case "${1:-}" in
   geo-prune)     for a in "${@:2}"; do [[ "$a" =~ ^eskadra-[a-z0-9-]{1,40}\.dat$ ]] || deny name; done
                  exec /usr/local/sbin/fleet-core geo-prune "${@:2}" ;;
   geo-list)      exec /usr/local/sbin/fleet-core geo-list ;;
+  # панель переехала: отметка для прежней панели на этом сервере (она перестаёт слать бэкапы и уведомления, бот — выключен)
+  panel-retire)  [[ "${2:?url}" =~ ^https://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?/[A-Za-z0-9_/-]{0,128}$ ]] || deny url
+                 install -d -m 755 /etc/fleet; printf '%s\n' "$2" > /etc/fleet/panel-superseded.new
+                 chmod 644 /etc/fleet/panel-superseded.new; mv -f /etc/fleet/panel-superseded.new /etc/fleet/panel-superseded; echo ok ;;
   singbox-tls)   exec /usr/local/sbin/fleet-core tls "${2:?sni}" ;;
   singbox-net)   [[ "${2:?hops}" =~ ^(-|[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}(,[0-9]{1,5}:[0-9]{1,5}-[0-9]{1,5}){0,15})$ ]] || deny hops
                  exec /usr/local/sbin/fleet-core singbox-net "$2" ;;

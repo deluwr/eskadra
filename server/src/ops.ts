@@ -779,6 +779,8 @@ export class Ops {
     for (const s of nodes) {
       try {
         const out = await this.ctx.onNode(s, async (n) => {
+          // nodekit устарел — обновить (новый fleet-core отдаёт только свежие адреса)
+          if (s.kit_version !== kitVersion()) await this.ensureKit(s, n, log);
           let r = await n.op(['xray-online'], { timeoutMs: 60_000 });
           if (r.code === 126) { await this.ensureKit(s, n, log); r = await n.op(['xray-online'], { timeoutMs: 60_000 }); }   // старый nodekit
           return r.code === 0 ? r.stdout : null;

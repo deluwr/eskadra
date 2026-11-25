@@ -13,7 +13,9 @@
 import fs from 'node:fs';
 import dns from 'node:dns/promises';
 import { isIP } from 'node:net';
-import type { Ctx } from './ctx.js';
+import type { Ctx, ServerRow } from './ctx.js';
+import type { ExecResult } from './ssh/executor.js';
+type NodeOp = (args: (string | number)[], o?: { stdin?: string; timeoutMs?: number }) => Promise<ExecResult>;
 import { getSetting, setSetting } from './db.js';
 import { fingerprintOf } from './ssh/executor.js';
 import { audit } from './lib/audit.js';
@@ -58,6 +60,51 @@ export function healRelocation(ctx: Ctx, cur: Machine): boolean {
   setSetting(ctx.db, 'panel.relocated', { ...r, toIp: cur.ip });
   audit(ctx.db, 'system', 'panel.relocated_ip', undefined, { ip: cur.ip });
   return true;
+}
+
+/** Отметка на сервере прежней панели (ставит новая через nodekit): «панелью теперь управляют отсюда». */
+export const SUPERSEDED_FILE = '/etc/fleet/panel-superseded';
+const URL_RE = /^https:\/\/[A-Za-z0-9.-]{1,253}(:\d{1,5})?\/[A-Za-z0-9_/-]{0,128}$/;
+
+/** Адрес этой панели для отметки: https://<FLEET_PUBLIC_HOST>:<порт><путь>; null — адрес неизвестен. */
+export function panelUrl(host = process.env.FLEET_PUBLIC_HOST?.trim() ?? '', port = Number(process.env.FLEET_PORT ?? 0), base = process.env.FLEET_BASE_PATH ?? '/'): string | null {
+  if (!host || !port) return null;
+  const u = `https://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port}${base.startsWith('/') ? base : `/${base}`}`;
+  return URL_RE.test(u) ? u : null;
+}
+
+/**
+ * Новая панель после переезда: на прежнем главном сервере (теперь relay этой панели) ставится отметка — прежняя
+ * панель там видит её и уходит в «перенесена»: бот выключен, бэкапы и уведомления больше не шлёт (их было по два).
+ */
+export async function retireOldPanel(ctx: Ctx, ensureKit: (s: ServerRow, n: { op: NodeOp }) => Promise<void>, log: (s: string) => void): Promise<boolean> {
+  const r = relocatedOf(ctx);
+  if (!r?.fromServer || getSetting<boolean>(ctx.db, `panel.retired.${r.fromServer.id}`, false)) return false;
+  const url = panelUrl();
+  const s = ctx.servers().find((x) => x.id === r.fromServer!.id);
+  if (!url || !s || s.sudo_mode !== 'restricted' || s.mgmt_mode === 'local') return false;
+  await ctx.onNode(s, async (n) => {
+    await ensureKit(s, n);
+    const res = await n.op(['panel-retire', url], { timeoutMs: 30_000 });
+    if (res.code !== 0) throw new Error((res.stderr || res.stdout).trim() || `exit ${res.code}`);
+  });
+  setSetting(ctx.db, `panel.retired.${s.id}`, true);
+  audit(ctx.db, 'system', 'panel.old_retired', s.id, { url });
+  log(`прежняя панель на ${s.name} получила отметку: бэкапы, уведомления и бот там выключатся (панель — ${url})`);
+  return true;
+}
+
+/**
+ * Прежняя панель: на её сервере стоит отметка новой — перейти в «перенесена» (как после планового переноса):
+ * фоновые задачи, бэкапы, уведомления и бот здесь больше не работают, в интерфейсе — ссылка на новую панель.
+ */
+export function checkSuperseded(ctx: Ctx, file = SUPERSEDED_FILE): string | null {
+  if (getSetting<string | null>(ctx.db, 'panel.movedTo', null)) return null;
+  const url = read(file);
+  if (!url || !URL_RE.test(url) || url === panelUrl()) return null;
+  setSetting(ctx.db, 'panel.movedTo', url);
+  audit(ctx.db, 'system', 'panel.superseded', undefined, { url });
+  return url;
 }
 
 export const relocatedOf = (ctx: Ctx) => getSetting<Relocated | null>(ctx.db, 'panel.relocated', null);

@@ -13,6 +13,8 @@ import { billingDue, billingText } from './billing.js';
 import { collectMetrics, METRICS_EVERY_MS } from './analytics.js';
 import { movedTo } from './migrate.js';
 import { refreshRuGeo, ruGeoPending, syncRuGeo } from './rugeo.js';
+import { LIMIT_NOTIFY_EVERY_MS } from './devices.js';
+import { checkSuperseded, retireOldPanel } from './relocate.js';
 
 const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60_000 : 0);
 
@@ -56,6 +58,15 @@ export class Workers {
     this.every('cores', 6 * 3600_000, () => this.coreCheck());
     this.every('certs', 3 * 3600_000, () => this.certCheck());
     this.every('billing', 3600_000, () => this.billingCheck());
+    // переезд: новая панель ставит отметку прежней; прежняя по отметке уходит в «перенесена» (без бота, бэкапов, уведомлений)
+    this.every('retireOld', 10 * 60_000, async () => {
+      try { await retireOldPanel(this.ctx, (s, n) => this.ops.ensureKit(s, n as never, () => undefined), (l) => this.log.info(l)); }
+      catch (e) { this.log.warn(`отметка прежней панели: ${(e as Error).message}`); }
+    });
+    this.every('superseded', 60_000, async () => {
+      const url = checkSuperseded(this.ctx);
+      if (url) { this.bot.stop(); this.log.warn(`панелью управляют с ${url}: здесь выключены бот, бэкапы и уведомления`); }
+    });
     // списки российских сайтов (runetfreedom): раз в неделю, только если «Российские сайты напрямую» включены на входе
     this.every('rugeo', 3600_000, async () => {
       try { const r = await refreshRuGeo(this.ctx); if (r.changed) this.log.info(`списки российских сайтов обновлены: ${r.geo?.file}`); }
@@ -280,6 +291,10 @@ export class Workers {
     for (const uid of r.newlyLimited) {
       const u = this.ctx.db.prepare('SELECT name FROM users WHERE id = ?').get(uid) as { name: string } | undefined;
       if (!u) continue;
+      // блокировка «мигает» (устройство ушло и вернулось) — не чаще раза в 12 часов на пользователя
+      const last = getSetting<string | null>(this.ctx.db, `devices.notified.${uid}`, null);
+      if (last && Date.now() - Date.parse(last) < LIMIT_NOTIFY_EVERY_MS) continue;
+      setSetting(this.ctx.db, `devices.notified.${uid}`, new Date().toISOString());
       audit(this.ctx.db, 'system', 'user.devices_limited', uid, { blocked: r.blocked.get(uid) });
       void this.bot.notifyAdmins(`📵 ${u.name}: устройств больше лимита — лишние заблокированы (${r.blocked.get(uid)?.join(', ')})`, undefined, 'users');
     }
