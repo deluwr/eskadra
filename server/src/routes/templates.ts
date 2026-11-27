@@ -6,6 +6,7 @@ import { Ctx, guard, HttpError, type TemplateRow } from '../ctx.js';
 import { audit } from '../lib/audit.js';
 import { medianSpeed, Ops, startJob } from '../ops.js';
 import { json, Vpn } from '../vpn.js';
+import { validHostname } from '../tlsissue.js';
 import { checkTemplateQuota, checkTemplateServers, roleOf, ScopeError } from '../roles.js';
 import { hopRange, hy2Entry, ipHost, natRelayOf, PROTOCOLS, SS_METHODS, specOf, usesXhttp, xhttpPath, type Protocol } from '../protocols.js';
 
@@ -56,6 +57,7 @@ const settingsBody = z.object({
   bundle: z.boolean().optional(),
   hy2Port: z.number().int().min(0).max(65535).optional(),
   entryProto: z.enum(['vless', 'hysteria2']).optional(),
+  entryDomain: z.string().trim().max(253).optional(),
   entryTransport: z.enum(['', 'tcp', 'xhttp']).optional(),
   cdnMode: z.enum(['packet-up', 'stream-up', 'stream-one']).optional(),
   cdnH3: z.boolean().optional(),
@@ -190,6 +192,8 @@ export async function templateRoutes(app: FastifyInstance, ctx: Ctx) {
       if (b.protocol !== 'vless') throw new HttpError(400, '«eskadra» строится на VLESS');
       if (!b.entryId) throw new HttpError(400, '«eskadra»: выберите сервер-вход');
       if (!b.nodeIds.some((id) => id !== b.entryId)) throw new HttpError(400, '«eskadra»: выберите хотя бы один выход');
+      if (sp.entryDomain && (!validHostname(sp.entryDomain) || sp.entryDomain.startsWith('*.'))) throw new HttpError(400, `«eskadra»: домен входа ${sp.entryDomain} — не домен (например, vpn.example.com)`);
+      if (sp.entryDomain && sp.cdn) throw new HttpError(400, '«eskadra»: домен входа и вход за CDN вместе не задаются — клиенты подключаются к домену CDN');
       if (sp.entryProto === 'hysteria2' && b.settings.autoMode === 'spread')
         throw new HttpError(400, '«eskadra» со входом по Hysteria2: «по нагрузке» недоступно (пользователей на входе различает sing-box, а не Xray) — выберите «по порядку» или «по качеству»');
     } else if (sp.hy2Leg) {

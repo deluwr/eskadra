@@ -141,6 +141,8 @@ interface Settings {
   /** «Российские сайты напрямую» и другие глобальные правила ко входу этой конфигурации не применяются */
   ignoreGlobalRoutes: boolean;
   hy2Relay: 'nat' | 'core'; hy2Leg: string; hy2Port: number; entryProto: 'vless' | 'hysteria2';
+  /** «eskadra»: домен входа — адрес для клиентов; у входа по Hysteria2 сертификат выпускается на него */
+  entryDomain: string;
   // XHTTP через вход: транспорт входа ('' — как у выходов) и домен CDN перед входом
   entryTransport: '' | 'tcp' | 'xhttp'; cdn: string; cdnMode: 'packet-up' | 'stream-up' | 'stream-one'; cdnH3: boolean; xhttpExtra: XhttpExtra;
 }
@@ -160,7 +162,7 @@ const defaults = (p: Protocol): Settings => ({
   hy2Obfs: '', mtDomain: 'www.apple.com', sniffing: true, ignoreGlobalRoutes: false,
   hy2UpMbps: 0, hy2DownMbps: 0, hy2ServerUpMbps: 0, hy2ServerDownMbps: 0, hy2IgnoreClientBw: false, hy2Masquerade: '', hy2Hop: '', hy2HopInterval: 30,
   autoEnabled: !PROTO[p].natRelay, autoMode: p === 'eskadra' ? 'order' : 'smart', exitOrder: [], maxRttMs: 100, minMbps: 10, checkMin: 15, testMB: 5, orderMinMbps: 0, speedEveryMin: 1, decideMin: 1,
-  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '', hy2Port: 0, entryProto: 'vless',
+  spreadGroups: 6, exitCapMbps: {}, spreadHighPct: 80, spreadFair: false, hy2Relay: 'nat', hy2Leg: '', hy2Port: 0, entryProto: 'vless', entryDomain: '',
   entryTransport: '', cdn: '', cdnMode: 'packet-up', cdnH3: false, xhttpExtra: {},
 });
 
@@ -615,6 +617,7 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
       exitCapMbps: Object.fromEntries(exits.map((s) => [s.id, Number(st.exitCapMbps[s.id]) || 0])),
       hy2Relay: st.hy2Relay, hy2Leg: d.entryId && info.core === 'Xray' && info.relay ? st.hy2Leg : '',
       bundle: esk, hy2Port: esk ? Number(st.hy2Port) || 0 : 0, entryProto: esk ? st.entryProto : 'vless',
+      entryDomain: esk ? (st.entryDomain ?? '').trim().toLowerCase() : '',
     },
     ...(d.certPem.trim() && d.keyPem.trim() ? { customCert: { fullchain: d.certPem.trim() + '\n', privkey: d.keyPem.trim() + '\n' } } : {}),
   });
@@ -961,6 +964,12 @@ function Editor({ draft, servers, current, templates, onServers, onSaved, onRoll
                 <Seg value={st.entryProto} label="Протокол на входе" onChange={(v) => setSt({ entryProto: v, ...(v === 'hysteria2' && st.autoMode === 'spread' ? { autoMode: 'order' as AutoMode } : {}) })}
                   options={[['vless', 'vless → резерв hy2'], ['hysteria2', 'hy2 → резерв vless']]} />
                 <span className="hint">VLESS проходит почти везде. Hysteria2 быстрее, если провайдер не режет UDP. Второй протокол — резерв между входом и выходами. Смена меняет ссылки «через вход» — пользователям нужно обновить подписку.</span>
+                <label className="fld">Домен входа
+                  <input className="inp mono" value={st.entryDomain ?? ''} onChange={(e) => setSt({ entryDomain: e.target.value })} placeholder="не задан — IP входа" />
+                  <span className="k">{st.entryProto === 'hysteria2'
+                    ? 'Клиенты подключаются к домену, а не к IP входа. Сертификат Let’s Encrypt выпускается на этот домен при выкате: A-запись домена должна вести на вход, порт 80 — открыт.'
+                    : 'Клиенты подключаются к домену, а не к IP входа: при смене IP достаточно поменять A-запись.'}</span>
+                </label>
               </>}
             </div>
           </>}

@@ -280,3 +280,31 @@ test('eskadra: потолок на клиента и BBR — на Hysteria2 вы
   assert.match((await app.inject({ method: 'PUT', url: `/api/v1/templates/${esk.id}`, payload: { ...base, settings: { ...base.settings, hy2IgnoreClientBw: true, hy2ServerUpMbps: 300 } } })).body, /BBR/);
   await app.close();
 });
+
+test('eskadra: домен входа — в ссылках вместо IP; у входа по Hysteria2 сертификат на домен', async () => {
+  const { app, db, vpn, ctx, base, user, all } = await fixture();
+  // не домен — отказ
+  assert.equal((await app.inject({ method: 'POST', url: '/api/v1/templates', payload: { ...base, settings: { ...base.settings, entryDomain: 'not a domain' } } })).statusCode, 400);
+  const r = await app.inject({ method: 'POST', url: '/api/v1/templates', payload: { ...base, settings: { ...base.settings, entryProto: 'hysteria2', entryDomain: 'VPN.Example.com' } } });
+  assert.equal(r.statusCode, 200, r.body);
+  const esk = r.json();
+  assert.equal(esk.spec.entryDomain, 'vpn.example.com');
+  const hy = all().find((t) => specOf(t).companionOf === esk.id)!;
+  const ib = (iid: string, t: string, s: string, kind: string, port: number, proto: string) =>
+    db.prepare(`INSERT INTO inbounds (id, template_id, server_id, kind, port, proto, state, public_key, short_id, tls_pin) VALUES (?, ?, ?, ?, ?, ?, 'active', 'PUB', 'aa', ?)`).run(iid, t, s, kind, port, proto, 'ab'.repeat(32));
+  ib('v-pl', esk.id, 'pl', 'direct', 8443, 'tcp'); ib('v-ru', esk.id, 'ru', 'relay', 9443, 'udp'); ib('h-pl', hy.id, 'pl', 'direct', 8443, 'udp');
+  const auto = vpn.profiles(user()).find((p) => p.key === `v:${esk.id}:auto`)!;
+  const u = new URL(vpn.link(user(), auto).replace('hysteria2://', 'https://'));
+  assert.equal(u.hostname, 'vpn.example.com');
+  assert.equal(u.searchParams.get('sni'), 'vpn.example.com');
+  assert.equal(u.searchParams.get('insecure'), null);
+  const entry = (vpn.renderSingbox(ctx.server('ru')) as any).inbounds.find((i: any) => i.tag === 'in-v-ru');
+  assert.equal(entry.tls.certificate_path, '/etc/eskadra/tls/dom-vpn.example.com/fullchain.pem');
+  // вход по VLESS: только адрес подключения
+  const put = await app.inject({ method: 'PUT', url: `/api/v1/templates/${esk.id}`, payload: { ...base, settings: { ...base.settings, entryDomain: 'vpn.example.com' } } });
+  assert.equal(put.statusCode, 200, put.body);
+  db.prepare(`UPDATE inbounds SET proto = 'tcp' WHERE id = 'v-ru'`).run();
+  const v = vpn.link(user(), vpn.profiles(user()).find((p) => p.key === `v:${esk.id}:pl`)!);
+  assert.match(v, /^vless:\/\/[^@]+@vpn\.example\.com:9443\?/);
+  await app.close();
+});

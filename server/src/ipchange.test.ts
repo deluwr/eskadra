@@ -73,6 +73,18 @@ test('за NAT: внешний адрес; если он никогда не с�
   assert.deepEqual(await checkPanelIp(c2, other, ''), { from: OLD, to: NEW });
 });
 
+test('адрес панели уже новый, а главный сервер-узел — на прежнем: смена сразу, без базового адреса', async () => {
+  const { ctx } = fixture();
+  // панель не видела прежний адрес (смена была до обновления), eskadra уже записала новый в адрес панели
+  assert.deepEqual(await checkPanelIp(ctx, probe({ ifaces: [NEW], route: NEW }), NEW), { from: OLD, to: NEW });
+  // за NAT — подтверждение внешним адресом
+  assert.deepEqual(await checkPanelIp(ctx, probe({ ifaces: ['10.0.0.5'], route: '10.0.0.5', egress: NEW }), NEW), { from: OLD, to: NEW });
+  // адрес панели не подтверждается — ничего
+  assert.equal(await checkPanelIp(ctx, probe({ ifaces: ['10.0.0.5'], route: '10.0.0.5', egress: '203.0.113.77' }), NEW), null);
+  // прежний адрес ещё на интерфейсе — смены нет
+  assert.equal(await checkPanelIp(ctx, probe({ ifaces: [OLD, NEW], route: OLD }), NEW), null);
+});
+
 test('нет сети — ничего не решаем', async () => {
   const { ctx } = fixture();
   await checkPanelIp(ctx, probe({ ifaces: [OLD] }), '');

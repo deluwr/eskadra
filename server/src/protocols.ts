@@ -162,6 +162,11 @@ export interface Spec {
    * он не отвечает — другим: vless — VLESS, резерв Hysteria2; hysteria2 — Hysteria2 (sing-box входа), резерв VLESS.
    */
   entryProto: 'vless' | 'hysteria2';
+  /**
+   * «eskadra»: домен входа — адрес, к которому подключаются клиенты (A-запись на IP входа). С ним ссылки не зависят от
+   * IP входа; у входа по Hysteria2 сертификат Let's Encrypt выпускается на этот домен (вместо IP или самоподписанного).
+   */
+  entryDomain: string;
   /** Служебная Hysteria2 «eskadra»: id конфигурации-владельца. Профилей и пользователей нет — только плечи входа. */
   companionOf: string;
   mtDomain: string;          // MTProto fake-TLS: домен маскировки
@@ -246,6 +251,7 @@ export function specOf(t: Pick<TemplateRow, 'protocol' | 'sni' | 'fingerprint'> 
     bundle: protocol === 'vless' && !!raw.bundle,
     hy2Port: raw.hy2Port ?? 0,
     entryProto: protocol === 'vless' && raw.bundle && raw.entryProto === 'hysteria2' ? 'hysteria2' : 'vless',
+    entryDomain: protocol === 'vless' && raw.bundle ? (raw.entryDomain ?? '').trim().toLowerCase() : '',
     companionOf: protocol === 'hysteria2' ? raw.companionOf ?? '' : '',
     mtDomain: raw.mtDomain || sni[0] || 'www.apple.com',
     sniffing: raw.sniffing ?? true,
@@ -288,8 +294,13 @@ export const ipHost = (host: string) => /^[0-9.]+$|:/.test(host);
  * полоса, маскировка) и сертификатом Let's Encrypt на IP входа; вход с адресом-доменом — самоподписанный под сайт
  * маскировки VLESS (клиенту тогда нужен insecure). У остальных — как есть.
  */
-export function entrySpec(sp: Spec, entryHost?: string): Spec {
-  if (hy2Entry(sp)) return { ...sp, protocol: 'hysteria2', security: 'tls', certMode: entryHost && ipHost(entryHost) ? 'ip' : 'self', sni: [sp.sni[0] || 'www.bing.com'], bundle: false, hy2Relay: 'core' };
+export function entrySpec(sp: Spec, entryHost?: string, entryId?: string): Spec {
+  if (hy2Entry(sp)) {
+    const base = { ...sp, protocol: 'hysteria2' as const, security: 'tls' as const, sni: [sp.sni[0] || 'www.bing.com'], bundle: false, hy2Relay: 'core' as const };
+    // домен входа: сертификат Let's Encrypt на него (как «свой домен на сервере»)
+    if (sp.entryDomain && entryId) return { ...base, certMode: 'domain', domains: { [entryId]: sp.entryDomain } };
+    return { ...base, certMode: entryHost && ipHost(entryHost) ? 'ip' : 'self' };
+  }
   // вход за CDN: XHTTP + TLS с самоподписанным сертификатом под домен CDN (CDN проверяет его в режиме «Full» без строгой проверки)
   if (sp.cdn) return { ...sp, transport: 'xhttp', security: 'tls', certMode: 'cdn', host: sp.cdn, alpn: ['h2', 'http/1.1'], flow: '' };
   if (sp.entryTransport) return { ...sp, transport: sp.entryTransport, flow: sp.entryTransport === 'tcp' ? sp.tcpFlow : '' };

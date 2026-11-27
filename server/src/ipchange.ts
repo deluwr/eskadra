@@ -89,11 +89,19 @@ async function observe(p: IpProbe): Promise<string | null> {
  * раньше наблюдаемый адрес совпадал с известным (иначе это не смена, а другой адрес выхода в интернет).
  */
 export async function checkPanelIp(ctx: Ctx, probe: IpProbe = systemProbe, env?: string): Promise<{ from: string; to: string } | null> {
-  const from = knownPanelIp(ctx, env);
+  const pub = env ?? process.env.FLEET_PUBLIC_HOST?.trim() ?? '';
+  const from = knownPanelIp(ctx, pub);
   if (!from) return null;
   const st = getSetting<IpState>(ctx.db, STATE, { seen: null, pending: null });
   const save = (v: IpState) => setSetting(ctx.db, STATE, v);
   if (probe.ifaces().includes(from)) { if (st.seen !== from || st.pending) save({ seen: from, pending: null }); return null; }
+  // адрес панели уже новый (eskadra public-ip / cert letsencrypt ip записывают внешний IP самого сервера), а главный
+  // сервер-узел в базе — на прежнем: смена была раньше, чем панель начала её отслеживать. Подтверждение — тот же
+  // адрес на интерфейсе или снаружи; ждать второй проверки и базового адреса не нужно
+  if (isIP(pub) === 4 && pub !== from && from === ctx.servers().find((s) => s.mgmt_mode === 'local')?.host) {
+    const seenNow = probe.ifaces().includes(pub) ? pub : await observe(probe);
+    if (seenNow === pub) return { from, to: pub };
+  }
   const now = await observe(probe);
   if (!now) return null;   // адрес не узнать (нет сети) — ничего не решаем
   if (now === from) { if (st.seen !== from || st.pending) save({ seen: from, pending: null }); return null; }
