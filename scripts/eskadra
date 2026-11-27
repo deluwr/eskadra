@@ -416,7 +416,9 @@ cmd_letsencrypt() {  # cmd_letsencrypt [ip|domain] [домен[,домен…]] 
   # адрес подписок: если он среди доменов сертификата (ESKADRA_SUB_HOST — из панели) — он, иначе — адрес панели
   local sub="$host"
   for d in "${doms[@]}"; do if [ "$d" = "${ESKADRA_SUB_HOST:-}" ]; then sub="$d"; fi; done
-  cli sub-port "" "$sub" >/dev/null
+  # смена IP сервера (public-ip): адрес подписок правит сама панель — здесь не трогаем
+  if [ "${ESKADRA_SUB_KEEP:-}" = 1 ]; then sub="$(cli status | sed -n 's/.*"subHost":"\([^"]*\)".*/\1/p')"; sub="${sub:-$host}"
+  else cli sub-port "" "$sub" >/dev/null; fi
   ok "сертификат Let's Encrypt выпущен на ${doms[*]:-$host}, продление — автоматически"
   [ "${ESKADRA_INSTALL:-}" = 1 ] && return 0   # установщик сам запустит панель
   restart
@@ -535,11 +537,40 @@ print(",".join(v) if isinstance(v, list) else v)' "$@" 2>/dev/null || true; }
     echo "exit=$code" | panel_log "$dir/log"
     return 0
   fi
+  # IP сервера сменился (панель заметила сама): адрес панели и сертификат на IP — на новый
+  if [ "$action" = public-ip ]; then
+    panel_log_reset "$dir/log"
+    echo "start $(date -Is) public-ip" | panel_log "$dir/log"
+    ( cmd_public_ip ) 2>&1 | panel_log "$dir/log" || code=$?
+    echo "exit=$code" | panel_log "$dir/log"
+    return 0
+  fi
   [[ "$ver" =~ ^(latest|v?[0-9]+\.[0-9]+\.[0-9]+)$ ]] || ver=latest
   panel_log_reset "$dir/log"
   echo "start $(date -Is) $ver" | panel_log "$dir/log"
   ( cmd_update "$ver" ) 2>&1 | panel_log "$dir/log" || code=$?
   echo "exit=$code" | panel_log "$dir/log"
+}
+
+# IP сервера сменился (хостер выдал новый адрес, машина та же): адрес панели и сертификат на IP — на новый.
+# Адрес главного сервера, исполнителя и подписок в базе панель меняет сама (ipchange.ts). Адрес берётся с самого
+# сервера, не от панели. Адрес панели — домен: менять нечего, только A-запись.
+cmd_public_ip() {
+  local old ip v4='^[0-9]+(\.[0-9]+){3}$'
+  old="$(getenv FLEET_PUBLIC_HOST)"
+  ip="$(own_ip)"
+  [[ "$ip" =~ $v4 ]] || die "не удалось определить внешний IP этого сервера"
+  if [ -n "$old" ] && ! [[ "$old" =~ $v4 ]]; then ok "адрес панели — домен $old: менять нечего, A-запись должна вести на $ip"; return 0; fi
+  if [ "$old" = "$ip" ]; then ok "адрес панели уже $ip"; return 0; fi
+  echo "  адрес панели: ${old:-—} → $ip"
+  if [ -f "$LE/renewal/eskadra.conf" ]; then
+    # сертификат Let's Encrypt на прежний IP больше не продлится — выпуск на новый (порт 80 — как при выпуске)
+    ESKADRA_SUB_KEEP=1 cmd_letsencrypt ip
+  else
+    setenv FLEET_PUBLIC_HOST "$ip"
+    restart
+    cmd_url
+  fi
 }
 
 # ───────────────────────── главный сервер как узел ─────────────────────────
@@ -720,6 +751,7 @@ usage() {
   port [N|random]         порт панели (ufw обновится)
   path [имя]              секретный путь панели
   sub-port [N|random]     порт подписок
+  public-ip               IP сервера сменился: адрес панели и сертификат на IP — на новый
   cert [show|letsencrypt [ip|domain <домен>[,<домен>…]]|set <cert> <key>]
   conflicts               3x-ui / xray / sing-box на этом сервере: дополнить или удалить
   reset-password [логин]  новый пароль администратора
@@ -791,6 +823,7 @@ case "${1:-menu}" in
   sub-port) cmd_sub_port "${2:-}" ;;
   cert) shift; cmd_cert "$@" ;;
   cert-deploy) cmd_cert_deploy ;;
+  public-ip) cmd_public_ip ;;
   cert-migrate) cmd_cert_migrate ;;
   cert-hooks)   # обновление: хуки и таймер продления — в текущем виде
     [ -f "$ETC/hooks/pre.sh" ] && write_hooks || true

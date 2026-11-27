@@ -65,6 +65,7 @@ An interactive numbered menu: **fleet** — overview, servers, users, configurat
 | `eskadra port [N\|random]` | change the panel port (ufw is updated) |
 | `eskadra path [name]` | change the panel's secret path |
 | `eskadra sub-port [N\|random]` | change the subscription port |
+| `eskadra public-ip` | the server IP changed (same machine): move the panel address and its IP certificate to the new IP. The panel notices the change itself and updates fleet data and nodes |
 | `eskadra reset-password [login]` | new administrator password |
 | `eskadra disable-2fa <login>` | disable 2FA if the authenticator is lost |
 | `eskadra backup` | make a backup now |

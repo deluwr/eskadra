@@ -31,6 +31,17 @@ export function requestCert(domains: string[], subHost: string) {
   fs.renameSync(f + '.new', f);
 }
 
+/**
+ * IP главного сервера сменился (ipchange.ts): адрес панели (FLEET_PUBLIC_HOST) и её сертификат на IP — на новый.
+ * Помощник сам узнаёт внешний адрес сервера: от панели — только просьба, без адреса.
+ */
+export function requestPublicIp() {
+  fs.mkdirSync(dir(), { recursive: true, mode: 0o750 });
+  const f = path.join(dir(), 'request.json');
+  fs.writeFileSync(f + '.new', JSON.stringify({ action: 'public-ip', at: new Date().toISOString() }), { mode: 0o640 });
+  fs.renameSync(f + '.new', f);
+}
+
 /** Имена в сертификате панели (DNS и IP из subjectAltName); нет сертификата — пусто. */
 export function panelCertNames(): string[] {
   if (!config.tlsCert) return [];

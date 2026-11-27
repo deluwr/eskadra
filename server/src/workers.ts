@@ -15,6 +15,7 @@ import { movedTo } from './migrate.js';
 import { refreshRuGeo, ruGeoPending, syncRuGeo } from './rugeo.js';
 import { LIMIT_NOTIFY_EVERY_MS } from './devices.js';
 import { checkSuperseded, retireOldPanel } from './relocate.js';
+import { applyPanelIp, checkPanelIp, followUp, ipChangeText } from './ipchange.js';
 
 const minutesSince = (iso: string | null) => (iso ? (Date.now() - Date.parse(iso)) / 60_000 : 0);
 
@@ -62,6 +63,15 @@ export class Workers {
     this.every('retireOld', 10 * 60_000, async () => {
       try { await retireOldPanel(this.ctx, (s, n) => this.ops.ensureKit(s, n as never, () => undefined), (l) => this.log.info(l)); }
       catch (e) { this.log.warn(`отметка прежней панели: ${(e as Error).message}`); }
+    });
+    // IP главного сервера сменился (машина та же): данные — сразу, узлы и адрес панели — следом
+    this.every('panelIp', 3 * 60_000, async () => {
+      const ch = await checkPanelIp(this.ctx);
+      if (!ch) return;
+      const c = await applyPanelIp(this.ctx, ch.from, ch.to);
+      this.log.warn(`IP главного сервера сменился: ${ch.from} → ${ch.to} — адреса обновлены, узлы получают новый адрес`);
+      const done = await followUp(this.ctx, c, (l) => this.log.info(l));
+      void this.bot.notifyAdmins(ipChangeText(this.ctx, done));
     });
     this.every('superseded', 60_000, async () => {
       const url = checkSuperseded(this.ctx);

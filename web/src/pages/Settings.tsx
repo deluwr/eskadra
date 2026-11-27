@@ -6,6 +6,11 @@ import { ask, CopyButton, ErrorBox, Icon, Info, Seg, Switch, Tag, useAsync, useP
 
 interface S {
   executorIps: string[];
+  panelIp: {
+    known: string | null;
+    change: { at: string; from: string; to: string; cut: string[]; domains: string[]; running?: boolean } | null;
+    prepared: { ip: string; at: string } | null;
+  };
   sub: { host: string; port: number; scheme: string };
   knockTtlHours: number;
   failThresholdMin: number;
@@ -22,6 +27,7 @@ export function SettingsPage({ onAuthChange }: { onAuthChange?: () => void }) {
       <div className="page-head"><div><h1>Настройки</h1><p>Адрес исполнителя, проверка связи, блокировки, Telegram-бот и бэкапы</p></div></div>
       <PanelVersion />
       <Executor s={data} onSaved={reload} />
+      {can('owner') && <PanelIpCard s={data} onSaved={reload} />}
       <General s={data} />
       <BlocksCard />
       <RuDirectCard />
@@ -52,6 +58,38 @@ function Executor({ s, onSaved }: { s: S; onSaved: () => void }) {
         {detected && <span className="small">Внешний IP: <Addr value={detected} /> {!ips.includes(detected) && <button className="link" onClick={() => setIps((v) => (v ? v + '\n' : '') + detected)}>добавить</button>}</span>}
       </div>
       <ErrorBox error={error} />
+    </section>
+  );
+}
+
+/**
+ * IP главного сервера: панель сама замечает смену адреса и обновляет данные и узлы. Здесь — заранее разрешить новый
+ * адрес на узлах (пока старый работает) и применить смену вручную, если панель её не распознала (NAT).
+ */
+function PanelIpCard({ s, onSaved }: { s: S; onSaved: () => void }) {
+  const [ip, setIp] = useState('');
+  const [jobId, setJobId] = useState<number | null>(null);
+  const { busy, error, run } = useAsync();
+  const { known, change, prepared } = s.panelIp;
+  const go = (what: 'prepare' | 'apply') => run(async () => {
+    if (what === 'apply' && !(await ask(`Применить новый IP главного сервера ${ip.trim()} вместо ${known ?? '—'}? Адрес исполнителя, главного сервера и подписок сменится, узлы получат новый адрес.`))) return;
+    const r = await api.post<{ jobId: number }>(`/api/v1/settings/panel-ip/${what}`, { ip: ip.trim() });
+    setJobId(r.jobId);
+  });
+  return (
+    <section className="card pad stack">
+      <h2>IP главного сервера <Info>Если хостер сменит IP главного сервера, панель заметит это сама (за несколько минут): обновит адрес главного сервера, исполнителя и подписок, разрешит новый адрес на узлах (узлы с прямым SSH, которые его не пускают, — через другой сервер флота), перевыпустит сертификаты на IP. Новый адрес известен заранее — разрешите его на узлах сейчас, пока старый работает: тогда смена пройдёт без консоли хостера.</Info></h2>
+      <p className="small">Нынешний: <Addr value={known} />
+        {change && <> · последняя смена <Addr value={change.from} /> → <Addr value={change.to} /> {ago(change.at)}{change.running ? ' — узлы получают новый адрес…' : ''}</>}
+        {prepared && prepared.ip !== known && <> · заранее разрешён <Addr value={prepared.ip} /></>}
+      </p>
+      <div className="flex">
+        <input className="inp mono" style={{ maxWidth: 220 }} value={ip} onChange={(e) => setIp(e.target.value)} placeholder="новый IP" />
+        <button className="btn" disabled={busy || !ip.trim()} onClick={() => void go('prepare')}>Разрешить заранее</button>
+        <button className="btn" disabled={busy || !ip.trim()} onClick={() => void go('apply')}>IP уже сменился</button>
+      </div>
+      <ErrorBox error={error} />
+      {jobId && <JobLog id={jobId} title="Смена IP" onDone={onSaved} />}
     </section>
   );
 }

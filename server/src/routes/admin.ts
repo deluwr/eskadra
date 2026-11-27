@@ -27,6 +27,7 @@ import { ruDirectOf } from '../rudirect.js';
 import { refreshRuGeo, RU_GEO_SOURCE, ruGeoCheck, ruGeoOf, ruGeoOnNode } from '../rugeo.js';
 import type { SubService } from '../subsvc.js';
 import { movedTo, movePanel } from '../migrate.js';
+import { applyPanelIp, followUp, ipChangeOf, ipChangeText, isPublicV4, knownPanelIp, prepareIp } from '../ipchange.js';
 
 async function detectEgressIp(): Promise<string> {
   const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(8000) });
@@ -287,6 +288,8 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
   app.get('/api/v1/settings', async () => ({
     lang: getSetting(db, 'ui.lang', 'ru'),
     executorIps: ctx.executorIps(),
+    // IP главного сервера: какой панель считает своим, последняя смена, заранее разрешённый новый
+    panelIp: { known: knownPanelIp(ctx), change: ipChangeOf(ctx), prepared: getSetting(db, 'panel.ip.prepared', null) },
     sub: (() => {
       const host = getSetting(db, 'sub.host', '');
       // подписки по HTTPS отдаются с сертификатом панели: адрес подписок должен в нём быть, иначе клиенты не примут
@@ -373,6 +376,39 @@ export async function adminRoutes(app: FastifyInstance, ctx: Ctx, deps: { backup
     setSetting(db, 'executor.ips', uniq);
     audit(db, who(req), 'executor.ips.set', undefined, { ips: uniq });
     return { ips: uniq };
+  });
+
+  /**
+   * Смена IP главного сервера (ipchange.ts). prepare — новый адрес известен заранее: разрешить его на узлах, пока
+   * старый работает. apply — адрес уже сменился, а панель сама не применила (NAT, выход в интернет через другой IP).
+   */
+  const ipJob = (kind: string, fn: (log: (l: string) => void) => Promise<string>) => {
+    const job = startJob(ctx, null, kind);
+    void fn(job.log).then((m) => { job.log(m); job.finish('ok'); }).catch((e) => { job.log(`ошибка: ${(e as Error).message}`); job.finish('failed'); });
+    return { jobId: job.id };
+  };
+  const ipBody = z.object({ ip: z.string().trim().refine((s) => isIP(s) === 4 && isPublicV4(s), 'нужен публичный IPv4') });
+  app.post('/api/v1/settings/panel-ip/prepare', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const { ip } = ipBody.parse(req.body);
+    if (ip === knownPanelIp(ctx)) throw new HttpError(400, 'это нынешний адрес главного сервера');
+    audit(db, who(req), 'panel.ip_prepare', undefined, { ip });
+    return ipJob('panel.ip_prepare', async (log) => {
+      const failed = await prepareIp(ctx, ip, log);
+      return failed.length ? `не разрешён на: ${failed.map((id) => ctx.server(id).name).join(', ')}` : 'готово: когда адрес сменится, панель применит его сама';
+    });
+  });
+  app.post('/api/v1/settings/panel-ip/apply', { preHandler: guard(ctx, 'owner', { otp: true }) }, async (req) => {
+    const { ip } = ipBody.parse(req.body);
+    const from = knownPanelIp(ctx);
+    if (!from) throw new HttpError(409, 'нынешний IP главного сервера неизвестен — задайте адреса исполнителя');
+    if (ip === from) throw new HttpError(400, 'это и есть нынешний адрес');
+    const c = await applyPanelIp(ctx, from, ip, who(req));
+    return ipJob('panel.ip_apply', async (log) => {
+      log(`адреса обновлены: ${from} → ${ip}`);
+      const done = await followUp(ctx, c, log);
+      void deps.bot.notifyAdmins(ipChangeText(ctx, done));
+      return done.cut.length ? 'готово, но не все узлы пускают панель — см. «Требует внимания»' : 'готово';
+    });
   });
 
   /**

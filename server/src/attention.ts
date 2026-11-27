@@ -5,6 +5,7 @@ import { coresOff } from './ops.js';
 import { twinOf, twinText } from './twins.js';
 import { backupPassword, backupSettings } from './backup.js';
 import { relocatedOf } from './relocate.js';
+import { ipChangeOf } from './ipchange.js';
 
 /**
  * Входы, которые за последние 30 минут дошли до выхода serverId (пробы «Авто» через сам выход): по ним видно, что
@@ -59,6 +60,21 @@ export function attentionOf(ctx: Ctx, vpn: Vpn): Attention[] {
       ];
       attention.push({ level: 'warn', title: `Панель восстановлена на новом сервере${moved.toIp ? ` (${moved.toIp})` : ''}`, detail: steps.join(' ') });
     }
+  }
+  // IP главного сервера сменился (ipchange.ts): что осталось сделать руками
+  const ip = ipChangeOf(ctx);
+  if (ip && Date.now() - Date.parse(ip.at) < 14 * 86_400_000) {
+    const cut = servers.filter((s) => s.fail_since && s.mgmt_mode === 'direct' && s.sudo_mode === 'restricted');
+    const env = process.env.FLEET_PUBLIC_HOST?.trim();
+    const steps = [
+      ...(env === ip.from ? [ip.panelHost === 'requested'
+        ? 'Адрес и сертификат панели обновляются на сервере — если панель не перезапустилась за несколько минут, выполните на главном сервере: eskadra public-ip.'
+        : 'Адрес панели в настройках сервера прежний — выполните на главном сервере: eskadra public-ip (обновит адрес и сертификат панели).'] : []),
+      ...(cut.length ? [`Панель не заходит на: ${cut.map((s) => s.name).join(', ')}. Разрешите им новый адрес — в консоли хостера: fleetctl allow ${ip.to}, или переведите их на «через сервер».`] : []),
+      ...(ip.domains.length ? [`Домены ${ip.domains.join(', ')} смотрят на прежний адрес — поменяйте A-запись на ${ip.to}.`] : []),
+    ];
+    if (ip.running) attention.push({ level: 'info', title: `IP главного сервера сменился: ${ip.from} → ${ip.to}`, detail: 'Новый адрес разрешается на узлах…' });
+    else if (steps.length) attention.push({ level: 'warn', title: `IP главного сервера сменился: ${ip.from} → ${ip.to}`, detail: steps.join(' ') });
   }
   if (!backupPassword(ctx)) attention.push({ level: 'warn', title: 'Бэкапы не делаются: не задан пароль бэкапа', detail: 'Задайте пароль и Telegram ID получателей в «Настройках».' });
   else if (backupSettings(db).tgIds.length < 2) attention.push({ level: 'warn', title: 'Бэкапы: меньше двух получателей', detail: 'Если единственный получатель удалит чат, копии пропадут.' });
