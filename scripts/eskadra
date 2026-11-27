@@ -101,9 +101,11 @@ nft_swap() {  # nft_swap OLD NEW
   if [ -n "$1" ]; then
     for h in $(nft -a list chain inet fleet input 2>/dev/null | sed -n "s/.*\"eskadra-port-$1\".*# handle \([0-9]*\).*/\1/p"); do nft delete rule inet fleet input handle "$h"; done
   fi
+  # сохранённая защита уже открывает этот порт — делать ничего не нужно
+  grep -Eq "tcp dport \{[^}]*\b$2\b[^}]*\} accept" /etc/fleet/fleet-fw.nft 2>/dev/null && return 0
   nft -a list chain inet fleet input 2>/dev/null | grep -q "\"eskadra-port-$2\"" && return 0
   nft insert rule inet fleet input tcp dport "$2" accept comment "\"eskadra-port-$2\"" \
-    && warn "защита узла: порт $2 открыт до перезагрузки — примените защиту главного сервера в панели, чтобы насовсем"
+    && warn "порт $2 открыт в защите этого сервера, но только до перезагрузки: защита была применена со старым портом. Чтобы закрепить, примените её ещё раз — «Серверы» → этот сервер → «Защита» → «Применить» (уровень тот же)"
 }
 
 pm() {

@@ -80,6 +80,8 @@ export function pruneServerRefs(ctx: Ctx): string[] {
   // прокси бота через удалённый сервер — выключить
   const bot = getSetting<{ enabled: boolean; serverId: string } | null>(db, 'bot.proxy', null);
   if (bot?.serverId && gone(bot.serverId)) { setSetting(db, 'bot.proxy', { ...bot, enabled: false, serverId: '' }); changed.push('прокси бота'); }
+  // проверки связи с удалёнными серверами
+  db.prepare('DELETE FROM peer_checks WHERE from_id NOT IN (SELECT id FROM servers) OR to_id NOT IN (SELECT id FROM servers)').run();
   // служебные отметки удалённых серверов
   db.prepare(`DELETE FROM settings WHERE (key LIKE 'applied.srv-%' OR key LIKE 'limits.applied.srv-%') AND substr(key, instr(key, 'srv-')) NOT IN (SELECT id FROM servers)`).run();
   return changed;

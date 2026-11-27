@@ -693,7 +693,11 @@ export async function serverRoutes(app: FastifyInstance, ctx: Ctx) {
   // ───── чек-лист (шаг 4) ─────
 
   function autoChecks(r: ServerRow): Record<string, boolean> {
-    const peerFail = db.prepare(`SELECT 1 FROM peer_checks WHERE (from_id = ? OR to_id = ?) AND result = 'fail'`).get(r.id, r.id);
+    // только пары нынешних серверов (как в матрице связности) и только свежие проверки: запись удалённого сервера
+    // или пары, которую больше не проверяют, не должна навсегда держать пункт невыполненным
+    const peerFail = db.prepare(`SELECT 1 FROM peer_checks p
+      JOIN servers a ON a.id = p.from_id JOIN servers b ON b.id = p.to_id
+      WHERE (p.from_id = ? OR p.to_id = ?) AND p.result = 'fail' AND p.checked_at >= ?`).get(r.id, r.id, new Date(Date.now() - 86_400_000).toISOString());
     return {
       panel_ssh: !!r.last_seen_at && !r.fail_since && r.sudo_mode === 'restricted',
       mesh: !peerFail,
