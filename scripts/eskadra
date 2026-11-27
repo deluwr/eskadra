@@ -89,6 +89,21 @@ ufw_swap() {  # ufw_swap OLD NEW COMMENT — открыть новый порт 
     [ -n "$1" ] && firewall-cmd -q --permanent --remove-port="$1/tcp" 2>/dev/null || true
     firewall-cmd -q --permanent --add-port="$2/tcp" && firewall-cmd -q --reload && ok "firewalld: порт $2 открыт${1:+, $1 закрыт}"
   fi
+  nft_swap "$1" "$2"
+}
+
+# Главный сервер — узел флота с защитой: таблица inet fleet открывает порты панели и подписок, какими они были при
+# применении защиты. Новый порт — правилом сразу (до перезагрузки); насовсем — после «Применить защиту» в панели
+# (она напоминает в «Требует внимания»). Свои прежние правила для старого порта убираются.
+nft_swap() {  # nft_swap OLD NEW
+  nft list table inet fleet >/dev/null 2>&1 || return 0
+  local h
+  if [ -n "$1" ]; then
+    for h in $(nft -a list chain inet fleet input 2>/dev/null | sed -n "s/.*\"eskadra-port-$1\".*# handle \([0-9]*\).*/\1/p"); do nft delete rule inet fleet input handle "$h"; done
+  fi
+  nft -a list chain inet fleet input 2>/dev/null | grep -q "\"eskadra-port-$2\"" && return 0
+  nft insert rule inet fleet input tcp dport "$2" accept comment "\"eskadra-port-$2\"" \
+    && warn "защита узла: порт $2 открыт до перезагрузки — примените защиту главного сервера в панели, чтобы насовсем"
 }
 
 pm() {
@@ -271,12 +286,15 @@ if [ $stop = 1 ]; then
 fi
 EOF
   cat >> "$ETC/hooks/pre.sh" <<'EOF'
+# главный сервер — узел флота с защитой: порт 80 закрыт таблицей inet fleet — правило на время проверки (как у узла)
+nft list table inet fleet >/dev/null 2>&1 && nft insert rule inet fleet input tcp dport 80 accept comment '"eskadra-acme"' 2>/dev/null
 if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw allow 80/tcp comment "eskadra acme" >/dev/null; fi
 if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --add-port=80/tcp; fi
 exit 0
 EOF
   cat > "$ETC/hooks/post.sh" <<EOF
 #!/bin/sh
+for h in \$(nft -a list chain inet fleet input 2>/dev/null | sed -n 's/.*eskadra-acme.*# handle \([0-9]*\).*/\1/p'); do nft delete rule inet fleet input handle "\$h"; done
 if command -v ufw >/dev/null && ufw status | grep -q "^Status: active"; then ufw delete allow 80/tcp >/dev/null 2>&1 || true; fi
 if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then firewall-cmd -q --remove-port=80/tcp || true; fi
 # остановленное на время проверки — обратно, даже если выпуск не удался

@@ -6,6 +6,7 @@ import { twinOf, twinText } from './twins.js';
 import { backupPassword, backupSettings } from './backup.js';
 import { relocatedOf } from './relocate.js';
 import { ipChangeOf } from './ipchange.js';
+import { stalePanelPorts } from './firewall.js';
 
 /**
  * Входы, которые за последние 30 минут дошли до выхода serverId (пробы «Авто» через сам выход): по ним видно, что
@@ -41,6 +42,9 @@ export function attentionOf(ctx: Ctx, vpn: Vpn): Attention[] {
     if (s.fw_mode === 'pending') attention.push({ level: 'warn', title: `${s.name}: защита ждёт подтверждения`, detail: `до ${s.fw_pending_until}`, serverId: s.id });
     if (protect && s.fw_mode !== 'enforced' && s.sudo_mode === 'restricted' && !s.checklist_passed_at)
       attention.push({ level: 'info', title: `${s.name}: защита не включена`, detail: 'Отметьте проверку доступа на вкладке «Защита», затем включите защиту.', serverId: s.id });
+    // главный сервер: порт панели или подписок сменили после применения защиты — после перезагрузки он закроется
+    const stale = stalePanelPorts(ctx, s);
+    if (stale.length) attention.push({ level: 'warn', title: `${s.name}: защита не знает порт ${stale.join(', ')}`, detail: `Порт панели или подписок сменился после применения защиты: таблица firewall его не открывает (eskadra port/sub-port открывает его только до перезагрузки). Примените защиту заново на вкладке «Защита».`, serverId: s.id });
     const off = coresOff(ctx, s.id);
     if (off.length) attention.push({ level: 'warn', title: `${s.name}: ${off.join(', ')} остановлен вручную`, detail: 'Пользователи этого сервера без связи. Запустите ядро на вкладке «Хост».', serverId: s.id });
     for (const p of certProblems(s, (id) => vpn.template(id)?.name)) attention.push({ level: p.level, title: p.title, detail: p.detail, serverId: s.id });

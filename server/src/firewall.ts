@@ -158,3 +158,15 @@ export const CHECKLIST: ChecklistItem[] = [
   { id: 'open_list', title: 'Вы посмотрели, что останется открытым (подробности правил на шаге 3)', auto: false },
   { id: 'key_two_paths', title: 'Для высокой защиты: вход по ключу работает и у панели, и у вас', auto: false },
 ];
+
+/**
+ * Главный сервер под защитой: порты панели и подписок, которых нет в применённой таблице firewall (сменили через
+ * eskadra port / sub-port или в «Настройках» после применения защиты). Таблица открывает их строкой
+ * «tcp dport { … } accept»; после перезагрузки сервер поднимает её из сохранённого плана — без нового порта.
+ */
+export function stalePanelPorts(ctx: Ctx, s: ServerRow): number[] {
+  if (s.mgmt_mode !== 'local' || s.fw_mode !== 'enforced' || !s.fw_plan) return [];
+  const open = new Set<number>();
+  for (const m of s.fw_plan.matchAll(/^\s*tcp dport \{ ([\d, ]+) \} accept$/gm)) for (const p of m[1]!.split(',')) open.add(Number(p.trim()));
+  return panelPorts(ctx.db).filter((p) => !open.has(p));
+}
